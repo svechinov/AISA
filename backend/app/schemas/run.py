@@ -38,9 +38,14 @@ class RunRead(BaseModel):
     master_email: dict | None = None
     master_email_subject: str | None = None
     master_email_body: str | None = None
+    sender_signature_html: str | None = None
 
     class Config:
         from_attributes = True
+
+
+class RunSignaturePatch(BaseModel):
+    signature_html: str = ""
 
 
 class RunCardRead(BaseModel):

@@ -171,6 +171,8 @@ def _ensure_runs_metadata_columns() -> None:
                 conn.execute(text("ALTER TABLE runs ADD COLUMN closed_at DATETIME"))
             else:
                 conn.execute(text("ALTER TABLE runs ADD COLUMN closed_at TIMESTAMP"))
+        if "sender_signature_html" not in columns:
+            conn.execute(text("ALTER TABLE runs ADD COLUMN sender_signature_html TEXT"))
 
 
 def _ensure_asset_packets_reply_draft_id_unique() -> None:

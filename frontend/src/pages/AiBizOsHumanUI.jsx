@@ -25,6 +25,7 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
+  CircleAlert,
   FileText,
   Mail,
   Pencil,
@@ -47,8 +48,6 @@ const API_BASE =
     : import.meta.env.DEV
       ? "/api"
       : "http://127.0.0.1:8000";
-
-const API_LABEL = API_BASE === "/api" ? `Vite proxy → ${DEV_PROXY_TARGET}` : API_BASE;
 
 const DEFAULT_OUTREACH_BRIEF =
   "Offer:\nTarget:\nRoles:\nGoal:\nTone: Professional\nNotes:\n";
@@ -326,7 +325,7 @@ const MAIN_NAV = [
   { value: "drafts", label: "Drafts" },
   { value: "events", label: "Events" },
   { value: "threads", label: "Threads" },
-  { value: "reply-drafts", label: "Reply Drafts" },
+  { value: "reply-drafts", label: "Reply drafts" },
   { value: "follow-ups", label: "Follow-ups" },
   { value: "reminders", label: "Reminders" },
   { value: "assets", label: "Assets" },
@@ -395,6 +394,9 @@ export default function AiBizOsHumanUI() {
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const [draftForm, setDraftForm] = useState({ subject: "", body: "" });
+  const [signatureSetupOpen, setSignatureSetupOpen] = useState(false);
+  const [signatureFormHtml, setSignatureFormHtml] = useState("");
+  const [signatureEditorKey, setSignatureEditorKey] = useState(0);
 
   const loadProjects = useCallback(async (listView, options = {}) => {
     const { signal } = options;
@@ -438,6 +440,12 @@ export default function AiBizOsHumanUI() {
       setError(String(e.message || e));
     }
   };
+
+  useEffect(() => {
+    if (!editingContact?.id) return;
+    const c = contacts.find((x) => x.id === editingContact.id);
+    if (c?.email_health === "dead_mailbox") setEditingContact(null);
+  }, [contacts, editingContact?.id]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -728,6 +736,18 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  const deleteDeadMailboxDraft = async (draftId) => {
+    if (!selectedRun) return;
+    try {
+      setError("");
+      await api(`/email-drafts/${draftId}`, { method: "DELETE" });
+      if (editDraft?.id === draftId) setEditDraft(null);
+      await loadRunDetails(selectedRun.id);
+    } catch (e) {
+      setError(String(e.message || e));
+    }
+  };
+
   const sendDraft = async (draftId) => {
     if (!selectedRun) return;
     try {
@@ -765,6 +785,27 @@ export default function AiBizOsHumanUI() {
       });
       setEditDraft(null);
       await loadRunDetails(selectedRun.id);
+    } catch (e) {
+      setError(String(e.message || e));
+    }
+  };
+
+  const openSignatureSetup = () => {
+    setSignatureFormHtml(selectedRun?.sender_signature_html ?? "");
+    setSignatureEditorKey((k) => k + 1);
+    setSignatureSetupOpen(true);
+  };
+
+  const saveSignatureSetup = async () => {
+    if (!selectedRun?.id) return;
+    try {
+      setError("");
+      await api(`/runs/${selectedRun.id}/signature`, {
+        method: "PATCH",
+        body: { signature_html: signatureFormHtml },
+      });
+      await loadRunDetails(selectedRun.id);
+      setSignatureSetupOpen(false);
     } catch (e) {
       setError(String(e.message || e));
     }
@@ -885,7 +926,13 @@ export default function AiBizOsHumanUI() {
     openNewRunDialog,
   ]);
 
+  const contactHasBadEmailHealth = (c) =>
+    c.email_health === "dead_mailbox" || c.email_health === "bounced";
+
   const contactCardClass = (c) => {
+    if (contactHasBadEmailHealth(c)) {
+      return "rounded-2xl border-2 border-red-700/50 bg-red-950/10 shadow-none dark:border-red-700/40 dark:bg-red-950/20";
+    }
     const rs = c.review_status;
     if (["approved", "edited"].includes(rs)) {
       return "rounded-2xl border border-green-600/40 bg-green-500/5 shadow-none";
@@ -939,25 +986,38 @@ export default function AiBizOsHumanUI() {
     const isPending = rs === "pending";
     const isRejected = rs === "rejected";
     const isReplacement = contact.source_json?.source === "replacement_search";
+    const badEmailHealth = contactHasBadEmailHealth(contact);
+    const isDeadMailbox = contact.email_health === "dead_mailbox";
     return (
       <Card key={contact.id} className={contactCardClass(contact)}>
         <CardContent className="p-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
+                {badEmailHealth ? (
+                  <CircleAlert
+                    className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
+                    aria-hidden
+                  />
+                ) : null}
                 <div className="text-lg font-semibold">{contact.company || "Unnamed company"}</div>
                 {isReplacement ? (
                   <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
                     Replacement
                   </Badge>
                 ) : null}
-                <StatusBadge value={contact.status} />
-                <StatusBadge value={contact.review_status} />
+                {!badEmailHealth ? <StatusBadge value={contact.status} /> : null}
+                {!badEmailHealth ? <StatusBadge value={contact.review_status} /> : null}
+                {badEmailHealth ? (
+                  <Badge variant="destructive" className="font-mono text-xs">
+                    {contact.email_health}
+                  </Badge>
+                ) : null}
                 {!contact.email ? <Badge variant="destructive">No email</Badge> : null}
                 {(contact.confidence || "").toLowerCase() === "low" ? (
                   <Badge variant="secondary">Low confidence</Badge>
                 ) : null}
-                {contact.email_health && contact.email_health !== "unknown" ? (
+                {!badEmailHealth && contact.email_health && contact.email_health !== "unknown" ? (
                   <Badge variant="outline" className="text-xs">
                     Email: {pretty(contact.email_health)}
                   </Badge>
@@ -970,31 +1030,35 @@ export default function AiBizOsHumanUI() {
               <div className="text-xs text-muted-foreground">{contact.website || "No website"}</div>
             </div>
             <div className="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 lg:w-auto lg:flex-nowrap">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() =>
-                  setEditingContact({
-                    id: contact.id,
-                    name: contact.name ?? "",
-                    role: contactRoleFromPayload(contact),
-                    email: contact.email ?? "",
-                  })
-                }
-              >
-                <Pencil className="mr-1 h-3 w-3" /> Edit
-              </Button>
+              {!isDeadMailbox ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    setEditingContact({
+                      id: contact.id,
+                      name: contact.name ?? "",
+                      role: contactRoleFromPayload(contact),
+                      email: contact.email ?? "",
+                    })
+                  }
+                >
+                  <Pencil className="mr-1 h-3 w-3" /> Edit
+                </Button>
+              ) : null}
               {isPending ? (
                 <>
                   <Button size="sm" onClick={() => approveContact(contact.id)}>
                     Approve
                   </Button>
-                  <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
-                    Reject
-                  </Button>
+                  {!isDeadMailbox ? (
+                    <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
+                      Reject
+                    </Button>
+                  ) : null}
                 </>
               ) : null}
-              {!isPending && !isRejected ? (
+              {!isPending && !isRejected && !isDeadMailbox ? (
                 <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
                   Reject
                 </Button>
@@ -1025,7 +1089,7 @@ export default function AiBizOsHumanUI() {
               ) : null}
             </div>
           </div>
-          {editingContact?.id === contact.id ? (
+          {editingContact?.id === contact.id && !isDeadMailbox ? (
             <div className="mt-3 space-y-2 border-t border-border pt-3">
               <div>
                 <div className="mb-1 text-xs text-muted-foreground">Recipient name</div>
@@ -1115,6 +1179,8 @@ export default function AiBizOsHumanUI() {
   const renderDraftCard = (draft) => {
     const draftContact = contactById.get(draft.contact_id);
     const isReplacementDraft = draftContact?.source_json?.source === "replacement_search";
+    const draftLifecycle = draft.tracking_status ?? draft.status;
+    const isDeadMailboxDraft = draftLifecycle === "dead_mailbox";
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
@@ -1128,7 +1194,7 @@ export default function AiBizOsHumanUI() {
                     Replacement draft
                   </Badge>
                 ) : null}
-                <SendLifecycleBadge status={draft.tracking_status ?? draft.status} />
+                <SendLifecycleBadge status={draftLifecycle} />
                 <StatusBadge value={draft.review_status} />
               </div>
               <div className="mt-2 text-sm">
@@ -1139,49 +1205,62 @@ export default function AiBizOsHumanUI() {
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={() => openEditDraft(draft)}>
-                <Pencil className="mr-1 h-3 w-3" /> Edit
-              </Button>
-              {draft.review_status === "pending" ? (
+              {isDeadMailboxDraft ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => void deleteDeadMailboxDraft(draft.id)}
+                >
+                  Delete
+                </Button>
+              ) : (
                 <>
-                  <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
-                    Approve
+                  <Button size="sm" variant="outline" onClick={() => openEditDraft(draft)}>
+                    <Pencil className="mr-1 h-3 w-3" /> Edit
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => reviewDraft(draft.id, "approved")}>
-                    Send later
-                  </Button>
-                  {canRegenerateOutboundDraft(draft) ? (
-                    <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
-                      Regenerate
+                  {draft.review_status === "pending" ? (
+                    <>
+                      <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
+                        Approve
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={() => reviewDraft(draft.id, "approved")}>
+                        Send later
+                      </Button>
+                      {canRegenerateOutboundDraft(draft) ? (
+                        <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
+                          Regenerate
+                        </Button>
+                      ) : null}
+                      <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
+                        Reject
+                      </Button>
+                    </>
+                  ) : null}
+                  {["approved", "edited"].includes(draft.review_status) ? (
+                    <>
+                      {canRegenerateOutboundDraft(draft) ? (
+                        <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
+                          Regenerate
+                        </Button>
+                      ) : null}
+                      <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
+                        Reject
+                      </Button>
+                    </>
+                  ) : null}
+                  {draft.review_status === "rejected" ? (
+                    <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
+                      Approve
                     </Button>
                   ) : null}
-                  <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
-                    Reject
-                  </Button>
-                </>
-              ) : null}
-              {["approved", "edited"].includes(draft.review_status) ? (
-                <>
-                  {canRegenerateOutboundDraft(draft) ? (
-                    <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
-                      Regenerate
+                  {canSendDraft(draft) ? (
+                    <Button size="sm" onClick={() => sendDraft(draft.id)}>
+                      Send
                     </Button>
                   ) : null}
-                  <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
-                    Reject
-                  </Button>
                 </>
-              ) : null}
-              {draft.review_status === "rejected" ? (
-                <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
-                  Approve
-                </Button>
-              ) : null}
-              {canSendDraft(draft) ? (
-                <Button size="sm" onClick={() => sendDraft(draft.id)}>
-                  Send
-                </Button>
-              ) : null}
+              )}
             </div>
           </div>
           {draft.error_message ? (
@@ -1189,7 +1268,10 @@ export default function AiBizOsHumanUI() {
               {draft.error_message}
             </div>
           ) : null}
-          <EmailDraftBodyPreview body={draft.body} />
+          <EmailDraftBodyPreview
+            body={draft.body}
+            showSignaturePlaceholder={Boolean((selectedRun?.sender_signature_html ?? "").trim())}
+          />
         </div>
       </CardContent>
     </Card>
@@ -1206,10 +1288,7 @@ export default function AiBizOsHumanUI() {
                 <span>AI Biz OS</span>
                 <span className="text-xs font-normal tabular-nums text-primary/80">v{appPkg.version}</span>
               </div>
-              <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Business workflow dashboard</h1>
-              <p className="mt-1 text-sm text-muted-foreground">
-                API: <span className="font-mono text-xs">{API_LABEL}</span>
-              </p>
+              <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Business outreach dashboard</h1>
             </div>
             <div className="flex flex-wrap gap-2">
               <Dialog>
@@ -1693,13 +1772,23 @@ export default function AiBizOsHumanUI() {
                 ) : (
                   <div className="space-y-6">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <Button
-                        type="button"
-                        onClick={() => void sendAllApproved()}
-                        disabled={!selectedRun || approvedDrafts === 0}
-                      >
-                        Send all approved
-                      </Button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          onClick={() => void sendAllApproved()}
+                          disabled={!selectedRun || approvedDrafts === 0}
+                        >
+                          Send all approved
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => openSignatureSetup()}
+                          disabled={!selectedRun}
+                        >
+                          Signature setup
+                        </Button>
+                      </div>
                       <NativeFilterSelect
                         className="w-full sm:w-[220px]"
                         value={draftFilter}
@@ -1748,6 +1837,7 @@ export default function AiBizOsHumanUI() {
             {!["runs", "contacts", "drafts"].includes(mainNav) && selectedRun?.id ? (
               <TrackingView
                 runId={selectedRun.id}
+                runSignatureHtml={selectedRun.sender_signature_html ?? ""}
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
               />
@@ -1922,6 +2012,38 @@ export default function AiBizOsHumanUI() {
                 Cancel
               </Button>
               <Button onClick={saveEditDraft}>Save</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {signatureSetupOpen ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/50"
+            aria-label="Close"
+            onClick={() => setSignatureSetupOpen(false)}
+          />
+          <div className="relative z-50 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg">
+            <h2 className="text-lg font-semibold">Signature setup</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Rich-text signature for this run. It is appended when sending outreach and reply drafts. After you save, if
+              a signature is set, outreach and reply draft previews add{" "}
+              <span className="font-mono text-xs">[Signature]</span> on its own line at the end.
+            </p>
+            <div className="mt-4">
+              <EmailDraftRichTextEditor
+                key={signatureEditorKey}
+                initialBody={signatureFormHtml}
+                onChange={setSignatureFormHtml}
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setSignatureSetupOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={() => void saveSignatureSetup()}>Save</Button>
             </div>
           </div>
         </div>

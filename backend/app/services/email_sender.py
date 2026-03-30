@@ -16,6 +16,7 @@ from app.repositories.email_thread_repo import (
     touch_email_thread,
 )
 from app.services.email_provider import send_email_via_provider
+from app.services.sender_signature import append_signature_to_body
 
 
 def send_one_draft(db: Session, draft_id: int) -> dict:
@@ -36,6 +37,8 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
     if run and run.closed_at is not None:
         raise ValueError("Run is closed — cannot send new outreach")
 
+    body_out = append_signature_to_body(draft.body, getattr(run, "sender_signature_html", None) if run else None)
+
     mark_email_draft_sending(db, draft)
 
     create_email_event(
@@ -51,7 +54,7 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
         result = send_email_via_provider(
             to_email=draft.to_email.strip(),
             subject=draft.subject,
-            body=draft.body,
+            body=body_out,
         )
 
         mark_email_draft_sent(
@@ -95,7 +98,7 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
             from_email=None,
             to_email=draft.to_email,
             subject=draft.subject,
-            body=draft.body,
+            body=body_out,
             provider_message_id=result.get("provider_message_id"),
         )
 

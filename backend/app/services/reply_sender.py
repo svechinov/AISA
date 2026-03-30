@@ -10,6 +10,7 @@ from app.repositories.email_attachment_repo import create_email_attachment
 from app.repositories.email_event_repo import create_email_event
 from app.repositories.email_message_repo import create_email_message
 from app.repositories.email_thread_repo import get_email_thread, touch_email_thread
+from app.repositories.run_repo import get_run
 from app.repositories.reply_draft_repo import (
     get_reply_draft,
     mark_reply_draft_failed,
@@ -23,6 +24,7 @@ from app.services.asset_attachment_service import (
 )
 from app.services.asset_packet_service import lock_packet_after_send, render_assets_block_for_email
 from app.services.email_provider import send_email_via_provider
+from app.services.sender_signature import append_signature_to_body
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +68,14 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     packet = get_packet_by_reply_draft_id(db, reply_draft.id)
     validate_packet_for_reply_send(reply_draft, packet)
 
+    run = get_run(db, reply_draft.run_id)
+    sig_html = getattr(run, "sender_signature_html", None) if run else None
+
     if not packet:
+        final_body = append_signature_to_body(base_body, sig_html)
         return {
             "base_body": base_body,
-            "final_body": base_body,
+            "final_body": final_body,
             "attachments": [],
             "attachment_candidates": [],
             "real_attachments": [],
@@ -84,7 +90,8 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     sendable, link_only, skipped = resolve_sendable_attachments(db, packet)
     sendable = finalize_sendable_attachments(db, sendable, link_only, skipped)
     packet_block = render_assets_block_for_email(link_only)
-    final_body = _combine_body(base_body, packet_block)
+    combined = _combine_body(base_body, packet_block)
+    final_body = append_signature_to_body(combined, sig_html)
 
     public_candidates = [_public_attachment_candidate(m) for m in sendable]
     real_attachments = [

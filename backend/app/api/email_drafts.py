@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from starlette.responses import Response
 
 from app.db import get_db
 from app.repositories.email_draft_repo import (
+    delete_email_draft,
     get_email_draft,
     list_email_drafts_by_run,
     update_email_draft_fields,
@@ -79,3 +81,18 @@ def regenerate_email_draft_route(draft_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.delete("/{draft_id}", status_code=204, response_class=Response)
+def delete_dead_mailbox_email_draft_route(draft_id: int, db: Session = Depends(get_db)):
+    """Hard-delete a draft that was marked dead mailbox (Review workspace cleanup)."""
+    draft = get_email_draft(db, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Email draft not found")
+    if draft.tracking_status != "dead_mailbox":
+        raise HTTPException(
+            status_code=400,
+            detail="Only drafts with tracking dead mailbox can be deleted",
+        )
+    delete_email_draft(db, draft)
+    return Response(status_code=204)

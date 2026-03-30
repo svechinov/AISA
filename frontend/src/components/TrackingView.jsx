@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
+import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -6,9 +8,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NativeFilterSelect } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   AlertTriangle,
+  CircleAlert,
   Eye,
   EyeOff,
   FilePenLine,
@@ -18,7 +20,6 @@ import {
   Pencil,
   Reply,
   Send,
-  XCircle,
 } from "lucide-react";
 
 const ENV_API = import.meta.env.VITE_API_BASE?.trim();
@@ -86,10 +87,12 @@ function threadClassificationBadgeClass(label) {
 
 export default function TrackingView({
   runId,
+  runSignatureHtml = "",
   activeTab,
   onActiveTabChange,
   singleTabMode = false,
 }) {
+  const showSignaturePlaceholder = Boolean((runSignatureHtml ?? "").trim());
   const [events, setEvents] = useState([]);
   const [summary, setSummary] = useState(null);
   const [drafts, setDrafts] = useState([]);
@@ -119,7 +122,6 @@ export default function TrackingView({
   const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [actionNote, setActionNote] = useState("");
   const [innerTab, setInnerTab] = useState("events");
 
   useEffect(() => {
@@ -222,7 +224,8 @@ export default function TrackingView({
     if (type === "queued") return "bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-900/50 dark:text-slate-200";
     if (type === "replied") return "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-200";
     if (type === "bounced") return "bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-950/40 dark:text-yellow-100";
-    if (type === "dead_mailbox") return "bg-red-100 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-200";
+    if (type === "dead_mailbox")
+      return "border-2 border-red-700/50 bg-red-950/10 text-red-600 dark:border-red-700/40 dark:bg-red-950/20 dark:text-red-400";
     if (type === "failed") return "bg-red-100 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-200";
     if (type === "reply_sent") return "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-950/40 dark:text-teal-200";
     return "bg-muted text-muted-foreground border-border";
@@ -232,7 +235,8 @@ export default function TrackingView({
     if (type === "sent") return <Send className="h-4 w-4" />;
     if (type === "replied") return <Reply className="h-4 w-4" />;
     if (type === "bounced") return <MailWarning className="h-4 w-4" />;
-    if (type === "dead_mailbox") return <XCircle className="h-4 w-4" />;
+    if (type === "dead_mailbox")
+      return <CircleAlert className="h-4 w-4 text-red-600 dark:text-red-400" aria-hidden />;
     if (type === "failed") return <AlertTriangle className="h-4 w-4" />;
     if (type === "reply_sent") return <Reply className="h-4 w-4" />;
     return <MailCheck className="h-4 w-4" />;
@@ -246,6 +250,8 @@ export default function TrackingView({
   }, [events, filter]);
 
   const contactById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
+
+  const draftById = useMemo(() => new Map(drafts.map((d) => [d.id, d])), [drafts]);
 
   const activeReminderByFollowUpTaskId = useMemo(() => {
     const candidates = reminders.filter(
@@ -371,14 +377,7 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Generate drafts failed (${res.status})`);
         return;
       }
-      const data = await res.json();
-      const created = data.drafts_created ?? 0;
-      const skipped = (data.skipped_existing_draft_contact_ids ?? []).length;
-      const found = data.replacement_contacts_found ?? 0;
-      setActionNote(
-        `Replacement drafts: ${created} created, ${skipped} skipped (approved replacement contacts: ${found}).`,
-      );
-      window.setTimeout(() => setActionNote(""), 10000);
+      await res.json();
       await load();
     } catch {
       setError("Generate replacement drafts failed — check network / backend.");
@@ -395,13 +394,8 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Send replacement drafts failed (${res.status})`);
         return;
       }
-      const data = await res.json();
+      await res.json();
       await load();
-      const found = data?.replacement_drafts_found ?? 0;
-      const sent = data?.sent ?? 0;
-      const failed = data?.failed ?? 0;
-      setActionNote(`Replacement drafts: found ${found}, sent ${sent}, failed ${failed}.`);
-      window.setTimeout(() => setActionNote(""), 10000);
     } catch {
       setError("Send replacement drafts failed — check network / backend.");
     }
@@ -448,8 +442,6 @@ export default function TrackingView({
         return;
       }
       await load();
-      setActionNote("Mock reply recorded via inbox (inbound message + thread updated).");
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Mock inbox reply failed — check network / backend.");
     }
@@ -475,7 +467,6 @@ export default function TrackingView({
         }
         return [...prev, task];
       });
-      setActionNote("");
     } catch {
       setError("Create replacement task failed — check network / backend.");
     }
@@ -526,14 +517,8 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Generate failed (${res.status})`);
         return;
       }
-      const data = await res.json();
+      await res.json();
       await load();
-      setActionNote(
-        data.deduplicated
-          ? `Reply draft already exists (#${data.reply_draft_id}).`
-          : `Reply draft #${data.reply_draft_id} created.`,
-      );
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Generate reply draft failed — check network / backend.");
     }
@@ -550,14 +535,8 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Create failed (${res.status})`);
         return;
       }
-      const data = await res.json();
+      await res.json();
       await load();
-      setActionNote(
-        data.deduplicated
-          ? `Next action already exists (#${data.task_id}, ${data.task_type}).`
-          : `Next action #${data.task_id} created (${data.task_type}).`,
-      );
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Create next action failed.");
     }
@@ -595,14 +574,8 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Create reminder failed (${res.status})`);
         return;
       }
-      const data = await res.json();
+      await res.json();
       await load();
-      setActionNote(
-        data.deduplicated
-          ? `Reminder already active (#${data.reminder_id}).`
-          : `Reminder #${data.reminder_id} created.`,
-      );
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Create reminder failed.");
     }
@@ -657,12 +630,8 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Trigger failed (${res.status})`);
         return;
       }
-      const data = await res.json();
+      await res.json();
       await load();
-      setActionNote(
-        `Trigger due: found ${data.due_found ?? 0}, set triggered ${data.triggered ?? 0}.`,
-      );
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Trigger due reminders failed.");
     }
@@ -707,14 +676,8 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Build packet failed (${res.status})`);
         return;
       }
-      const data = await res.json();
+      await res.json();
       await load();
-      setActionNote(
-        data.deduplicated
-          ? `Asset packet already exists (#${data.packet_id}).`
-          : `Asset packet #${data.packet_id} built.`,
-      );
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Build asset packet failed.");
     }
@@ -808,8 +771,6 @@ export default function TrackingView({
         return;
       }
       await load();
-      setActionNote(`Packet cloned as draft #${data.id}.`);
-      window.setTimeout(() => setActionNote(""), 8000);
     } catch {
       setError("Save as new packet failed.");
     }
@@ -1018,7 +979,6 @@ export default function TrackingView({
       ) : null}
 
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
-      {actionNote ? <div className="text-sm text-muted-foreground">{actionNote}</div> : null}
 
       {!singleTabMode && summary ? (
         <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
@@ -1177,8 +1137,19 @@ export default function TrackingView({
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-4">
-                {groupedEvents.map(({ draftId, draft, events: draftEvents }) => (
-                  <div key={draftId} className="rounded-2xl bg-muted/25 p-4">
+                {groupedEvents.map(({ draftId, draft, events: draftEvents }) => {
+                  const chainEndsDeadMailbox =
+                    draftEvents.length > 0 &&
+                    draftEvents[draftEvents.length - 1].event_type === "dead_mailbox";
+                  return (
+                  <div
+                    key={draftId}
+                    className={
+                      chainEndsDeadMailbox
+                        ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
+                        : "rounded-2xl bg-muted/25 p-4"
+                    }
+                  >
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -1235,10 +1206,14 @@ export default function TrackingView({
                         </Button>
                       </div>
                     </div>
-                    <div className="mt-4 space-y-3 border-t border-border/50 pt-4">
+                    <div
+                      className={`mt-4 space-y-3 border-t pt-4 ${chainEndsDeadMailbox ? "border-red-700/30" : "border-border/50"}`}
+                    >
                       {draftEvents.map((event, index) => (
                         <div key={event.id}>
-                          <div className="flex items-center justify-between gap-3 rounded-2xl bg-muted/40 p-3">
+                          <div
+                            className={`flex items-center justify-between gap-3 rounded-2xl p-3 ${chainEndsDeadMailbox ? "bg-red-950/15 dark:bg-red-950/25" : "bg-muted/40"}`}
+                          >
                             <div className="flex items-center gap-3">
                               <div className={`rounded-xl border p-2 ${eventTone(event.event_type)}`}>
                                 {eventIcon(event.event_type)}
@@ -1255,7 +1230,8 @@ export default function TrackingView({
                       ))}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {!groupedEvents.length ? (
                   <div className="text-sm text-muted-foreground">No events yet.</div>
                 ) : null}
@@ -1288,14 +1264,35 @@ export default function TrackingView({
               const contact = contactById.get(t.contact_id);
               const counts = messageCountsByThreadId.get(t.id) || { in: 0, out: 0 };
               const label = t.classification;
+              const linkedDraft = t.draft_id != null ? draftById.get(t.draft_id) : undefined;
+              const draftLifecycle = linkedDraft
+                ? linkedDraft.tracking_status ?? linkedDraft.status
+                : null;
+              const isThreadDeadMailbox =
+                draftLifecycle === "dead_mailbox" || contact?.email_health === "dead_mailbox";
               return (
                 <div
                   key={t.id}
-                  className="flex flex-col gap-3 rounded-2xl bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+                  className={
+                    isThreadDeadMailbox
+                      ? "flex flex-col gap-3 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
+                      : "flex flex-col gap-3 rounded-2xl bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+                  }
                 >
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
+                        {isThreadDeadMailbox ? (
+                          <CircleAlert
+                            className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
+                            aria-hidden
+                          />
+                        ) : null}
                         <div className="font-medium">{contact?.company || `Contact #${t.contact_id}`}</div>
+                        {isThreadDeadMailbox ? (
+                          <Badge variant="destructive" className="font-mono text-xs">
+                            dead_mailbox
+                          </Badge>
+                        ) : null}
                         {label ? (
                           <Badge
                             variant="default"
@@ -1561,36 +1558,8 @@ export default function TrackingView({
                         </div>
                       </div>
                     ) : null}
-                    {isEditing ? (
-                      <div className="space-y-2 border-t border-border pt-3">
-                        <Input
-                          value={replyEditing.subject}
-                          onChange={(e) =>
-                            setReplyEditing((prev) => (prev ? { ...prev, subject: e.target.value } : prev))
-                          }
-                        />
-                        <Textarea
-                          className="min-h-[120px] rounded-xl"
-                          value={replyEditing.body}
-                          onChange={(e) =>
-                            setReplyEditing((prev) => (prev ? { ...prev, body: e.target.value } : prev))
-                          }
-                        />
-                        <div className="flex gap-2">
-                          <Button type="button" size="sm" onClick={() => void saveReplyDraftEdit()}>
-                            Save
-                          </Button>
-                          <Button type="button" size="sm" variant="outline" onClick={() => setReplyEditing(null)}>
-                            Cancel
-                          </Button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="text-sm font-medium">{rd.subject}</div>
-                        <div className="rounded-xl bg-muted/40 p-3 text-sm whitespace-pre-wrap">{rd.body}</div>
-                      </>
-                    )}
+                    <div className="text-sm font-medium">{rd.subject}</div>
+                    <EmailDraftBodyPreview body={rd.body} showSignaturePlaceholder={showSignaturePlaceholder} />
                     {rd.error_message ? (
                       <div className="text-sm text-destructive">{rd.error_message}</div>
                     ) : null}
@@ -2221,7 +2190,7 @@ export default function TrackingView({
             <CardHeader>
               <CardTitle>Dead mailboxes</CardTitle>
               <CardDescription>
-                Contacts marked with dead-mailbox email health. Create replacement tasks from here or from the queue.
+                Contacts marked with dead-mailbox email health. Create replacement task from Re-search queue.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
@@ -2320,6 +2289,42 @@ export default function TrackingView({
           </Card>
         </TabsContent>
       </Tabs>
+
+      {replyEditing ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/50"
+            aria-label="Close"
+            onClick={() => setReplyEditing(null)}
+          />
+          <div className="relative z-50 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg">
+            <h2 className="text-lg font-semibold">Edit reply draft</h2>
+            <div className="mt-4 grid gap-3">
+              <Input
+                placeholder="Subject"
+                value={replyEditing.subject}
+                onChange={(e) =>
+                  setReplyEditing((prev) => (prev ? { ...prev, subject: e.target.value } : prev))
+                }
+              />
+              <EmailDraftRichTextEditor
+                key={replyEditing.id}
+                initialBody={replyEditing.body}
+                onChange={(body) => setReplyEditing((prev) => (prev ? { ...prev, body } : prev))}
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setReplyEditing(null)}>
+                Cancel
+              </Button>
+              <Button type="button" onClick={() => void saveReplyDraftEdit()}>
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {threadModalId != null ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

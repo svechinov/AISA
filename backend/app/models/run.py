@@ -29,3 +29,5 @@ class Run(Base):
     master_email: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     master_email_subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
     master_email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Rich-text (HTML) signature for this run; appended on send for outreach + reply drafts.
+    sender_signature_html: Mapped[str | None] = mapped_column(Text, nullable=True)

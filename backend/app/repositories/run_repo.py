@@ -97,6 +97,17 @@ def get_run_master_email_parts(run: Run) -> tuple[str, str]:
     return s2, b2
 
 
+def update_run_signature(db: Session, run_id: int, signature_html: str | None) -> Run | None:
+    run = get_run(db, run_id)
+    if not run:
+        return None
+    run.sender_signature_html = signature_html
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
 def update_run_status(db: Session, run: Run, status: str):
     run.status = status
 

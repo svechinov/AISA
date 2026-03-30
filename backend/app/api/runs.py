@@ -3,14 +3,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.repositories.project_repo import get_project
-from app.repositories.run_repo import close_run, create_run, get_run, list_runs_by_project
+from app.repositories.run_repo import close_run, create_run, get_run, list_runs_by_project, update_run_signature
 from app.services.run_context_service import (
     build_master_prompt_text,
     merge_inner_from_legacy_fields,
     parse_outreach_brief_text,
     wrap_context,
 )
-from app.schemas.run import RunCardRead, RunRead, RunStart, RunWorkspaceRead
+from app.schemas.run import RunCardRead, RunRead, RunSignaturePatch, RunStart, RunWorkspaceRead
 from app.services.orchestrator import continue_workflow_after_review, run_workflow
 from app.services.replacement_draft_service import generate_replacement_drafts
 from app.services.replacement_send_service import send_approved_replacement_drafts
@@ -154,6 +154,14 @@ def send_replacement_drafts_route(run_id: int, db: Session = Depends(get_db)):
         return send_approved_replacement_drafts(db, run_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.patch("/{run_id}/signature", response_model=RunRead)
+def patch_run_signature_route(run_id: int, payload: RunSignaturePatch, db: Session = Depends(get_db)):
+    run = update_run_signature(db, run_id, payload.signature_html.strip() or None)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 @router.get("/{run_id}", response_model=RunRead)
