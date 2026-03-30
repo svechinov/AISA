@@ -1,0 +1,22 @@
+---
+description: Локальный деплой ai-biz-os одной командой (Docker backend + сборка фронта + Vite в фоне)
+alwaysApply: true
+---
+
+# Деплой ai-biz-os (локально)
+
+- **Одна команда** из корня репозитория `ai-biz-os`:
+
+```bash
+bash scripts/deploy-local.sh
+```
+
+- Скрипт делает: **пересборка и перезапуск бэкенда** через Docker Compose (`infra/docker-compose.yml`, сервис `backend`, режим **detached**), затем **`npm run build`** во `frontend/`, затем **перезапуск Vite** через `npm run dev` (использует `detach-dev.sh` — процесс в **nohup**, окно терминала можно закрыть).
+
+- **UI:** http://localhost:5173/
+- **API (Swagger):** http://localhost:8000/docs#/
+
+- Остановка фронта в фоне: `cd frontend && npm run dev:stop`
+- Остановка стека Docker: `docker compose -f infra/docker-compose.yml down` (из корня `ai-biz-os`)
+
+Не оставлять интерактивный `vite` / `uvicorn` без nohup в инструкциях к деплою — пользователь должен иметь возможность закрыть терминал.

@@ -1,0 +1,127 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+  }
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 6.5%;
+    --card-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --destructive: 0 62.8% 50.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 20%;
+    --input: 217.2 32.6% 20%;
+    --ring: 224.3 76.3% 58%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+/* TipTap / ProseMirror (email draft editor) */
+.tiptap-editor p {
+  margin: 0.35em 0;
+}
+.tiptap-editor p:first-child {
+  margin-top: 0;
+}
+.tiptap-editor p:last-child {
+  margin-bottom: 0;
+}
+.tiptap-editor ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+  margin: 0.35em 0;
+}
+.tiptap-editor ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+  margin: 0.35em 0;
+}
+.tiptap-editor blockquote {
+  border-left: 3px solid hsl(var(--border));
+  padding-left: 0.75rem;
+  margin: 0.5em 0;
+  color: hsl(var(--muted-foreground));
+}
+.tiptap-editor h1,
+.tiptap-editor h2,
+.tiptap-editor h3 {
+  font-weight: 600;
+  margin: 0.6em 0 0.3em;
+}
+.tiptap-editor h1 {
+  font-size: 1.15rem;
+}
+.tiptap-editor h2 {
+  font-size: 1.05rem;
+}
+.tiptap-editor h3 {
+  font-size: 1rem;
+}
+
+/* Sanitized HTML preview in draft cards */
+.email-draft-html-preview p {
+  margin: 0.5em 0;
+}
+.email-draft-html-preview p:first-child {
+  margin-top: 0;
+}
+.email-draft-html-preview p:last-child {
+  margin-bottom: 0;
+}
+.email-draft-html-preview ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+  margin: 0.5em 0;
+}
+.email-draft-html-preview ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+  margin: 0.5em 0;
+}
+.email-draft-html-preview blockquote {
+  border-left: 3px solid hsl(var(--border));
+  padding-left: 0.75rem;
+  margin: 0.5em 0;
+  color: hsl(var(--muted-foreground));
+}
+.email-draft-html-preview h1,
+.email-draft-html-preview h2,
+.email-draft-html-preview h3 {
+  font-weight: 600;
+  margin: 0.75em 0 0.35em;
+}
+.email-draft-html-preview h1 {
+  font-size: 1.125rem;
+}
+.email-draft-html-preview h2 {
+  font-size: 1.05rem;
+}
+.email-draft-html-preview h3 {
+  font-size: 1rem;
+}

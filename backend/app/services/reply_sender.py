@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import logging
+
+from sqlalchemy.orm import Session
+
+from app.models.reply_draft import ReplyDraft
+from app.repositories.asset_packet_repo import get_packet_by_reply_draft_id
+from app.repositories.email_attachment_repo import create_email_attachment
+from app.repositories.email_event_repo import create_email_event
+from app.repositories.email_message_repo import create_email_message
+from app.repositories.email_thread_repo import get_email_thread, touch_email_thread
+from app.repositories.reply_draft_repo import (
+    get_reply_draft,
+    mark_reply_draft_failed,
+    mark_reply_draft_sent,
+    mark_reply_draft_sending,
+)
+from app.services.asset_attachment_service import (
+    finalize_sendable_attachments,
+    materialize_attachment,
+    resolve_sendable_attachments,
+)
+from app.services.asset_packet_service import lock_packet_after_send, render_assets_block_for_email
+from app.services.email_provider import send_email_via_provider
+
+logger = logging.getLogger(__name__)
+
+
+def validate_packet_for_reply_send(reply_draft: ReplyDraft, packet) -> None:
+    if not packet:
+        return
+
+    if packet.status == "archived":
+        raise ValueError("Attached packet is archived")
+
+    if packet.run_id != reply_draft.run_id:
+        raise ValueError("Attached packet run_id mismatch")
+
+    if packet.thread_id != reply_draft.thread_id:
+        raise ValueError("Attached packet thread_id mismatch")
+
+    if packet.contact_id and reply_draft.contact_id and packet.contact_id != reply_draft.contact_id:
+        raise ValueError("Attached packet contact_id mismatch")
+
+
+def _combine_body(base_body: str, packet_block: str) -> str:
+    if not packet_block.strip():
+        return base_body
+    if base_body.endswith("\n"):
+        return f"{base_body}{packet_block}"
+    return f"{base_body}\n{packet_block}"
+
+
+def _public_attachment_candidate(meta: dict) -> dict:
+    return {
+        "asset_id": meta["asset_id"],
+        "filename": meta["filename"],
+        "mime_type": meta["mime_type"],
+        "source_kind": "file" if meta.get("local_path") else "url",
+    }
+
+
+def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
+    base_body = reply_draft.body or ""
+    packet = get_packet_by_reply_draft_id(db, reply_draft.id)
+    validate_packet_for_reply_send(reply_draft, packet)
+
+    if not packet:
+        return {
+            "base_body": base_body,
+            "final_body": base_body,
+            "attachments": [],
+            "attachment_candidates": [],
+            "real_attachments": [],
+            "attached_asset_ids": [],
+            "linked_asset_ids": [],
+            "link_only_assets": [],
+            "packet_block": "",
+            "attached_packet_id": None,
+            "skipped_attachments": [],
+        }
+
+    sendable, link_only, skipped = resolve_sendable_attachments(db, packet)
+    sendable = finalize_sendable_attachments(db, sendable, link_only, skipped)
+    packet_block = render_assets_block_for_email(link_only)
+    final_body = _combine_body(base_body, packet_block)
+
+    public_candidates = [_public_attachment_candidate(m) for m in sendable]
+    real_attachments = [
+        {"asset_id": m["asset_id"], "filename": m["filename"], "mime_type": m["mime_type"]}
+        for m in sendable
+    ]
+    linked_asset_ids = []
+    for row in link_only:
+        if isinstance(row, dict) and row.get("asset_id") is not None:
+            linked_asset_ids.append(int(row["asset_id"]))
+
+    return {
+        "base_body": base_body,
+        "final_body": final_body,
+        "attachments": sendable,
+        "attachment_candidates": public_candidates,
+        "real_attachments": real_attachments,
+        "attached_asset_ids": [m["asset_id"] for m in sendable],
+        "linked_asset_ids": linked_asset_ids,
+        "link_only_assets": link_only,
+        "packet_block": packet_block,
+        "attached_packet_id": packet.id,
+        "skipped_attachments": skipped,
+    }
+
+
+def build_final_reply_body(db: Session, reply_draft: ReplyDraft) -> str:
+    return build_reply_send_payload(db, reply_draft)["final_body"]
+
+
+def send_one_reply_draft(db: Session, draft_id: int) -> dict:
+    draft = get_reply_draft(db, draft_id)
+    if not draft:
+        raise ValueError(f"Reply draft {draft_id} not found")
+
+    if draft.review_status not in {"approved", "edited"}:
+        raise ValueError("Reply draft is not approved")
+
+    if draft.status not in {"draft", "failed"}:
+        raise ValueError("Reply draft is not sendable in current state")
+
+    if not (draft.to_email or "").strip():
+        raise ValueError("Missing recipient email on reply draft")
+
+    thread = get_email_thread(db, draft.thread_id)
+    if not thread:
+        raise ValueError(f"Thread {draft.thread_id} not found")
+
+    mark_reply_draft_sending(db, draft)
+
+    try:
+        payload = build_reply_send_payload(db, draft)
+        final_body = payload["final_body"]
+        attachment_payloads: list[dict] = []
+        for meta in payload["attachments"]:
+            data, fn, mt = materialize_attachment(meta)
+            attachment_payloads.append({"filename": fn, "content": data, "mime_type": mt})
+
+        result = send_email_via_provider(
+            to_email=(draft.to_email or "").strip(),
+            subject=draft.subject,
+            body=final_body,
+            attachments=attachment_payloads if attachment_payloads else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "reply draft send failed before provider acceptance (reply_draft_id=%s)",
+            draft_id,
+        )
+        mark_reply_draft_failed(db, draft, str(e))
+        return {
+            "reply_draft_id": draft.id,
+            "status": "failed",
+            "error": str(e),
+        }
+
+    draft = get_reply_draft(db, draft.id) or draft
+
+    try:
+        mark_reply_draft_sent(
+            db=db,
+            draft=draft,
+            provider_message_id=result.get("provider_message_id"),
+        )
+    except Exception:
+        logger.exception(
+            "post-send persistence error: mark_reply_draft_sent (reply_draft_id=%s)",
+            draft.id,
+        )
+
+    message = None
+    try:
+        message = create_email_message(
+            db=db,
+            thread_id=thread.id,
+            run_id=draft.run_id,
+            contact_id=draft.contact_id,
+            draft_id=None,
+            direction="outbound",
+            from_email=None,
+            to_email=draft.to_email,
+            subject=draft.subject,
+            body=final_body,
+            provider_message_id=result.get("provider_message_id"),
+        )
+    except Exception:
+        logger.exception(
+            "post-send persistence error: create_email_message (reply_draft_id=%s)",
+            draft.id,
+        )
+
+    if message is not None:
+        att_ids = result.get("attachment_ids") or []
+        for i, meta in enumerate(payload["attachments"]):
+            try:
+                create_email_attachment(
+                    db=db,
+                    message_id=message.id,
+                    asset_id=meta["asset_id"],
+                    filename=meta["filename"],
+                    mime_type=meta["mime_type"],
+                    source_url=meta.get("source_url"),
+                    source_path=meta.get("source_path"),
+                    provider_attachment_id=att_ids[i] if i < len(att_ids) else None,
+                    status="attached",
+                    error=None,
+                )
+            except Exception:
+                logger.exception(
+                    "post-send persistence error: create_email_attachment "
+                    "(reply_draft_id=%s, index=%s)",
+                    draft.id,
+                    i,
+                )
+
+    try:
+        sent_packet = get_packet_by_reply_draft_id(db, draft.id)
+        if sent_packet is not None and payload.get("attached_packet_id") == sent_packet.id:
+            lock_packet_after_send(db, sent_packet.id)
+    except ValueError:
+        logger.exception(
+            "post-send persistence error: packet lookup integrity (reply_draft_id=%s)",
+            draft.id,
+        )
+    except Exception:
+        logger.exception(
+            "post-send persistence error: lock_packet_after_send (reply_draft_id=%s)",
+            draft.id,
+        )
+
+    try:
+        touch_email_thread(db, thread)
+    except Exception:
+        logger.exception(
+            "post-send persistence error: touch_email_thread (reply_draft_id=%s)",
+            draft.id,
+        )
+
+    try:
+        if thread.draft_id is not None:
+            create_email_event(
+                db=db,
+                run_id=draft.run_id,
+                draft_id=thread.draft_id,
+                contact_id=draft.contact_id,
+                event_type="reply_sent",
+                provider_message_id=result.get("provider_message_id"),
+                payload_json={
+                    "reply_draft_id": draft.id,
+                    "thread_id": thread.id,
+                    "attachment_count": len(attachment_payloads),
+                    "attached_asset_ids": payload["attached_asset_ids"],
+                },
+            )
+    except Exception:
+        logger.exception(
+            "post-send persistence error: create_email_event (reply_draft_id=%s)",
+            draft.id,
+        )
+
+    return {
+        "reply_draft_id": draft.id,
+        "status": "sent",
+        "provider_message_id": result.get("provider_message_id"),
+    }

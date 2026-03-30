@@ -1,0 +1,130 @@
+from sqlalchemy.orm import Session
+
+from app.repositories.contact_repo import get_contact
+from app.repositories.email_message_repo import list_email_messages_by_thread
+from app.repositories.email_thread_repo import get_email_thread
+from app.repositories.reply_draft_repo import (
+    create_reply_draft,
+    find_reply_draft_by_thread_and_type,
+)
+from app.repositories.run_repo import get_run
+from app.repositories.template_repo import get_template_by_type
+from app.services.template_renderer import render_template
+
+DEFAULT_NEED_INFO_SUBJECT = "Re: {{thread_subject}}"
+
+DEFAULT_NEED_INFO_BODY = """Hi {{name}},
+
+Thanks for your reply.
+
+Here is a bit more information about the project:
+- adult animated series
+- ready for platform discussion
+- additional materials available on request
+
+Happy to send more details if useful.
+
+Best,
+Pavel"""
+
+DEFAULT_INTERESTED_SUBJECT = "Re: {{thread_subject}}"
+
+DEFAULT_INTERESTED_BODY = """Hi {{name}},
+
+Great to hear from you.
+
+Happy to share more materials and discuss next steps. Let me know what would be most useful:
+- screener
+- deck
+- episode information
+- call
+
+Best,
+Pavel"""
+
+
+def generate_reply_draft_for_thread(db: Session, thread_id: int) -> dict:
+    thread = get_email_thread(db, thread_id)
+    if not thread:
+        raise ValueError(f"Thread {thread_id} not found")
+
+    if thread.classification not in {"need_more_info", "interested"}:
+        raise ValueError("Reply draft generation is only supported for need_more_info or interested")
+
+    existing = find_reply_draft_by_thread_and_type(db, thread_id, thread.classification)
+    if existing:
+        return {
+            "thread_id": thread.id,
+            "reply_type": thread.classification,
+            "reply_draft_id": existing.id,
+            "deduplicated": True,
+        }
+
+    run = get_run(db, thread.run_id)
+    if not run:
+        raise ValueError(f"Run {thread.run_id} not found")
+
+    contact = get_contact(db, thread.contact_id)
+    if not contact:
+        raise ValueError(f"Contact {thread.contact_id} not found")
+
+    messages = list_email_messages_by_thread(db, thread.id)
+    last_inbound = None
+    for message in reversed(messages):
+        if message.direction == "inbound":
+            last_inbound = message
+            break
+
+    reply_type = thread.classification
+
+    if reply_type == "need_more_info":
+        subject_template = get_template_by_type(
+            db, "reply_need_more_info_subject", project_id=run.project_id
+        )
+        body_template = get_template_by_type(
+            db, "reply_need_more_info_body", project_id=run.project_id
+        )
+        subject_content = subject_template.content if subject_template else DEFAULT_NEED_INFO_SUBJECT
+        body_content = body_template.content if body_template else DEFAULT_NEED_INFO_BODY
+    else:
+        subject_template = get_template_by_type(
+            db, "reply_interested_subject", project_id=run.project_id
+        )
+        body_template = get_template_by_type(
+            db, "reply_interested_body", project_id=run.project_id
+        )
+        subject_content = subject_template.content if subject_template else DEFAULT_INTERESTED_SUBJECT
+        body_content = body_template.content if body_template else DEFAULT_INTERESTED_BODY
+
+    variables = {
+        "name": contact.name or "",
+        "company": contact.company or "",
+        "role": contact.role or "",
+        "email": contact.email or "",
+        "thread_subject": thread.subject or "",
+        "last_inbound_body": last_inbound.body if last_inbound else "",
+    }
+
+    subject = render_template(subject_content, variables).strip()
+    body = render_template(body_content, variables).strip()
+
+    draft = create_reply_draft(
+        db=db,
+        run_id=thread.run_id,
+        thread_id=thread.id,
+        contact_id=thread.contact_id,
+        reply_type=reply_type,
+        to_email=contact.email,
+        subject=subject,
+        body=body,
+        status="draft",
+        review_status="pending",
+        review_notes=None,
+    )
+
+    return {
+        "thread_id": thread.id,
+        "reply_type": reply_type,
+        "reply_draft_id": draft.id,
+        "deduplicated": False,
+    }
