@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+
+from app.utils.attached_asset_ids import normalize_attached_asset_ids
 
 
 class EmailDraftRead(BaseModel):
@@ -22,6 +24,12 @@ class EmailDraftRead(BaseModel):
     sent_at: datetime | None
     reviewed_at: datetime | None
     created_at: datetime
+    attached_asset_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("attached_asset_ids", mode="before")
+    @classmethod
+    def _attached_asset_ids(cls, v):
+        return normalize_attached_asset_ids(v)
 
     class Config:
         from_attributes = True
@@ -36,3 +44,4 @@ class EmailDraftEditUpdate(BaseModel):
     subject: str | None = None
     body: str | None = None
     review_notes: str | None = None
+    attached_asset_ids: list[int] | None = None

@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.reply_draft import ReplyDraft
+from app.utils.attached_asset_ids import normalize_attached_asset_ids
 
 
 def create_reply_draft(
@@ -95,6 +96,7 @@ def update_reply_draft_fields(
     subject: str | None = None,
     body: str | None = None,
     review_notes: str | None = None,
+    attached_asset_ids: list[int] | None = None,
 ) -> ReplyDraft:
     if subject is not None:
         draft.subject = subject
@@ -102,6 +104,8 @@ def update_reply_draft_fields(
         draft.body = body
     if review_notes is not None:
         draft.review_notes = review_notes
+    if attached_asset_ids is not None:
+        draft.attached_asset_ids = normalize_attached_asset_ids(attached_asset_ids)
 
     draft.review_status = "edited"
     draft.reviewed_at = datetime.utcnow()

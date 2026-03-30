@@ -70,6 +70,7 @@ def edit_email_draft_route(
         subject=payload.subject,
         body=payload.body,
         review_notes=payload.review_notes,
+        attached_asset_ids=payload.attached_asset_ids,
     )
 
 

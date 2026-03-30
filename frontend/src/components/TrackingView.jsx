@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
 import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
+import {
+  DraftAssetAttachmentsField,
+  normalizeAttachedAssetIds,
+} from "@/components/DraftAssetAttachmentsField";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -220,15 +224,21 @@ export default function TrackingView({
   }, [runId, load]);
 
   const eventTone = (type) => {
-    if (type === "sent") return "bg-green-100 text-green-700 border-green-200 dark:bg-green-950/40 dark:text-green-200 dark:border-green-800";
-    if (type === "queued") return "bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-900/50 dark:text-slate-200";
-    if (type === "replied") return "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-200";
-    if (type === "bounced") return "bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-950/40 dark:text-yellow-100";
+    if (type === "sent")
+      return "border-2 border-green-200 bg-green-100 text-green-700 dark:border-green-800 dark:bg-green-950/40 dark:text-green-200";
+    if (type === "queued")
+      return "border-2 border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-600 dark:bg-slate-900/50 dark:text-slate-200";
+    if (type === "replied")
+      return "border-2 border-blue-200 bg-blue-100 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-200";
+    if (type === "bounced")
+      return "border-2 border-yellow-200 bg-yellow-100 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/40 dark:text-yellow-100";
     if (type === "dead_mailbox")
       return "border-2 border-red-700/50 bg-red-950/10 text-red-600 dark:border-red-700/40 dark:bg-red-950/20 dark:text-red-400";
-    if (type === "failed") return "bg-red-100 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-200";
-    if (type === "reply_sent") return "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-950/40 dark:text-teal-200";
-    return "bg-muted text-muted-foreground border-border";
+    if (type === "failed")
+      return "border-2 border-red-200 bg-red-100 text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200";
+    if (type === "reply_sent")
+      return "border-2 border-teal-200 bg-teal-100 text-teal-800 dark:border-teal-700 dark:bg-teal-950/40 dark:text-teal-200";
+    return "border-2 border-border bg-muted text-muted-foreground";
   };
 
   const eventIcon = (type) => {
@@ -930,6 +940,7 @@ export default function TrackingView({
         body: JSON.stringify({
           subject: replyEditing.subject,
           body: replyEditing.body,
+          attached_asset_ids: replyEditing.attached_asset_ids,
         }),
       });
       if (!res.ok) {
@@ -1147,7 +1158,7 @@ export default function TrackingView({
                     className={
                       chainEndsDeadMailbox
                         ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
-                        : "rounded-2xl bg-muted/25 p-4"
+                        : "rounded-2xl border-2 border-border bg-muted/25 p-4"
                     }
                   >
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -1212,10 +1223,10 @@ export default function TrackingView({
                       {draftEvents.map((event, index) => (
                         <div key={event.id}>
                           <div
-                            className={`flex items-center justify-between gap-3 rounded-2xl p-3 ${chainEndsDeadMailbox ? "bg-red-950/15 dark:bg-red-950/25" : "bg-muted/40"}`}
+                            className={`flex items-center justify-between gap-3 rounded-2xl border-2 p-3 ${chainEndsDeadMailbox ? "border-red-700/35 bg-red-950/15 dark:border-red-700/30 dark:bg-red-950/25" : "border-border bg-muted/40"}`}
                           >
                             <div className="flex items-center gap-3">
-                              <div className={`rounded-xl border p-2 ${eventTone(event.event_type)}`}>
+                              <div className={`rounded-xl p-2 ${eventTone(event.event_type)}`}>
                                 {eventIcon(event.event_type)}
                               </div>
                               <div>
@@ -1276,7 +1287,7 @@ export default function TrackingView({
                   className={
                     isThreadDeadMailbox
                       ? "flex flex-col gap-3 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
-                      : "flex flex-col gap-3 rounded-2xl bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+                      : "flex flex-col gap-3 rounded-2xl border-2 border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
                   }
                 >
                     <div>
@@ -1358,7 +1369,7 @@ export default function TrackingView({
               const showPreviewBlock = Boolean(replyPreviewExpanded[rd.id] && hasPreviewData);
               const canRegenReply = ["draft", "failed"].includes(rd.status);
               return (
-                <div key={rd.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
+                <div key={rd.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0 flex-1">
                         <div className="font-medium">{c?.company || `Contact #${rd.contact_id}`}</div>
@@ -1413,7 +1424,12 @@ export default function TrackingView({
                             variant="outline"
                             className="shrink-0"
                             onClick={() =>
-                              setReplyEditing({ id: rd.id, subject: rd.subject ?? "", body: rd.body ?? "" })
+                              setReplyEditing({
+                                id: rd.id,
+                                subject: rd.subject ?? "",
+                                body: rd.body ?? "",
+                                attached_asset_ids: normalizeAttachedAssetIds(rd.attached_asset_ids),
+                              })
                             }
                           >
                             <Pencil className="mr-1 h-3 w-3" />
@@ -1478,9 +1494,9 @@ export default function TrackingView({
                       </div>
                     </div>
                     {showPreviewBlock ? (
-                      <div className="space-y-2 rounded-xl border border-border bg-muted/20 p-3 text-xs">
+                      <div className="space-y-2 rounded-xl border-2 border-border bg-muted/20 p-3 text-xs">
                         {pv.will_lock_packet ? (
-                          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-900 dark:text-amber-100">
+                          <div className="rounded-md border-2 border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-900 dark:text-amber-100">
                             This packet will be locked after successful send.
                           </div>
                         ) : null}
@@ -1559,7 +1575,11 @@ export default function TrackingView({
                       </div>
                     ) : null}
                     <div className="text-sm font-medium">{rd.subject}</div>
-                    <EmailDraftBodyPreview body={rd.body} showSignaturePlaceholder={showSignaturePlaceholder} />
+                    <EmailDraftBodyPreview
+                      body={rd.body}
+                      showSignaturePlaceholder={showSignaturePlaceholder}
+                      attachedAssetIds={normalizeAttachedAssetIds(rd.attached_asset_ids)}
+                    />
                     {rd.error_message ? (
                       <div className="text-sm text-destructive">{rd.error_message}</div>
                     ) : null}
@@ -1590,7 +1610,7 @@ export default function TrackingView({
               const c = contactById.get(ft.contact_id);
               const canAct = ft.status === "open" || ft.status === "in_progress";
               return (
-                <div key={ft.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
+                <div key={ft.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{ft.title}</div>
@@ -1699,7 +1719,7 @@ export default function TrackingView({
               const isOverdue =
                 canAct && (r.status === "scheduled" || r.status === "snoozed") && remindDate < new Date();
               return (
-                <div key={r.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
+                <div key={r.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{r.title}</div>
@@ -1783,7 +1803,7 @@ export default function TrackingView({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-            <div className="rounded-2xl bg-muted/25 p-4">
+            <div className="rounded-2xl border-2 border-border bg-muted/25 p-4">
               <div className="mb-3 text-sm font-medium">Add asset</div>
               <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
               <div className="min-w-[140px] flex-1 space-y-1">
@@ -1813,7 +1833,7 @@ export default function TrackingView({
             </div>
           <div className="grid gap-3">
             {assets.map((a) => (
-              <div key={a.id} className="rounded-2xl bg-muted/30 p-5">
+              <div key={a.id} className="rounded-2xl border-2 border-border bg-muted/30 p-5">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="outline">{a.asset_type}</Badge>
                     <Badge variant="secondary">{a.status}</Badge>
@@ -1891,7 +1911,7 @@ export default function TrackingView({
                 })),
               ];
               return (
-                <div key={p.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
+                <div key={p.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{p.title}</div>
@@ -2006,7 +2026,7 @@ export default function TrackingView({
                       </div>
                     ) : null}
                     {isEditingPacket ? (
-                      <div className="rounded-xl border border-indigo-500/30 bg-muted/20 p-3">
+                      <div className="rounded-xl border-2 border-indigo-500/30 bg-muted/20 p-3">
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <div className="text-xs font-medium text-muted-foreground">Edit packet contents</div>
                           <div className="flex flex-wrap gap-2">
@@ -2022,7 +2042,7 @@ export default function TrackingView({
                           {packetEditState.draftAssets.map((item, idx) => (
                             <li
                               key={`${item.asset_id ?? "row"}-${idx}`}
-                              className="flex flex-col gap-2 rounded-lg border border-border/60 bg-background/80 p-2 sm:flex-row sm:items-center sm:justify-between"
+                              className="flex flex-col gap-2 rounded-lg border-2 border-border/60 bg-background/80 p-2 sm:flex-row sm:items-center sm:justify-between"
                             >
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
@@ -2135,7 +2155,7 @@ export default function TrackingView({
                         ) : null}
                       </div>
                     ) : inner.length ? (
-                      <div className="rounded-xl border border-border/80 bg-muted/30 p-3">
+                      <div className="rounded-xl border-2 border-border/80 bg-muted/30 p-3">
                         <div className="mb-2 text-xs font-medium text-muted-foreground">Contents</div>
                         <ul className="space-y-2 text-sm">
                           {inner.map((item, idx) => (
@@ -2200,7 +2220,7 @@ export default function TrackingView({
               return (
                 <div
                   key={contact.id}
-                  className="flex flex-col gap-4 rounded-2xl bg-red-950/10 p-5 lg:flex-row lg:items-center lg:justify-between dark:bg-red-950/20"
+                  className="flex flex-col gap-4 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 lg:flex-row lg:items-center lg:justify-between"
                 >
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -2257,7 +2277,7 @@ export default function TrackingView({
             {replacementQueueTasks.map((task) => (
               <div
                 key={task.id}
-                className="flex flex-col gap-4 rounded-2xl bg-muted/30 p-5 lg:flex-row lg:items-center lg:justify-between"
+                className="flex flex-col gap-4 rounded-2xl border-2 border-border bg-muted/30 p-5 lg:flex-row lg:items-center lg:justify-between"
               >
                   <div>
                     <div className="font-medium">{task.company || "Unknown company"}</div>
@@ -2298,7 +2318,7 @@ export default function TrackingView({
             aria-label="Close"
             onClick={() => setReplyEditing(null)}
           />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg">
+          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Edit reply draft</h2>
             <div className="mt-4 grid gap-3">
               <Input
@@ -2312,6 +2332,13 @@ export default function TrackingView({
                 key={replyEditing.id}
                 initialBody={replyEditing.body}
                 onChange={(body) => setReplyEditing((prev) => (prev ? { ...prev, body } : prev))}
+              />
+              <DraftAssetAttachmentsField
+                assets={assets}
+                selectedIds={replyEditing.attached_asset_ids}
+                onSelectedIdsChange={(attached_asset_ids) =>
+                  setReplyEditing((prev) => (prev ? { ...prev, attached_asset_ids } : prev))
+                }
               />
             </div>
             <div className="mt-6 flex justify-end gap-2">
@@ -2334,7 +2361,7 @@ export default function TrackingView({
             aria-label="Close"
             onClick={() => setThreadModalId(null)}
           />
-          <div className="relative z-50 flex max-h-[85vh] w-full max-w-lg flex-col gap-4 rounded-2xl border bg-card p-5 shadow-lg">
+          <div className="relative z-50 flex max-h-[85vh] w-full max-w-lg flex-col gap-4 rounded-2xl border-2 border-border bg-card p-5 shadow-lg">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <h3 className="text-lg font-semibold">Thread #{threadModalId}</h3>
@@ -2411,7 +2438,7 @@ export default function TrackingView({
                 .map((m) => (
                   <div
                     key={m.id}
-                    className={`max-w-[95%] rounded-2xl border p-3 text-sm ${
+                    className={`max-w-[95%] rounded-2xl border-2 p-3 text-sm ${
                       m.direction === "outbound"
                         ? "ml-auto border-primary/30 bg-primary/5"
                         : "mr-auto border-muted-foreground/25 bg-muted/40"

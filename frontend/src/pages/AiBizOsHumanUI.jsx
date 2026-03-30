@@ -20,12 +20,17 @@ import appPkg from "../../package.json";
 import TrackingView from "@/components/TrackingView";
 import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
+import {
+  DraftAssetAttachmentsField,
+  normalizeAttachedAssetIds,
+} from "@/components/DraftAssetAttachmentsField";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   Archive,
   ArchiveRestore,
   ChevronRight,
   CircleAlert,
+  Clock,
   FileText,
   Mail,
   Pencil,
@@ -51,6 +56,9 @@ const API_BASE =
 
 const DEFAULT_OUTREACH_BRIEF =
   "Offer:\nTarget:\nRoles:\nGoal:\nTone: Professional\nNotes:\n";
+
+/** Stored in `email_drafts.review_notes` when reviewer uses the clock (defer send). */
+const OUTBOUND_REVIEW_SEND_LATER = "send_later";
 
 const BRIEF_LABEL_PREFIXES = [
   ["offer:", "offer"],
@@ -393,7 +401,12 @@ export default function AiBizOsHumanUI() {
   const [editingContact, setEditingContact] = useState(null);
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
-  const [draftForm, setDraftForm] = useState({ subject: "", body: "" });
+  const [assetsLibrary, setAssetsLibrary] = useState([]);
+  const [draftForm, setDraftForm] = useState({
+    subject: "",
+    body: "",
+    attached_asset_ids: [],
+  });
   const [signatureSetupOpen, setSignatureSetupOpen] = useState(false);
   const [signatureFormHtml, setSignatureFormHtml] = useState("");
   const [signatureEditorKey, setSignatureEditorKey] = useState(0);
@@ -424,18 +437,20 @@ export default function AiBizOsHumanUI() {
   const loadRunDetails = async (runId) => {
     if (!runId) return;
     try {
-      const [run, stepsData, contactsData, draftsData, ws] = await Promise.all([
+      const [run, stepsData, contactsData, draftsData, ws, assetsData] = await Promise.all([
         api(`/runs/${runId}`),
         api(`/steps/run/${runId}`),
         api(`/contacts/run/${runId}`),
         api(`/email-drafts/run/${runId}`),
         api(`/runs/${runId}/workspace`),
+        api(`/assets`),
       ]);
       setSelectedRun(run);
       setSteps(stepsData);
       setContacts(contactsData);
       setDrafts(draftsData);
       setWorkspace(ws);
+      setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
     } catch (e) {
       setError(String(e.message || e));
     }
@@ -712,12 +727,14 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const reviewDraft = async (id, review_status) => {
+  const reviewDraft = async (id, review_status, review_notes) => {
     try {
       setError("");
+      const body = { review_status };
+      if (review_notes !== undefined) body.review_notes = review_notes;
       await api(`/email-drafts/${id}/review`, {
         method: "PATCH",
-        body: { review_status },
+        body,
       });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
@@ -772,7 +789,19 @@ export default function AiBizOsHumanUI() {
 
   const openEditDraft = (d) => {
     setEditDraft(d);
-    setDraftForm({ subject: d.subject ?? "", body: d.body ?? "" });
+    setDraftForm({
+      subject: d.subject ?? "",
+      body: d.body ?? "",
+      attached_asset_ids: normalizeAttachedAssetIds(d.attached_asset_ids),
+    });
+    void (async () => {
+      try {
+        const assetsData = await api(`/assets`);
+        setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
+      } catch {
+        /* keep previous library if request fails */
+      }
+    })();
   };
 
   const saveEditDraft = async () => {
@@ -781,7 +810,11 @@ export default function AiBizOsHumanUI() {
       setError("");
       await api(`/email-drafts/${editDraft.id}/edit`, {
         method: "PATCH",
-        body: { subject: draftForm.subject, body: draftForm.body },
+        body: {
+          subject: draftForm.subject,
+          body: draftForm.body,
+          attached_asset_ids: draftForm.attached_asset_ids,
+        },
       });
       setEditDraft(null);
       await loadRunDetails(selectedRun.id);
@@ -935,42 +968,42 @@ export default function AiBizOsHumanUI() {
     }
     const rs = c.review_status;
     if (["approved", "edited"].includes(rs)) {
-      return "rounded-2xl border border-green-600/40 bg-green-500/5 shadow-none";
+      return "rounded-2xl border-2 border-green-600/40 bg-green-500/5 shadow-none";
     }
     if (rs === "pending") {
-      return "rounded-2xl border border-muted bg-muted/25 shadow-none";
+      return "rounded-2xl border-2 border-muted bg-muted/25 shadow-none";
     }
-    return "rounded-2xl border border-border shadow-none";
+    return "rounded-2xl border-2 border-border shadow-none";
   };
 
   const draftCardClass = (d) => {
     const st = d.tracking_status ?? d.status;
     if (st === "sent") {
-      return "rounded-2xl border border-green-600/40 bg-green-500/5 shadow-none";
+      return "rounded-2xl border-2 border-green-600/40 bg-green-500/5 shadow-none";
     }
     if (st === "failed") {
-      return "rounded-2xl border border-destructive/45 bg-destructive/5 shadow-none";
+      return "rounded-2xl border-2 border-destructive/45 bg-destructive/5 shadow-none";
     }
     if (st === "sending") {
-      return "rounded-2xl border border-blue-500/40 bg-blue-500/5 shadow-none";
+      return "rounded-2xl border-2 border-blue-500/40 bg-blue-500/5 shadow-none";
     }
     if (st === "replied") {
-      return "rounded-2xl border border-emerald-600/40 bg-emerald-500/5 shadow-none";
+      return "rounded-2xl border-2 border-emerald-600/40 bg-emerald-500/5 shadow-none";
     }
     if (st === "bounced") {
-      return "rounded-2xl border border-orange-500/40 bg-orange-500/5 shadow-none";
+      return "rounded-2xl border-2 border-orange-500/40 bg-orange-500/5 shadow-none";
     }
     if (st === "dead_mailbox") {
-      return "rounded-2xl border border-red-700/40 bg-red-600/5 shadow-none";
+      return "rounded-2xl border-2 border-red-700/40 bg-red-600/5 shadow-none";
     }
     const rs = d.review_status;
     if (["approved", "edited"].includes(rs)) {
-      return "rounded-2xl border border-green-600/40 bg-green-500/5 shadow-none";
+      return "rounded-2xl border-2 border-green-600/40 bg-green-500/5 shadow-none";
     }
     if (rs === "pending") {
-      return "rounded-2xl border border-muted bg-muted/25 shadow-none";
+      return "rounded-2xl border-2 border-muted bg-muted/25 shadow-none";
     }
-    return "rounded-2xl border border-border shadow-none";
+    return "rounded-2xl border-2 border-border shadow-none";
   };
 
   const canSendDraft = (d) =>
@@ -1181,6 +1214,9 @@ export default function AiBizOsHumanUI() {
     const isReplacementDraft = draftContact?.source_json?.source === "replacement_search";
     const draftLifecycle = draft.tracking_status ?? draft.status;
     const isDeadMailboxDraft = draftLifecycle === "dead_mailbox";
+    const isSendLater =
+      draft.review_notes === OUTBOUND_REVIEW_SEND_LATER &&
+      ["approved", "edited"].includes(draft.review_status);
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
@@ -1196,6 +1232,16 @@ export default function AiBizOsHumanUI() {
                 ) : null}
                 <SendLifecycleBadge status={draftLifecycle} />
                 <StatusBadge value={draft.review_status} />
+                {isSendLater ? (
+                  <Badge
+                    variant="outline"
+                    className="inline-flex items-center gap-1 border-amber-500/50 font-normal text-amber-900 dark:text-amber-100"
+                    title="Approved — send later (clock)"
+                  >
+                    <Clock className="h-3 w-3 shrink-0" aria-hidden />
+                    Send later
+                  </Badge>
+                ) : null}
               </div>
               <div className="mt-2 text-sm">
                 <span className="font-medium">To:</span> {draft.to_email || "No recipient"}
@@ -1224,8 +1270,15 @@ export default function AiBizOsHumanUI() {
                       <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
                         Approve
                       </Button>
-                      <Button size="sm" variant="secondary" onClick={() => reviewDraft(draft.id, "approved")}>
-                        Send later
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => reviewDraft(draft.id, "approved", OUTBOUND_REVIEW_SEND_LATER)}
+                        className="px-2.5"
+                        aria-label="Send later"
+                        title="Send later — approve without sending now"
+                      >
+                        <Clock className="h-4 w-4" aria-hidden />
                       </Button>
                       {canRegenerateOutboundDraft(draft) ? (
                         <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
@@ -1264,13 +1317,14 @@ export default function AiBizOsHumanUI() {
             </div>
           </div>
           {draft.error_message ? (
-            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            <div className="rounded-xl border-2 border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               {draft.error_message}
             </div>
           ) : null}
           <EmailDraftBodyPreview
             body={draft.body}
             showSignaturePlaceholder={Boolean((selectedRun?.sender_signature_html ?? "").trim())}
+            attachedAssetIds={normalizeAttachedAssetIds(draft.attached_asset_ids)}
           />
         </div>
       </CardContent>
@@ -1364,7 +1418,7 @@ export default function AiBizOsHumanUI() {
         </div>
 
         {error ? (
-          <Card className="mb-6 border-destructive/50">
+          <Card className="mb-6 border-2 border-destructive/50">
             <CardContent className="p-4 text-sm text-destructive">{error}</CardContent>
           </Card>
         ) : null}
@@ -1387,7 +1441,7 @@ export default function AiBizOsHumanUI() {
                   {projects.map((project) => (
                     <div
                       key={project.id}
-                      className={`rounded-2xl border p-4 transition ${
+                      className={`rounded-2xl border-2 p-4 transition ${
                         selectedProject?.id === project.id ? "border-primary bg-primary/5" : "border-border"
                       }`}
                     >
@@ -1436,7 +1490,7 @@ export default function AiBizOsHumanUI() {
                     </div>
                   ))}
                   {!projects.length && (
-                    <div className="rounded-2xl border border-dashed p-6 text-sm text-muted-foreground">
+                    <div className="rounded-2xl border-2 border-dashed p-6 text-sm text-muted-foreground">
                       {loading
                         ? "Loading projects..."
                         : projectView === "archived"
@@ -1493,7 +1547,7 @@ export default function AiBizOsHumanUI() {
                         return (
                           <div
                             key={st.step_name}
-                            className="overflow-hidden rounded-2xl border border-border bg-card shadow-none"
+                            className="overflow-hidden rounded-2xl border-2 border-border bg-card shadow-none"
                           >
                             <div
                               className={`px-3 py-2 text-center text-xs font-semibold ${capClass}`}
@@ -1510,7 +1564,7 @@ export default function AiBizOsHumanUI() {
                         );
                       })}
                     </div>
-                    <div className="rounded-2xl border border-border bg-muted/30 p-3 text-sm">
+                    <div className="rounded-2xl border-2 border-border bg-muted/30 p-3 text-sm">
                       <div className="font-medium">Setup summary</div>
                       <ul className="mt-2 space-y-1 text-muted-foreground">
                         {workspace.setup_summary?.companies_collected != null ? (
@@ -1642,7 +1696,7 @@ export default function AiBizOsHumanUI() {
                     </p>
                   ) : (
                     runsList.map((r) => (
-                      <Card key={r.id} className="rounded-2xl border border-border shadow-none">
+                      <Card key={r.id} className="rounded-2xl border-2 border-border shadow-none">
                         <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
                           <div className="space-y-1 text-sm">
                             <div className="font-semibold">{r.name}</div>
@@ -1715,7 +1769,7 @@ export default function AiBizOsHumanUI() {
                     ) : null}
 
                     {pendingContacts === 0 && contacts.length > 0 ? (
-                      <div className="rounded-2xl border border-dashed border-muted-foreground/25 py-10 text-center">
+                      <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-10 text-center">
                         <div className="text-lg font-medium">All contacts reviewed 🎉</div>
                         {selectedRun?.status === "needs_review" ? (
                           <>
@@ -1752,7 +1806,7 @@ export default function AiBizOsHumanUI() {
                     </div>
 
                     {rejectedList.length > 0 ? (
-                      <details className="group rounded-2xl border border-border">
+                      <details className="group rounded-2xl border-2 border-border">
                         <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
                           <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
                           Rejected ({rejectedList.length})
@@ -1810,7 +1864,7 @@ export default function AiBizOsHumanUI() {
                         </div>
 
                         {draftsRejectedList.length > 0 ? (
-                          <details className="group rounded-2xl border border-border">
+                          <details className="group rounded-2xl border-2 border-border">
                             <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
                               <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
                               Rejected ({draftsRejectedList.length})
@@ -1844,7 +1898,7 @@ export default function AiBizOsHumanUI() {
             ) : null}
 
             {!["runs", "contacts", "drafts"].includes(mainNav) && !selectedRun?.id ? (
-              <div className="rounded-2xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+              <div className="rounded-2xl border-2 border-dashed border-border p-8 text-center text-sm text-muted-foreground">
                 Select a run to view this section.
               </div>
             ) : null}
@@ -1942,7 +1996,7 @@ export default function AiBizOsHumanUI() {
                 <button
                   key={r.id}
                   type="button"
-                  className="w-full rounded-2xl border border-border p-3 text-left text-sm hover:bg-muted/50"
+                  className="w-full rounded-2xl border-2 border-border p-3 text-left text-sm hover:bg-muted/50"
                   onClick={() => void openRunById(r.id)}
                 >
                   <div className="font-medium">{r.name}</div>
@@ -1993,7 +2047,7 @@ export default function AiBizOsHumanUI() {
             aria-label="Close"
             onClick={() => setEditDraft(null)}
           />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg">
+          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Edit email draft</h2>
             <div className="mt-4 grid gap-3">
               <Input
@@ -2005,6 +2059,13 @@ export default function AiBizOsHumanUI() {
                 key={editDraft.id}
                 initialBody={draftForm.body}
                 onChange={(body) => setDraftForm((f) => ({ ...f, body }))}
+              />
+              <DraftAssetAttachmentsField
+                assets={assetsLibrary}
+                selectedIds={draftForm.attached_asset_ids}
+                onSelectedIdsChange={(attached_asset_ids) =>
+                  setDraftForm((f) => ({ ...f, attached_asset_ids }))
+                }
               />
             </div>
             <div className="mt-6 flex justify-end gap-2">
@@ -2025,7 +2086,7 @@ export default function AiBizOsHumanUI() {
             aria-label="Close"
             onClick={() => setSignatureSetupOpen(false)}
           />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg">
+          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Signature setup</h2>
             <p className="mt-1 text-sm text-muted-foreground">
               Rich-text signature for this run. It is appended when sending outreach and reply drafts. After you save, if

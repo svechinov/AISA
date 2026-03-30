@@ -175,6 +175,32 @@ def _ensure_runs_metadata_columns() -> None:
             conn.execute(text("ALTER TABLE runs ADD COLUMN sender_signature_html TEXT"))
 
 
+def _ensure_drafts_attached_asset_ids_columns() -> None:
+    insp = inspect(engine)
+    dialect = engine.dialect.name
+    for table in ("email_drafts", "reply_drafts"):
+        if table not in insp.get_table_names():
+            continue
+        columns = {c["name"] for c in insp.get_columns(table)}
+        if "attached_asset_ids" in columns:
+            continue
+        with engine.begin() as conn:
+            if dialect == "sqlite":
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table} ADD COLUMN attached_asset_ids "
+                        "TEXT NOT NULL DEFAULT '[]'",
+                    ),
+                )
+            else:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table} ADD COLUMN attached_asset_ids "
+                        "JSONB NOT NULL DEFAULT '[]'::jsonb",
+                    ),
+                )
+
+
 def _ensure_asset_packets_reply_draft_id_unique() -> None:
     """At most one packet per non-null reply_draft_id (SQL NULLs may repeat)."""
     insp = inspect(engine)
@@ -217,6 +243,7 @@ def ensure_schema() -> None:
     _ensure_projects_is_archived_column()
     _ensure_email_threads_classification_columns()
     _ensure_assets_extended_columns()
+    _ensure_drafts_attached_asset_ids_columns()
     _ensure_asset_packets_reply_draft_id_unique()
 
 
