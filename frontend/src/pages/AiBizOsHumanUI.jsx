@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +22,8 @@ import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor"
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
+  Archive,
+  ArchiveRestore,
   ChevronRight,
   FileText,
   Mail,
@@ -225,6 +226,15 @@ const pretty = (v) => {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
+/** Job title for header + edit form: column `role`, else common keys in source_json (LLM / legacy). */
+function contactRoleFromPayload(contact) {
+  if (!contact) return "";
+  const col = String(contact.role ?? "").trim();
+  if (col) return col;
+  const sj = contact.source_json && typeof contact.source_json === "object" ? contact.source_json : {};
+  return String(sj.role ?? sj.title ?? sj.job_title ?? sj.position ?? "").trim();
+}
+
 function StatusBadge({ value }) {
   return <Badge variant={statusTone[value] || "secondary"}>{pretty(value)}</Badge>;
 }
@@ -382,6 +392,7 @@ export default function AiBizOsHumanUI() {
 
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
+  const [createDraftContactId, setCreateDraftContactId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const [draftForm, setDraftForm] = useState({ subject: "", body: "" });
 
@@ -611,20 +622,13 @@ export default function AiBizOsHumanUI() {
     if (!selectedRun || !selectedProject) return;
     try {
       setError("");
-      await api(`/runs/${selectedRun.id}/close`, { method: "PATCH" });
+      const closedId = selectedRun.id;
+      await api(`/runs/${closedId}/close`, { method: "PATCH" });
       setCloseRunOpen(false);
       const pid = projectPk(selectedProject);
       const runs = await api(`/runs/project/${pid}`);
       setRunsList(runs);
-      if (runs.length > 0) {
-        await loadRunDetails(runs[0].id);
-      } else {
-        setSelectedRun(null);
-        setSteps([]);
-        setContacts([]);
-        setDrafts([]);
-        setWorkspace(null);
-      }
+      await loadRunDetails(closedId);
     } catch (e) {
       setError(String(e.message || e));
     }
@@ -686,6 +690,20 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  const createDraftForContact = async (contactId) => {
+    if (!selectedRun?.id) return;
+    setCreateDraftContactId(contactId);
+    try {
+      setError("");
+      await api(`/contacts/${contactId}/create-draft`, { method: "POST" });
+      await loadRunDetails(selectedRun.id);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setCreateDraftContactId(null);
+    }
+  };
+
   const reviewDraft = async (id, review_status) => {
     try {
       setError("");
@@ -693,6 +711,17 @@ export default function AiBizOsHumanUI() {
         method: "PATCH",
         body: { review_status },
       });
+      await loadRunDetails(selectedRun.id);
+    } catch (e) {
+      setError(String(e.message || e));
+    }
+  };
+
+  const regenerateOutboundDraft = async (draftId) => {
+    if (!selectedRun) return;
+    try {
+      setError("");
+      await api(`/email-drafts/${draftId}/regenerate`, { method: "POST" });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
       setError(String(e.message || e));
@@ -762,17 +791,16 @@ export default function AiBizOsHumanUI() {
   }, [drafts, search, draftFilter]);
 
   const contactById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
+  const draftByContactId = useMemo(() => {
+    const m = new Map();
+    for (const d of drafts) {
+      if (d.contact_id != null) m.set(d.contact_id, d);
+    }
+    return m;
+  }, [drafts]);
 
   const approvedContacts = contacts.filter((c) => ["approved", "edited"].includes(c.review_status)).length;
   const approvedDrafts = drafts.filter((d) => ["approved", "edited"].includes(d.review_status)).length;
-  const sendableDraftsCount = useMemo(() => {
-    return drafts.filter(
-      (d) =>
-        ["approved", "edited"].includes(d.review_status) &&
-        !!(d.to_email || "").trim() &&
-        ["draft", "failed"].includes(d.status),
-    ).length;
-  }, [drafts]);
   const pendingContacts = contacts.filter((c) => c.review_status === "pending").length;
 
   const pending = contactsMatchingSearch.filter((c) => c.review_status === "pending");
@@ -903,6 +931,9 @@ export default function AiBizOsHumanUI() {
     !!(d.to_email || "").trim() &&
     !["sent", "sending"].includes(d.status);
 
+  const canRegenerateOutboundDraft = (d) =>
+    ["draft", "failed"].includes(d.status) && !["sent", "sending"].includes(d.status);
+
   const renderContactCard = (contact) => {
     const rs = contact.review_status;
     const isPending = rs === "pending";
@@ -933,12 +964,12 @@ export default function AiBizOsHumanUI() {
                 ) : null}
               </div>
               <div className="text-sm text-muted-foreground">
-                {contact.name || "No name"} · {contact.role || "No role"}
+                {contact.name || "No name"} · {contactRoleFromPayload(contact) || "No role"}
               </div>
               <div className="text-sm">{contact.email || "No email"}</div>
               <div className="text-xs text-muted-foreground">{contact.website || "No website"}</div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 lg:w-auto lg:flex-nowrap">
               <Button
                 size="sm"
                 variant="outline"
@@ -946,6 +977,7 @@ export default function AiBizOsHumanUI() {
                   setEditingContact({
                     id: contact.id,
                     name: contact.name ?? "",
+                    role: contactRoleFromPayload(contact),
                     email: contact.email ?? "",
                   })
                 }
@@ -972,6 +1004,25 @@ export default function AiBizOsHumanUI() {
                   Approve
                 </Button>
               ) : null}
+              {!isPending &&
+              !isRejected &&
+              ["approved", "edited"].includes(rs) &&
+              !draftByContactId.has(contact.id) &&
+              createDraftContactId !== contact.id ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!((contact.email || "").trim())}
+                  title={
+                    !(contact.email || "").trim()
+                      ? "Add an email to this contact first"
+                      : undefined
+                  }
+                  onClick={() => void createDraftForContact(contact.id)}
+                >
+                  Create draft
+                </Button>
+              ) : null}
             </div>
           </div>
           {editingContact?.id === contact.id ? (
@@ -985,6 +1036,19 @@ export default function AiBizOsHumanUI() {
                     setEditingContact({
                       ...editingContact,
                       name: e.target.value,
+                    })
+                  }
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs text-muted-foreground">Job title</div>
+                <Input
+                  placeholder="e.g. Head of Partnerships"
+                  value={editingContact.role ?? ""}
+                  onChange={(e) =>
+                    setEditingContact({
+                      ...editingContact,
+                      role: e.target.value,
                     })
                   }
                 />
@@ -1015,8 +1079,12 @@ export default function AiBizOsHumanUI() {
                     try {
                       setError("");
                       const nameVal = (editingContact.name ?? "").trim();
+                      const roleVal = (editingContact.role ?? "").trim();
                       const emailVal = (editingContact.email ?? "").trim();
-                      const body = { name: nameVal || null };
+                      const body = {
+                        name: nameVal || null,
+                        role: roleVal,
+                      };
                       if (contact.status !== "valid") {
                         body.email = emailVal || null;
                       }
@@ -1080,17 +1148,29 @@ export default function AiBizOsHumanUI() {
                     Approve
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => reviewDraft(draft.id, "approved")}>
-                    Approve & Send later
+                    Send later
                   </Button>
+                  {canRegenerateOutboundDraft(draft) ? (
+                    <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
+                      Regenerate
+                    </Button>
+                  ) : null}
                   <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
                     Reject
                   </Button>
                 </>
               ) : null}
               {["approved", "edited"].includes(draft.review_status) ? (
-                <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
-                  Reject
-                </Button>
+                <>
+                  {canRegenerateOutboundDraft(draft) ? (
+                    <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
+                      Regenerate
+                    </Button>
+                  ) : null}
+                  <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
+                    Reject
+                  </Button>
+                </>
               ) : null}
               {draft.review_status === "rejected" ? (
                 <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
@@ -1157,7 +1237,7 @@ export default function AiBizOsHumanUI() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
             <div className="space-y-1 text-sm">
               <div>
                 <span className="text-muted-foreground">Project</span>{" "}
@@ -1179,7 +1259,6 @@ export default function AiBizOsHumanUI() {
             <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
-                variant="secondary"
                 disabled={!selectedProject || selectedProject.is_archived}
                 onClick={() => openNewRunDialog()}
               >
@@ -1212,7 +1291,7 @@ export default function AiBizOsHumanUI() {
         ) : null}
 
         <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
-          <Card className="rounded-2xl shadow-sm">
+          <Card className="rounded-2xl border-2 border-border shadow-none">
             <CardHeader>
               <CardTitle>Projects</CardTitle>
               <CardDescription>Choose a project, then create or open a run</CardDescription>
@@ -1249,26 +1328,29 @@ export default function AiBizOsHumanUI() {
                           <Button
                             size="sm"
                             variant="ghost"
-                            className="shrink-0 text-muted-foreground"
+                            className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
                             aria-label="Archive project"
+                            title="Archive"
                             onClick={(e) => {
                               e.stopPropagation();
                               void archiveProject(project.id);
                             }}
                           >
-                            Archive
+                            <Archive className="h-4 w-4" aria-hidden />
                           </Button>
                         ) : (
                           <Button
                             size="sm"
                             variant="ghost"
-                            className="shrink-0 text-muted-foreground"
+                            className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
+                            aria-label="Restore project"
+                            title="Restore"
                             onClick={(e) => {
                               e.stopPropagation();
                               void restoreProject(project.id);
                             }}
                           >
-                            Restore
+                            <ArchiveRestore className="h-4 w-4" aria-hidden />
                           </Button>
                         )}
                       </div>
@@ -1292,12 +1374,14 @@ export default function AiBizOsHumanUI() {
           <div className="space-y-6">
             {selectedRun && workspace ? (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start">
-                <Card className="min-w-0 rounded-2xl shadow-sm">
+                <Card className="min-w-0 rounded-2xl border-2 border-border shadow-none">
                   <CardHeader className="min-w-0 space-y-0">
                     <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0">
                         <CardTitle>Run setup</CardTitle>
-                        <CardDescription>Prepare this run before starting outreach</CardDescription>
+                        {!selectedRun.closed_at ? (
+                          <CardDescription>Prepare this run before starting outreach</CardDescription>
+                        ) : null}
                       </div>
                       {primaryCta ? (
                         <div className="flex shrink-0 flex-col items-stretch gap-1 sm:items-end">
@@ -1330,7 +1414,7 @@ export default function AiBizOsHumanUI() {
                         return (
                           <div
                             key={st.step_name}
-                            className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
+                            className="overflow-hidden rounded-2xl border border-border bg-card shadow-none"
                           >
                             <div
                               className={`px-3 py-2 text-center text-xs font-semibold ${capClass}`}
@@ -1377,12 +1461,16 @@ export default function AiBizOsHumanUI() {
                           </span>
                         </li>
                       </ul>
-                      <p className="mt-3 text-foreground">{workspace.setup_state_message}</p>
+                      {selectedRun.closed_at ? (
+                        <p className="mt-3 font-medium text-destructive">Run closed</p>
+                      ) : (
+                        <p className="mt-3 text-foreground">{workspace.setup_state_message}</p>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
 
-                <Card className="min-w-0 w-full rounded-2xl shadow-sm">
+                <Card className="min-w-0 w-full rounded-2xl border-2 border-border shadow-none">
                   <CardHeader className="pb-3">
                     <CardTitle>Run performance</CardTitle>
                   </CardHeader>
@@ -1434,7 +1522,7 @@ export default function AiBizOsHumanUI() {
               </div>
             ) : null}
 
-            <div className="flex flex-wrap gap-1 rounded-2xl border border-border bg-muted/20 p-1">
+            <div className="flex flex-wrap gap-1 rounded-2xl border-2 border-border bg-muted/20 p-1">
               {MAIN_NAV.map((item) => (
                 <Button
                   key={item.value}
@@ -1450,7 +1538,7 @@ export default function AiBizOsHumanUI() {
             </div>
 
             {mainNav === "runs" ? (
-              <Card className="rounded-2xl shadow-sm">
+              <Card className="rounded-2xl border-2 border-border shadow-none">
                 <CardHeader>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
@@ -1511,12 +1599,12 @@ export default function AiBizOsHumanUI() {
             ) : null}
 
             {mainNav === "contacts" || mainNav === "drafts" ? (
-            <Card className="rounded-2xl shadow-sm">
+            <Card className="rounded-2xl border-2 border-border shadow-none">
               <CardHeader>
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <CardTitle>Review workspace</CardTitle>
-                    <CardDescription>Review contacts first, then drafts.</CardDescription>
+                    <CardDescription>Switch between Contacts and Drafts using the bar above.</CardDescription>
                   </div>
                   <Input
                     value={search}
@@ -1527,17 +1615,8 @@ export default function AiBizOsHumanUI() {
                 </div>
               </CardHeader>
               <CardContent>
-                <Tabs
-                  value={mainNav === "drafts" ? "drafts" : "contacts"}
-                  onValueChange={(v) => setMainNav(v)}
-                  className="w-full"
-                >
-                  <TabsList className="grid w-full max-w-md grid-cols-2 rounded-2xl">
-                    <TabsTrigger value="contacts">Contacts</TabsTrigger>
-                    <TabsTrigger value="drafts">Drafts</TabsTrigger>
-                  </TabsList>
-
-                  <TabsContent value="contacts" className="mt-4 space-y-6">
+                {mainNav === "contacts" ? (
+                  <div className="space-y-6">
                     <div className="text-sm text-muted-foreground">
                       {pendingContacts} contacts left to review
                     </div>
@@ -1610,14 +1689,14 @@ export default function AiBizOsHumanUI() {
                         No contacts for this run yet.
                       </div>
                     ) : null}
-                  </TabsContent>
-
-                  <TabsContent value="drafts" className="mt-4 space-y-6">
+                  </div>
+                ) : (
+                  <div className="space-y-6">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <Button
                         type="button"
                         onClick={() => void sendAllApproved()}
-                        disabled={!selectedRun || sendableDraftsCount === 0}
+                        disabled={!selectedRun || approvedDrafts === 0}
                       >
                         Send all approved
                       </Button>
@@ -1660,9 +1739,8 @@ export default function AiBizOsHumanUI() {
                     {drafts.length > 0 && filteredDrafts.length === 0 ? (
                       <div className="text-sm text-muted-foreground">No drafts match the current filter.</div>
                     ) : null}
-                  </TabsContent>
-
-                </Tabs>
+                  </div>
+                )}
               </CardContent>
             </Card>
             ) : null}

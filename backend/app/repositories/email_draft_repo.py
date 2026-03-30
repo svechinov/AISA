@@ -114,6 +114,11 @@ def find_draft_by_contact_id(db: Session, run_id: int, contact_id: int) -> Email
     )
 
 
+def delete_email_draft(db: Session, draft: EmailDraft) -> None:
+    db.delete(draft)
+    db.commit()
+
+
 def delete_email_drafts_by_run(db: Session, run_id: int) -> int:
     query = db.query(EmailDraft).filter(EmailDraft.run_id == run_id)
     count = query.count()

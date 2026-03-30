@@ -15,7 +15,7 @@ from app.schemas.reply_draft import (
     ReplyDraftRead,
     ReplyDraftReviewUpdate,
 )
-from app.services.reply_draft_service import generate_reply_draft_for_thread
+from app.services.reply_draft_service import generate_reply_draft_for_thread, regenerate_reply_draft
 from app.services.reply_sender import build_reply_send_payload, send_one_reply_draft
 
 router = APIRouter(prefix="/reply-drafts", tags=["reply-drafts"])
@@ -83,6 +83,14 @@ def edit_reply_draft_route(
 def send_reply_draft_route(draft_id: int, db: Session = Depends(get_db)):
     try:
         return send_one_reply_draft(db, draft_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/{draft_id}/regenerate", response_model=ReplyDraftRead)
+def regenerate_reply_draft_route(draft_id: int, db: Session = Depends(get_db)):
+    try:
+        return regenerate_reply_draft(db, draft_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

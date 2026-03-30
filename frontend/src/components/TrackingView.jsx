@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NativeFilterSelect } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
@@ -9,11 +9,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   AlertTriangle,
+  Eye,
+  EyeOff,
   FilePenLine,
   MailCheck,
   MailWarning,
   Mails,
-  RefreshCw,
+  Pencil,
   Reply,
   Send,
   XCircle,
@@ -111,6 +113,8 @@ export default function TrackingView({
   const [packetEditState, setPacketEditState] = useState(null);
   /** reply draft id → send-preview fields + attachment summary */
   const [replySendPreviewByDraftId, setReplySendPreviewByDraftId] = useState({});
+  /** When false, send-preview block is collapsed even if data is cached */
+  const [replyPreviewExpanded, setReplyPreviewExpanded] = useState({});
   const [replyEditing, setReplyEditing] = useState(null);
   const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(false);
@@ -847,6 +851,48 @@ export default function TrackingView({
     }
   }
 
+  async function toggleReplySendPreview(draftId) {
+    const pv = replySendPreviewByDraftId[draftId];
+    const hasData =
+      pv && !pv.loading && !pv.error && pv.final_body != null;
+    if (hasData && replyPreviewExpanded[draftId]) {
+      setReplyPreviewExpanded((e) => ({ ...e, [draftId]: false }));
+      return;
+    }
+    if (hasData && !replyPreviewExpanded[draftId]) {
+      setReplyPreviewExpanded((e) => ({ ...e, [draftId]: true }));
+      return;
+    }
+    await fetchReplySendPreview(draftId);
+    setReplyPreviewExpanded((e) => ({ ...e, [draftId]: true }));
+  }
+
+  async function regenerateReplyDraft(draftId) {
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/reply-drafts/${draftId}/regenerate`, { method: "POST" });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setError(detail?.detail ? String(detail.detail) : `Regenerate failed (${res.status})`);
+        return;
+      }
+      setReplyPreviewExpanded((e) => {
+        const next = { ...e };
+        delete next[draftId];
+        return next;
+      });
+      setReplySendPreviewByDraftId((p) => {
+        const next = { ...p };
+        delete next[draftId];
+        return next;
+      });
+      setReplyEditing(null);
+      await load();
+    } catch {
+      setError("Regenerate failed — check network / backend.");
+    }
+  }
+
   async function attachPacketToReplyDraft(packetId) {
     const pick = packetAttachDraftId[packetId];
     if (!pick || pick === "") {
@@ -956,10 +1002,6 @@ export default function TrackingView({
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={() => void load()} disabled={loading}>
-              <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-              Refresh
-            </Button>
             <Button type="button" variant="secondary" onClick={() => void generateReplacementDrafts()}>
               <FilePenLine className="mr-2 h-4 w-4" />
               Generate drafts for replacements
@@ -973,78 +1015,71 @@ export default function TrackingView({
             </Button>
           </div>
         </div>
-      ) : (
-        <div className="flex flex-wrap justify-end gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
-        </div>
-      )}
+      ) : null}
 
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
       {actionNote ? <div className="text-sm text-muted-foreground">{actionNote}</div> : null}
 
       {!singleTabMode && summary ? (
         <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Sent</div>
               <div className="mt-1 text-2xl font-semibold">{summary.drafts_sent || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Replies</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_replied || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Failed</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_failed || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Bounced</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_bounced || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Dead mailboxes</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_dead_mailbox || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Replacement tasks</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_email_tasks_open || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reply rate</div>
               <div className="mt-1 text-2xl font-semibold">{replyRate}%</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">Replies / sent</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Repl. drafts</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_drafts_generated ?? 0}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">By replacement contacts</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Repl. sent</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_drafts_sent ?? 0}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">Replacement drafts</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Threads</div>
               <div className="mt-1 text-2xl font-semibold">{summary.threads_total ?? 0}</div>
@@ -1053,7 +1088,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Inbox / Out</div>
               <div className="mt-1 text-2xl font-semibold">
@@ -1062,7 +1097,7 @@ export default function TrackingView({
               <div className="mt-0.5 text-[11px] text-muted-foreground">Messages</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reply drafts</div>
               <div className="mt-1 text-2xl font-semibold">{summary.reply_drafts_generated ?? 0}</div>
@@ -1072,7 +1107,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Next actions</div>
               <div className="mt-1 text-2xl font-semibold">{summary.follow_up_tasks_open ?? 0}</div>
@@ -1082,7 +1117,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reminders</div>
               <div className="mt-1 text-2xl font-semibold">{summary.reminders_scheduled ?? 0}</div>
@@ -1092,7 +1127,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border border-border bg-card shadow-none">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Asset packets</div>
               <div className="mt-1 text-2xl font-semibold">{summary.asset_packets_draft ?? 0}</div>
@@ -1105,19 +1140,17 @@ export default function TrackingView({
         </div>
       ) : null}
 
-      <Card className="rounded-2xl border border-border bg-card shadow-sm">
-        <CardContent className="pt-6">
       <Tabs
         value={singleTabMode ? activeTab ?? tabValue : tabValue}
         onValueChange={handleTabChange}
         className="w-full"
       >
         {!singleTabMode ? (
-          <TabsList className="flex h-auto min-h-10 w-full flex-wrap gap-1 rounded-2xl border border-border bg-muted/30 p-1">
+          <TabsList className="flex h-auto min-h-10 w-full flex-wrap gap-1 rounded-2xl border-2 border-border bg-muted/30 p-1">
             <TabsTrigger value="events">Events</TabsTrigger>
             <TabsTrigger value="threads">Threads</TabsTrigger>
             <TabsTrigger value="replies">Reply drafts</TabsTrigger>
-            <TabsTrigger value="next-actions">Next actions</TabsTrigger>
+            <TabsTrigger value="next-actions">Follow-ups</TabsTrigger>
             <TabsTrigger value="reminders">Reminders</TabsTrigger>
             <TabsTrigger value="assets-library">Assets</TabsTrigger>
             <TabsTrigger value="asset-packets">Packets</TabsTrigger>
@@ -1126,124 +1159,140 @@ export default function TrackingView({
           </TabsList>
         ) : null}
 
-        <TabsContent value="events" className="mt-4 space-y-4">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div className="text-sm text-muted-foreground">Email history is grouped by draft.</div>
-            <NativeFilterSelect
-              className="w-full md:w-[240px]"
-              value={filter}
-              onValueChange={setFilter}
-              options={EVENT_FILTER_OPTS}
-            />
-          </div>
-
-          <div className="space-y-4">
-            {groupedEvents.map(({ draftId, draft, events: draftEvents }) => (
-              <Card key={draftId} className="rounded-2xl border border-border bg-card shadow-none">
-                <CardHeader className="pb-3">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <CardTitle className="text-base">{draft?.company || `Draft #${draftId}`}</CardTitle>
-                        {isReplacementDraft(draft) ? (
-                          <Badge
-                            variant="default"
-                            className="bg-violet-600 font-normal hover:bg-violet-600"
-                          >
-                            Replacement draft
-                          </Badge>
-                        ) : null}
+        <TabsContent value="events" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <CardTitle>Events</CardTitle>
+                  <CardDescription>Email history is grouped by draft.</CardDescription>
+                </div>
+                <NativeFilterSelect
+                  className="w-full md:w-[240px]"
+                  value={filter}
+                  onValueChange={setFilter}
+                  options={EVENT_FILTER_OPTS}
+                />
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-4">
+                {groupedEvents.map(({ draftId, draft, events: draftEvents }) => (
+                  <div key={draftId} className="rounded-2xl bg-muted/25 p-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-base font-semibold leading-tight">
+                            {draft?.company || `Draft #${draftId}`}
+                          </div>
+                          {isReplacementDraft(draft) ? (
+                            <Badge
+                              variant="default"
+                              className="bg-violet-600 font-normal hover:bg-violet-600"
+                            >
+                              Replacement draft
+                            </Badge>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-sm text-muted-foreground">{draft?.to_email || "No recipient"}</div>
+                        <div className="mt-1 text-sm">{draft?.subject || "No subject"}</div>
                       </div>
-                      <div className="mt-1 text-sm text-muted-foreground">{draft?.to_email || "No recipient"}</div>
-                      <div className="mt-1 text-sm">{draft?.subject || "No subject"}</div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {canShowSend(draft) ? (
-                        <Button type="button" size="sm" onClick={() => void sendSingleDraft(draftId)}>
-                          Send
+                      <div className="flex flex-wrap gap-2">
+                        {canShowSend(draft) ? (
+                          <Button type="button" size="sm" onClick={() => void sendSingleDraft(draftId)}>
+                            Send
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={draft?.status !== "sent"}
+                          title={
+                            draft?.status !== "sent"
+                              ? "Send the email first — a thread will appear"
+                              : "Mock reply via inbox (inbound message)"
+                          }
+                          onClick={() => void mockInboxReply(draft)}
+                        >
+                          Mock reply (inbox)
                         </Button>
-                      ) : null}
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={draft?.status !== "sent"}
-                        title={
-                          draft?.status !== "sent"
-                            ? "Send the email first — a thread will appear"
-                            : "Mock reply via inbox (inbound message)"
-                        }
-                        onClick={() => void mockInboxReply(draft)}
-                      >
-                        Mock reply (inbox)
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void mockTracking(draftId, "mock-bounce")}
-                      >
-                        Mock bounce
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void mockTracking(draftId, "mock-dead-mailbox")}
-                      >
-                        Mock dead mailbox
-                      </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void mockTracking(draftId, "mock-bounce")}
+                        >
+                          Mock bounce
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void mockTracking(draftId, "mock-dead-mailbox")}
+                        >
+                          Mock dead mailbox
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="mt-4 space-y-3 border-t border-border/50 pt-4">
+                      {draftEvents.map((event, index) => (
+                        <div key={event.id}>
+                          <div className="flex items-center justify-between gap-3 rounded-2xl bg-muted/40 p-3">
+                            <div className="flex items-center gap-3">
+                              <div className={`rounded-xl border p-2 ${eventTone(event.event_type)}`}>
+                                {eventIcon(event.event_type)}
+                              </div>
+                              <div>
+                                <div className="font-medium capitalize">{event.event_type.replaceAll("_", " ")}</div>
+                                <div className="text-xs text-muted-foreground">Event #{event.id}</div>
+                              </div>
+                            </div>
+                            <Badge variant="secondary">{new Date(event.created_at).toLocaleString()}</Badge>
+                          </div>
+                          {index < draftEvents.length - 1 ? <Separator className="my-2" /> : null}
+                        </div>
+                      ))}
                     </div>
                   </div>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {draftEvents.map((event, index) => (
-                    <div key={event.id}>
-                      <div className="flex items-center justify-between gap-3 rounded-2xl border border-border p-3">
-                        <div className="flex items-center gap-3">
-                          <div className={`rounded-xl border p-2 ${eventTone(event.event_type)}`}>
-                            {eventIcon(event.event_type)}
-                          </div>
-                          <div>
-                            <div className="font-medium capitalize">{event.event_type.replaceAll("_", " ")}</div>
-                            <div className="text-xs text-muted-foreground">Event #{event.id}</div>
-                          </div>
-                        </div>
-                        <Badge variant="secondary">{new Date(event.created_at).toLocaleString()}</Badge>
-                      </div>
-                      {index < draftEvents.length - 1 ? <Separator className="my-2" /> : null}
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            ))}
-            {!groupedEvents.length ? (
-              <div className="text-sm text-muted-foreground">No events yet.</div>
-            ) : null}
-          </div>
+                ))}
+                {!groupedEvents.length ? (
+                  <div className="text-sm text-muted-foreground">No events yet.</div>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="threads" className="mt-4 space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Threads appear after you send a draft. Open a thread to see outbound and inbound messages.
-            Classification appears after a mock reply (inbox).
-          </p>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <NativeFilterSelect
-              className="w-full sm:w-[220px]"
-              value={threadClassFilter}
-              onValueChange={setThreadClassFilter}
-              options={THREAD_CLASSIFICATION_FILTER_OPTS}
-            />
-          </div>
-          <div className="grid gap-3">
+        <TabsContent value="threads" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <CardTitle>Threads</CardTitle>
+                  <CardDescription>
+                    Threads appear after you send a draft. Open a thread to see outbound and inbound messages.
+                    Classification appears after a mock reply (inbox).
+                  </CardDescription>
+                </div>
+                <NativeFilterSelect
+                  className="w-full sm:w-[220px]"
+                  value={threadClassFilter}
+                  onValueChange={setThreadClassFilter}
+                  options={THREAD_CLASSIFICATION_FILTER_OPTS}
+                />
+              </div>
+            </CardHeader>
+            <CardContent className="grid gap-3">
             {filteredThreads.map((t) => {
               const contact = contactById.get(t.contact_id);
               const counts = messageCountsByThreadId.get(t.id) || { in: 0, out: 0 };
               const label = t.classification;
               return (
-                <Card key={t.id} className="rounded-2xl border border-border bg-card shadow-none">
-                  <CardContent className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+                <div
+                  key={t.id}
+                  className="flex flex-col gap-3 rounded-2xl bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+                >
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="font-medium">{contact?.company || `Contact #${t.contact_id}`}</div>
@@ -1276,8 +1325,7 @@ export default function TrackingView({
                     <Button type="button" variant="outline" onClick={() => setThreadModalId(t.id)}>
                       Open thread
                     </Button>
-                  </CardContent>
-                </Card>
+                </div>
               );
             })}
             {!threads.length ? (
@@ -1286,25 +1334,36 @@ export default function TrackingView({
             {threads.length > 0 && !filteredThreads.length ? (
               <div className="text-sm text-muted-foreground">No threads match the selected classification.</div>
             ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="replies" className="mt-4 space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Reply drafts for inbound messages (after interested / need_more_info classification). Generate from the
-            thread modal, then Approve / Edit and Send — nothing is sent automatically.
-          </p>
-          <div className="grid gap-3">
+        <TabsContent value="replies" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <CardTitle>Reply drafts</CardTitle>
+              <CardDescription>
+                Inbound reply drafts (after interested / need_more_info). Generate from the thread modal, then Approve /
+                Edit and Send — nothing is sent automatically.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3">
             {replyDrafts.map((rd) => {
               const c = contactById.get(rd.contact_id);
               const isEditing = replyEditing?.id === rd.id;
               const attachedPacket = assetPackets.find((p) => p.reply_draft_id === rd.id);
               const pv = replySendPreviewByDraftId[rd.id];
+              const hasPreviewData =
+                pv && !pv.loading && !pv.error && pv.final_body != null;
+              const previewAria =
+                hasPreviewData && replyPreviewExpanded[rd.id] ? "Hide send preview" : "Load send preview";
+              const showPreviewBlock = Boolean(replyPreviewExpanded[rd.id] && hasPreviewData);
+              const canRegenReply = ["draft", "failed"].includes(rd.status);
               return (
-                <Card key={rd.id} className="rounded-2xl border border-teal-500/20 bg-card shadow-none">
-                  <CardContent className="space-y-3 p-5">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
+                <div key={rd.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0 flex-1">
                         <div className="font-medium">{c?.company || `Contact #${rd.contact_id}`}</div>
                         <div className="text-sm text-muted-foreground">
                           {c?.name || "—"} · To: {rd.to_email || "—"}
@@ -1342,154 +1401,166 @@ export default function TrackingView({
                             ) : null}
                           </div>
                         ) : null}
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void fetchReplySendPreview(rd.id)}
-                          >
-                            Load send preview
-                          </Button>
-                          {pv?.loading ? (
-                            <span className="text-xs text-muted-foreground">Loading preview…</span>
-                          ) : null}
-                        </div>
                         {pv?.error ? (
-                          <div className="mt-1 text-xs text-destructive">{pv.error}</div>
+                          <div className="mt-2 text-xs text-destructive">{pv.error}</div>
                         ) : null}
-                        {pv && !pv.loading && !pv.error && pv.final_body != null ? (
-                          <div className="mt-2 space-y-2 rounded-xl border border-border bg-muted/20 p-3 text-xs">
-                            {pv.will_lock_packet ? (
-                              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-900 dark:text-amber-100">
-                                This packet will be locked after successful send.
-                              </div>
-                            ) : null}
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-                              <span>
-                                <span className="font-medium text-foreground">Attachments to send:</span>{" "}
-                                {pv.real_attachments?.length ?? 0}
-                              </span>
-                              <span>
-                                <span className="font-medium text-foreground">Stay as links in body:</span>{" "}
-                                {pv.link_only_assets?.length ?? 0}
-                              </span>
-                            </div>
-                            {(pv.real_attachments?.length ?? 0) > 0 ? (
-                              <ul className="list-inside list-disc space-y-0.5 text-muted-foreground">
-                                {pv.real_attachments.map((a) => (
-                                  <li key={`${a.asset_id}-${a.filename}`}>
-                                    {a.filename}{" "}
-                                    <span className="text-[10px] opacity-80">(asset #{a.asset_id})</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : null}
-                            {(pv.skipped_attachments?.length ?? 0) > 0 ? (
-                              <div className="text-amber-800 dark:text-amber-200">
-                                <div className="font-medium">Not sent as files (fallback to link in Materials if listed)</div>
-                                <ul className="mt-1 list-inside list-disc">
-                                  {pv.skipped_attachments.map((s, idx) => (
-                                    <li key={`${s.asset_id ?? "x"}-${idx}`}>
-                                      {s.asset_id != null ? `Asset #${s.asset_id}: ` : ""}
-                                      {s.reason}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ) : null}
-                            <div>
-                              <div className="font-medium text-foreground">Reply body (saved draft)</div>
-                              <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-muted-foreground">
-                                {pv.base_body || "—"}
-                              </pre>
-                            </div>
-                            {(pv.packet_block || "").trim() ? (
-                              <div>
-                                <div className="font-medium text-foreground">Materials block (links only, append on send)</div>
-                                <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-muted-foreground">
-                                  {pv.packet_block}
-                                </pre>
-                              </div>
-                            ) : (
-                              <div className="text-muted-foreground">
-                                {pv.attached_packet_id != null ? (
-                                  <>
-                                    {(pv.real_attachments?.length ?? 0) > 0 ? (
-                                      <>
-                                        No <code className="text-[11px]">Materials:</code> block — packet assets are sent
-                                        as file attachments only (not duplicated as links).
-                                      </>
-                                    ) : (
-                                      <>
-                                        Packet #{pv.attached_packet_id} is attached, but{" "}
-                                        <code className="text-[11px]">packet_json.assets</code> is empty — add assets to
-                                        the library and rebuild the packet.
-                                      </>
-                                    )}
-                                  </>
-                                ) : (
-                                  <>No materials block (no packet attached or empty assets list).</>
-                                )}
-                              </div>
-                            )}
-                            <div>
-                              <div className="font-medium text-foreground">Final outbound (what Send uses)</div>
-                              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap">{pv.final_body}</pre>
-                            </div>
-                          </div>
+                        {pv?.loading ? (
+                          <div className="mt-2 text-xs text-muted-foreground">Loading preview…</div>
                         ) : null}
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {rd.review_status === "pending" ? (
-                          <>
-                            <Button type="button" size="sm" onClick={() => void reviewReplyDraft(rd.id, "approved")}>
-                              Approve
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              onClick={() => void reviewReplyDraft(rd.id, "rejected")}
-                            >
-                              Reject
-                            </Button>
-                          </>
-                        ) : null}
-                        {["approved", "edited"].includes(rd.review_status) ? (
+                      <div className="flex max-w-full shrink-0 flex-nowrap items-center justify-end gap-2 overflow-x-auto">
+                        {!isEditing ? (
                           <Button
                             type="button"
                             size="sm"
                             variant="outline"
+                            className="shrink-0"
+                            onClick={() =>
+                              setReplyEditing({ id: rd.id, subject: rd.subject ?? "", body: rd.body ?? "" })
+                            }
+                          >
+                            <Pencil className="mr-1 h-3 w-3" />
+                            Edit
+                          </Button>
+                        ) : null}
+                        {rd.review_status === "pending" || rd.review_status === "rejected" ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="shrink-0"
+                            onClick={() => void reviewReplyDraft(rd.id, "approved")}
+                          >
+                            Approve
+                          </Button>
+                        ) : null}
+                        {canSendReplyDraft(rd) ? (
+                          <Button type="button" size="sm" className="shrink-0" onClick={() => void sendReplyDraft(rd.id)}>
+                            Send
+                          </Button>
+                        ) : null}
+                        {canRegenReply ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
+                            onClick={() => void regenerateReplyDraft(rd.id)}
+                          >
+                            Regenerate
+                          </Button>
+                        ) : null}
+                        {rd.review_status === "pending" || ["approved", "edited"].includes(rd.review_status) ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
                             onClick={() => void reviewReplyDraft(rd.id, "rejected")}
                           >
                             Reject
                           </Button>
                         ) : null}
-                        {rd.review_status === "rejected" ? (
-                          <Button type="button" size="sm" onClick={() => void reviewReplyDraft(rd.id, "approved")}>
-                            Approve
-                          </Button>
-                        ) : null}
-                        {canSendReplyDraft(rd) ? (
-                          <Button type="button" size="sm" onClick={() => void sendReplyDraft(rd.id)}>
-                            Send
-                          </Button>
-                        ) : null}
-                        {!isEditing ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            onClick={() =>
-                              setReplyEditing({ id: rd.id, subject: rd.subject ?? "", body: rd.body ?? "" })
-                            }
-                          >
-                            Edit
-                          </Button>
-                        ) : null}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="shrink-0 px-2"
+                          onClick={() => void toggleReplySendPreview(rd.id)}
+                          disabled={pv?.loading}
+                          aria-label={previewAria}
+                          title={previewAria}
+                        >
+                          {pv?.loading ? (
+                            "…"
+                          ) : hasPreviewData && replyPreviewExpanded[rd.id] ? (
+                            <EyeOff className="h-4 w-4" aria-hidden />
+                          ) : (
+                            <Eye className="h-4 w-4" aria-hidden />
+                          )}
+                        </Button>
                       </div>
                     </div>
+                    {showPreviewBlock ? (
+                      <div className="space-y-2 rounded-xl border border-border bg-muted/20 p-3 text-xs">
+                        {pv.will_lock_packet ? (
+                          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-900 dark:text-amber-100">
+                            This packet will be locked after successful send.
+                          </div>
+                        ) : null}
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+                          <span>
+                            <span className="font-medium text-foreground">Attachments to send:</span>{" "}
+                            {pv.real_attachments?.length ?? 0}
+                          </span>
+                          <span>
+                            <span className="font-medium text-foreground">Stay as links in body:</span>{" "}
+                            {pv.link_only_assets?.length ?? 0}
+                          </span>
+                        </div>
+                        {(pv.real_attachments?.length ?? 0) > 0 ? (
+                          <ul className="list-inside list-disc space-y-0.5 text-muted-foreground">
+                            {pv.real_attachments.map((a) => (
+                              <li key={`${a.asset_id}-${a.filename}`}>
+                                {a.filename}{" "}
+                                <span className="text-[10px] opacity-80">(asset #{a.asset_id})</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {(pv.skipped_attachments?.length ?? 0) > 0 ? (
+                          <div className="text-amber-800 dark:text-amber-200">
+                            <div className="font-medium">Not sent as files (fallback to link in Materials if listed)</div>
+                            <ul className="mt-1 list-inside list-disc">
+                              {pv.skipped_attachments.map((s, idx) => (
+                                <li key={`${s.asset_id ?? "x"}-${idx}`}>
+                                  {s.asset_id != null ? `Asset #${s.asset_id}: ` : ""}
+                                  {s.reason}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        <div>
+                          <div className="font-medium text-foreground">Reply body (saved draft)</div>
+                          <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-muted-foreground">
+                            {pv.base_body || "—"}
+                          </pre>
+                        </div>
+                        {(pv.packet_block || "").trim() ? (
+                          <div>
+                            <div className="font-medium text-foreground">Materials block (links only, append on send)</div>
+                            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-muted-foreground">
+                              {pv.packet_block}
+                            </pre>
+                          </div>
+                        ) : (
+                          <div className="text-muted-foreground">
+                            {pv.attached_packet_id != null ? (
+                              <>
+                                {(pv.real_attachments?.length ?? 0) > 0 ? (
+                                  <>
+                                    No <code className="text-[11px]">Materials:</code> block — packet assets are sent as
+                                    file attachments only (not duplicated as links).
+                                  </>
+                                ) : (
+                                  <>
+                                    Packet #{pv.attached_packet_id} is attached, but{" "}
+                                    <code className="text-[11px]">packet_json.assets</code> is empty — add assets to the
+                                    library and rebuild the packet.
+                                  </>
+                                )}
+                              </>
+                            ) : (
+                              <>No materials block (no packet attached or empty assets list).</>
+                            )}
+                          </div>
+                        )}
+                        <div>
+                          <div className="font-medium text-foreground">Final outbound (what Send uses)</div>
+                          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap">{pv.final_body}</pre>
+                        </div>
+                      </div>
+                    ) : null}
                     {isEditing ? (
                       <div className="space-y-2 border-t border-border pt-3">
                         <Input
@@ -1523,8 +1594,7 @@ export default function TrackingView({
                     {rd.error_message ? (
                       <div className="text-sm text-destructive">{rd.error_message}</div>
                     ) : null}
-                  </CardContent>
-                </Card>
+                </div>
               );
             })}
             {!replyDrafts.length ? (
@@ -1532,21 +1602,26 @@ export default function TrackingView({
                 No reply drafts yet — generate one from Threads → Open thread.
               </div>
             ) : null}
-          </div>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="next-actions" className="mt-4 space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Follow-up work after reply classification. Create from the thread modal with Create next action — no
-            auto-creation.
-          </p>
-          <div className="grid gap-3">
+        <TabsContent value="next-actions" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <CardTitle>Follow-ups</CardTitle>
+              <CardDescription>
+                Follow-up work after reply classification. Create from the thread modal with Create next action — no
+                auto-creation.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
             {followUpTasks.map((ft) => {
               const c = contactById.get(ft.contact_id);
               const canAct = ft.status === "open" || ft.status === "in_progress";
               return (
-                <Card key={ft.id} className="rounded-2xl border border-amber-500/20 bg-card shadow-none">
-                  <CardContent className="space-y-3 p-5">
+                <div key={ft.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{ft.title}</div>
@@ -1619,8 +1694,7 @@ export default function TrackingView({
                         ) : null}
                       </div>
                     </div>
-                  </CardContent>
-                </Card>
+                </div>
               );
             })}
             {!followUpTasks.length ? (
@@ -1628,20 +1702,27 @@ export default function TrackingView({
                 No tasks yet — open a classified thread and click Create next action.
               </div>
             ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="reminders" className="mt-4 space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-muted-foreground">
-              Internal reminders (not a calendar). Create manually from Next actions. For due items, click Trigger due
-              to mark them triggered.
-            </p>
-            <Button type="button" size="sm" variant="secondary" onClick={() => void triggerDueReminders()}>
-              Trigger due reminders
-            </Button>
-          </div>
-          <div className="grid gap-3">
+        <TabsContent value="reminders" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <CardTitle>Reminders</CardTitle>
+                  <CardDescription>
+                    Internal reminders (not a calendar). Create manually from Follow-ups. For due items, click Trigger due
+                    to mark them triggered.
+                  </CardDescription>
+                </div>
+                <Button type="button" size="sm" variant="secondary" onClick={() => void triggerDueReminders()}>
+                  Trigger due reminders
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="grid gap-3">
             {reminders.map((r) => {
               const c = r.contact_id != null ? contactById.get(r.contact_id) : null;
               const canAct = REMINDER_ACTIVE_STATUSES.includes(r.status);
@@ -1649,8 +1730,7 @@ export default function TrackingView({
               const isOverdue =
                 canAct && (r.status === "scheduled" || r.status === "snoozed") && remindDate < new Date();
               return (
-                <Card key={r.id} className="rounded-2xl border border-cyan-500/20 bg-card shadow-none">
-                  <CardContent className="space-y-3 p-5">
+                <div key={r.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{r.title}</div>
@@ -1713,27 +1793,30 @@ export default function TrackingView({
                         ) : null}
                       </div>
                     </div>
-                  </CardContent>
-                </Card>
+                </div>
               );
             })}
             {!reminders.length ? (
               <div className="text-sm text-muted-foreground">
-                No reminders yet — create one from Next actions (Create reminder).
+                No reminders yet — create one from Follow-ups (Create reminder).
               </div>
             ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="assets-library" className="mt-4 space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Global materials library. Thread packets pick active assets by type (need_more_info vs interested).
-          </p>
-          <Card className="rounded-2xl border border-indigo-500/20 bg-card shadow-none">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Add asset</CardTitle>
+        <TabsContent value="assets-library" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <CardTitle>Assets</CardTitle>
+              <CardDescription>
+                Global materials library. Thread packets pick active assets by type (need_more_info vs interested).
+              </CardDescription>
             </CardHeader>
-            <CardContent className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <CardContent className="space-y-4">
+            <div className="rounded-2xl bg-muted/25 p-4">
+              <div className="mb-3 text-sm font-medium">Add asset</div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
               <div className="min-w-[140px] flex-1 space-y-1">
                 <div className="text-xs text-muted-foreground">Name</div>
                 <Input value={newAssetName} onChange={(e) => setNewAssetName(e.target.value)} placeholder="Pitch deck Q1" />
@@ -1757,12 +1840,11 @@ export default function TrackingView({
               <Button type="button" onClick={() => void submitNewAsset()}>
                 Add asset
               </Button>
-            </CardContent>
-          </Card>
+              </div>
+            </div>
           <div className="grid gap-3">
             {assets.map((a) => (
-              <Card key={a.id} className="rounded-2xl border border-border bg-card shadow-none">
-                <CardContent className="p-5">
+              <div key={a.id} className="rounded-2xl bg-muted/30 p-5">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="outline">{a.asset_type}</Badge>
                     <Badge variant="secondary">{a.status}</Badge>
@@ -1781,21 +1863,26 @@ export default function TrackingView({
                     )}
                     {a.file_path ? <span className="block text-xs">File: {a.file_path}</span> : null}
                   </div>
-                </CardContent>
-              </Card>
+              </div>
             ))}
             {!assets.length ? (
               <div className="text-sm text-muted-foreground">No assets — add one with the form above.</div>
             ) : null}
           </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="asset-packets" className="mt-4 space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Packets for this run. Built from the thread modal (Build … packet). Contents are a list of assets in{" "}
-            <code className="text-xs">packet_json</code>.
-          </p>
-          <div className="grid gap-3">
+        <TabsContent value="asset-packets" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <CardTitle>Packets</CardTitle>
+              <CardDescription>
+                Packets for this run. Built from the thread modal (Build … packet). Contents are a list of assets in{" "}
+                <code className="text-xs">packet_json</code>.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
             {assetPackets.map((p) => {
               const c = p.contact_id != null ? contactById.get(p.contact_id) : null;
               const inner = Array.isArray(p.packet_json?.assets) ? p.packet_json.assets : [];
@@ -1835,8 +1922,7 @@ export default function TrackingView({
                 })),
               ];
               return (
-                <Card key={p.id} className="rounded-2xl border border-indigo-500/20 bg-card shadow-none">
-                  <CardContent className="space-y-3 p-5">
+                <div key={p.id} className="space-y-3 rounded-2xl bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{p.title}</div>
@@ -2118,8 +2204,7 @@ export default function TrackingView({
                         No assets in this packet yet (add from the library or Edit packet).
                       </div>
                     )}
-                  </CardContent>
-                </Card>
+                </div>
               );
             })}
             {!assetPackets.length ? (
@@ -2127,20 +2212,27 @@ export default function TrackingView({
                 No packets — for need_more_info / interested threads, click Build … packet in the modal.
               </div>
             ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="dead" className="mt-4 space-y-4">
-          <div className="grid gap-3">
+        <TabsContent value="dead" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <CardTitle>Dead mailboxes</CardTitle>
+              <CardDescription>
+                Contacts marked with dead-mailbox email health. Create replacement tasks from here or from the queue.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
             {deadContacts.map((contact) => {
               const pending = pendingReplacementForContact(contact.id);
               const replacementRow = replacementContactForSource(contact.id);
               return (
-                <Card
+                <div
                   key={contact.id}
-                  className="rounded-2xl border border-red-200/60 bg-card shadow-none dark:border-red-900/50"
+                  className="flex flex-col gap-4 rounded-2xl bg-red-950/10 p-5 lg:flex-row lg:items-center lg:justify-between dark:bg-red-950/20"
                 >
-                  <CardContent className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <AlertTriangle className="h-4 w-4 shrink-0 text-red-600" />
@@ -2174,21 +2266,30 @@ export default function TrackingView({
                         Auto create replacement task
                       </Button>
                     )}
-                  </CardContent>
-                </Card>
+                </div>
               );
             })}
             {!deadContacts.length ? (
               <div className="text-sm text-muted-foreground">No dead mailboxes yet.</div>
             ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="queue" className="mt-4 space-y-4">
-          <div className="grid gap-3">
+        <TabsContent value="queue" className="mt-4">
+          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+            <CardHeader>
+              <CardTitle>Re-search queue</CardTitle>
+              <CardDescription>
+                Replacement-search and enrichment tasks for this run. Re-run from here when needed.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
             {replacementQueueTasks.map((task) => (
-              <Card key={task.id} className="rounded-2xl border border-border bg-card shadow-none">
-                <CardContent className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between">
+              <div
+                key={task.id}
+                className="flex flex-col gap-4 rounded-2xl bg-muted/30 p-5 lg:flex-row lg:items-center lg:justify-between"
+              >
                   <div>
                     <div className="font-medium">{task.company || "Unknown company"}</div>
                     <div className="mt-1 text-sm text-muted-foreground">
@@ -2210,17 +2311,15 @@ export default function TrackingView({
                       Re-run enrichment
                     </Button>
                   </div>
-                </CardContent>
-              </Card>
+              </div>
             ))}
             {!replacementQueueTasks.length ? (
               <div className="text-sm text-muted-foreground">No re-search tasks in queue.</div>
             ) : null}
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
-        </CardContent>
-      </Card>
 
       {threadModalId != null ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

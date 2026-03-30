@@ -121,7 +121,9 @@ def continue_workflow_after_review(db: Session, run_id: int):
     update_run_status(db, run, "running")
 
     try:
-        execute_step(db, run_id, "generate_master_email_draft")
+        run = get_run(db, run_id)
+        if not (run.master_email if run else None):
+            execute_step(db, run_id, "generate_master_email_draft")
         execute_step(db, run_id, "generate_emails")
         run = get_run(db, run_id)
         update_run_status(db, run, "drafts_ready")

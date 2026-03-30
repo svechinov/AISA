@@ -2,8 +2,10 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.repositories.contact_repo import list_sendable_contacts_by_run
-from app.repositories.email_draft_repo import find_draft_by_contact_id
+from app.models.contact import Contact
+from app.models.email_draft import EmailDraft
+from app.repositories.contact_repo import get_contact, list_sendable_contacts_by_run
+from app.repositories.email_draft_repo import delete_email_draft, find_draft_by_contact_id, get_email_draft
 from app.repositories.run_repo import get_run, update_run_master_email_variants
 from app.services.llm_gateway import generate_json
 from app.services.outreach_personalize import (
@@ -149,6 +151,45 @@ def _variants_from_run(run) -> list[dict[str, str]]:
     return normalize_variants_payload(me)
 
 
+def build_outreach_email_entry(
+    db: Session,
+    run,
+    contact: Contact,
+    variants: list[dict[str, str]],
+) -> dict | None:
+    """One row for persist_generated_emails / generate_emails output; None if this contact should be skipped."""
+    if contact.status != "valid":
+        return None
+    if contact.review_status not in {"approved", "edited"}:
+        return None
+    if not (contact.email or "").strip():
+        return None
+    if find_draft_by_contact_id(db, run.id, contact.id):
+        return None
+
+    variant, variant_idx = select_variant_for_contact(run.id, contact.id, variants)
+    logger.info(
+        "EMAIL VARIANT run_id=%s contact_id=%s variant_idx=%s",
+        run.id,
+        contact.id,
+        variant_idx,
+    )
+    subject, body = personalize_outbound(
+        run.id,
+        contact,
+        variant["subject"],
+        variant["body"],
+    )
+
+    return {
+        "contact_id": contact.id,
+        "company": contact.company,
+        "to": contact.email,
+        "subject": subject,
+        "body": body,
+    }
+
+
 def generate_emails(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:
     run = get_run(db, run_id)
     if not run:
@@ -158,37 +199,89 @@ def generate_emails(db: Session, run_id: int, workflow_name: str, step_input: di
 
     variants = _variants_from_run(run)
 
-    emails = []
-
+    emails: list[dict] = []
     for contact in sendable_contacts:
-        if find_draft_by_contact_id(db, run_id, contact.id):
-            continue
-
-        variant, variant_idx = select_variant_for_contact(run.id, contact.id, variants)
-        logger.info(
-            "EMAIL VARIANT run_id=%s contact_id=%s variant_idx=%s",
-            run.id,
-            contact.id,
-            variant_idx,
-        )
-        subject, body = personalize_outbound(
-            run.id,
-            contact,
-            variant["subject"],
-            variant["body"],
-        )
-
-        emails.append(
-            {
-                "contact_id": contact.id,
-                "company": contact.company,
-                "to": contact.email,
-                "subject": subject,
-                "body": body,
-            }
-        )
+        entry = build_outreach_email_entry(db, run, contact, variants)
+        if entry:
+            emails.append(entry)
 
     return {
         "emails": emails,
         "email_count": len(emails),
     }
+
+
+def materialize_outreach_draft_for_sendable_contact(
+    db: Session,
+    contact: Contact,
+) -> EmailDraft | None:
+    """
+    If the contact is approved/edited, valid, has email, and workflow supports drafts:
+    ensure master variants exist, persist one personalized draft when missing.
+    Returns the draft row (existing or new), or None if skipped (preconditions / workflow).
+    """
+    from app.services.email_draft_persistence_service import persist_generated_emails
+    from app.services.workflow_registry import WORKFLOWS
+
+    if contact.review_status not in {"approved", "edited"}:
+        return None
+    if contact.status != "valid":
+        return None
+    if not (contact.email or "").strip():
+        return None
+
+    existing: EmailDraft | None = find_draft_by_contact_id(db, contact.run_id, contact.id)
+    if existing:
+        return existing
+
+    run = get_run(db, contact.run_id)
+    if not run:
+        return None
+    steps = WORKFLOWS.get(run.workflow_name)
+    if not steps or "generate_emails" not in steps:
+        return None
+
+    if not run.master_email:
+        generate_master_email_draft(db, run.id, run.workflow_name, {})
+        db.refresh(run)
+    variants = _variants_from_run(run)
+    entry = build_outreach_email_entry(db, run, contact, variants)
+    if not entry:
+        return None
+    persist_generated_emails(db, run.id, {"emails": [entry]})
+    return find_draft_by_contact_id(db, contact.run_id, contact.id)
+
+
+def ensure_outreach_draft_for_contact(db: Session, contact: Contact) -> None:
+    """
+    When a contact is approved or edited, create their personalized draft immediately
+    (master variants are generated on first need). Safe to call multiple times.
+    """
+    try:
+        materialize_outreach_draft_for_sendable_contact(db, contact)
+    except Exception:
+        logger.exception(
+            "ensure_outreach_draft_for_contact failed run_id=%s contact_id=%s",
+            contact.run_id,
+            contact.id,
+        )
+
+
+def regenerate_outbound_email_draft(db: Session, draft_id: int) -> EmailDraft:
+    """Delete the current draft row and build a fresh personalized email for the same contact."""
+    draft = get_email_draft(db, draft_id)
+    if not draft:
+        raise ValueError("Email draft not found")
+    if draft.status in ("sent", "sending"):
+        raise ValueError("Cannot regenerate sent or sending draft")
+
+    contact_id = draft.contact_id
+    delete_email_draft(db, draft)
+
+    contact = get_contact(db, contact_id)
+    if not contact:
+        raise ValueError("Contact not found")
+    new_draft = materialize_outreach_draft_for_sendable_contact(db, contact)
+    if not new_draft:
+        raise RuntimeError("Could not regenerate draft — approve the contact and ensure a valid email.")
+    return new_draft

@@ -1,11 +1,13 @@
 from sqlalchemy.orm import Session
 
+from app.models.reply_draft import ReplyDraft
 from app.repositories.contact_repo import get_contact
 from app.repositories.email_message_repo import list_email_messages_by_thread
 from app.repositories.email_thread_repo import get_email_thread
 from app.repositories.reply_draft_repo import (
     create_reply_draft,
     find_reply_draft_by_thread_and_type,
+    get_reply_draft,
 )
 from app.repositories.run_repo import get_run
 from app.repositories.template_repo import get_template_by_type
@@ -43,23 +45,8 @@ Best,
 Pavel"""
 
 
-def generate_reply_draft_for_thread(db: Session, thread_id: int) -> dict:
-    thread = get_email_thread(db, thread_id)
-    if not thread:
-        raise ValueError(f"Thread {thread_id} not found")
-
-    if thread.classification not in {"need_more_info", "interested"}:
-        raise ValueError("Reply draft generation is only supported for need_more_info or interested")
-
-    existing = find_reply_draft_by_thread_and_type(db, thread_id, thread.classification)
-    if existing:
-        return {
-            "thread_id": thread.id,
-            "reply_type": thread.classification,
-            "reply_draft_id": existing.id,
-            "deduplicated": True,
-        }
-
+def _build_reply_subject_body_for_thread(db: Session, thread) -> tuple[str, str]:
+    """Shared template render for create + regenerate."""
     run = get_run(db, thread.run_id)
     if not run:
         raise ValueError(f"Run {thread.run_id} not found")
@@ -107,6 +94,59 @@ def generate_reply_draft_for_thread(db: Session, thread_id: int) -> dict:
 
     subject = render_template(subject_content, variables).strip()
     body = render_template(body_content, variables).strip()
+    return subject, body
+
+
+def regenerate_reply_draft(db: Session, draft_id: int) -> ReplyDraft:
+    """Re-render subject/body from templates; reset review to pending (new version of the reply)."""
+    draft = get_reply_draft(db, draft_id)
+    if not draft:
+        raise ValueError("Reply draft not found")
+    if draft.status in ("sent", "sending"):
+        raise ValueError("Cannot regenerate a sent or sending reply draft")
+
+    thread = get_email_thread(db, draft.thread_id)
+    if not thread:
+        raise ValueError("Thread not found")
+
+    subject, body = _build_reply_subject_body_for_thread(db, thread)
+    draft.subject = subject
+    draft.body = body
+    draft.review_status = "pending"
+    draft.review_notes = None
+    draft.reviewed_at = None
+    draft.status = "draft"
+    draft.error_message = None
+
+    db.add(draft)
+    db.commit()
+    db.refresh(draft)
+    return draft
+
+
+def generate_reply_draft_for_thread(db: Session, thread_id: int) -> dict:
+    thread = get_email_thread(db, thread_id)
+    if not thread:
+        raise ValueError(f"Thread {thread_id} not found")
+
+    if thread.classification not in {"need_more_info", "interested"}:
+        raise ValueError("Reply draft generation is only supported for need_more_info or interested")
+
+    existing = find_reply_draft_by_thread_and_type(db, thread_id, thread.classification)
+    if existing:
+        return {
+            "thread_id": thread.id,
+            "reply_type": thread.classification,
+            "reply_draft_id": existing.id,
+            "deduplicated": True,
+        }
+
+    reply_type = thread.classification
+    contact = get_contact(db, thread.contact_id)
+    if not contact:
+        raise ValueError(f"Contact {thread.contact_id} not found")
+
+    subject, body = _build_reply_subject_body_for_thread(db, thread)
 
     draft = create_reply_draft(
         db=db,

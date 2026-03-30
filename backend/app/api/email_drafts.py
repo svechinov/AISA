@@ -13,6 +13,7 @@ from app.schemas.email_draft import (
     EmailDraftRead,
     EmailDraftReviewUpdate,
 )
+from app.workers.email_worker import regenerate_outbound_email_draft
 
 router = APIRouter(prefix="/email-drafts", tags=["email-drafts"])
 
@@ -68,3 +69,13 @@ def edit_email_draft_route(
         body=payload.body,
         review_notes=payload.review_notes,
     )
+
+
+@router.post("/{draft_id}/regenerate", response_model=EmailDraftRead)
+def regenerate_email_draft_route(draft_id: int, db: Session = Depends(get_db)):
+    try:
+        return regenerate_outbound_email_draft(db, draft_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
