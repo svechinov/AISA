@@ -72,6 +72,18 @@ def find_active_reminder_for_follow_up_task(db: Session, follow_up_task_id: int)
     )
 
 
+def find_active_reminder_for_thread(db: Session, thread_id: int) -> Reminder | None:
+    return (
+        db.query(Reminder)
+        .filter(
+            Reminder.thread_id == thread_id,
+            Reminder.status.in_(["scheduled", "triggered", "snoozed"]),
+        )
+        .order_by(Reminder.remind_at.asc(), Reminder.id.desc())
+        .first()
+    )
+
+
 def update_reminder_status(
     db: Session,
     reminder: Reminder,

@@ -2,6 +2,8 @@
 
 **Актуальная продуктовая передача и план ухода от логики «только VOD»:** см. корневой **`HANDOFF.md`** в этом же репозитории.
 
+**Операторский UI и схема на релизе 2.1.4** (dead mailbox / send later / вложения через `attached_asset_ids`): раздел **`HANDOFF.md` §12**; фронтенд-версия — `frontend/package.json`.
+
 ---
 
 Документ ниже описывает архитектуру, сущности, реализованный функционал, расположение кода и следующий логичный шаг. Репозиторий: `ai-biz-os/` (backend + frontend + infra).
@@ -52,8 +54,10 @@ ai-biz-os/
 │       └── verify_template_emails.py
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/AiBizOsHumanUI.jsx   # оболочка приложения / выбор проекта-run
-│   │   ├── components/TrackingView.jsx # основной tracking: события, треды, reply drafts, follow-up, reminders, assets, packets
+│   │   ├── pages/AiBizOsHumanUI.jsx   # Review workspace + навигация в Tracking
+│   │   ├── components/TrackingView.jsx # события, треды, reply drafts, follow-ups, reminders, assets, packets, dead mailboxes, queue
+│   │   ├── components/DraftAssetAttachmentsField.jsx # выбор assets для email/reply draft
+│   │   ├── components/EmailDraftBodyPreview.jsx      # превью: тело, [Signature], [Asset #…]
 │   │   └── components/ui/
 │   ├── vite.config.js           # proxy /api → VITE_API_PROXY_TARGET или :8000
 │   └── .env.development
@@ -75,11 +79,11 @@ ai-biz-os/
 | **Rule** | `rules` | Правила (scope, контент) |
 | **Template** | `templates` | Шаблоны писем |
 | **Contact** | `contacts` | Контакт в контексте `run_id`, review, `email_health`, `source_json` (в т.ч. replacement) |
-| **EmailDraft** | `email_drafts` | Исходящий драфт outreach, отправка, tracking |
+| **EmailDraft** | `email_drafts` | Исходящий драфт outreach, отправка, tracking; **`attached_asset_ids`** (JSON список id из библиотеки `Asset`) |
 | **EmailEvent** | `email_events` | События (sent, replied, bounce, dead_mailbox, …) |
 | **EmailThread** | `email_threads` | Тред переписки: `run_id`, `contact_id`, `draft_id`, `classification` (+ confidence, reason) |
 | **EmailMessage** | `email_messages` | Сообщения в треде (inbound/outbound) |
-| **ReplyDraft** | `reply_drafts` | Черновик ответа: `run_id`, `thread_id`, `contact_id`, `reply_type`, subject/body, review, send |
+| **ReplyDraft** | `reply_drafts` | Черновик ответа: `run_id`, `thread_id`, `contact_id`, `reply_type`, subject/body, review, send; **`attached_asset_ids`** |
 | **ResearchTask** | `research_tasks` | **Технические** задачи: replacement, enrichment, поиск (не путать с follow-up) |
 | **FollowUpTask** | `follow_up_tasks` | **Sales next actions**: типы `reply_to_interested`, `send_more_info`, `follow_up_later`, `close_thread` |
 | **Reminder** | `reminders` | Напоминания, опционально привязка к `follow_up_task_id`, `remind_at`, статусы scheduled/triggered/… |
@@ -103,8 +107,11 @@ Project ──< Run ──< Step
 
 Asset (global) ──embedded in── AssetPacket.packet_json.assets[]  (копия/снимок ссылок на asset_id)
 
+EmailDraft / ReplyDraft ──> attached_asset_ids[]  (ссылки на id в `assets`; **отдельно** от пакета; миграция `_ensure_drafts_attached_asset_ids_columns` в `init_db.py`)
+
 FollowUpTask ≠ ResearchTask  (разные таблицы, разный UI и смысл)
 ReplyDraft ≠ AssetPacket      (письмо vs структурированный пакет; связь reply_draft_id пока не обязательна)
+Draft.attached_asset_ids ≠ AssetPacket  (ручной список вложений в UI vs собранный пакет; при отправке нужно явно **мержить** в пайплайне, см. §9)
 ```
 
 **Сводка по run:** `app/services/run_summary_service.py` → `GET /sending/runs/{run_id}/summary` (счётчики по контактам, драфтам, событиям, тредам, reply drafts, follow-up, reminders, asset packets).
@@ -148,14 +155,16 @@ ReplyDraft ≠ AssetPacket      (письмо vs структурированн�
 - Сборка пакета: `asset_packet_service.build_asset_packet_for_thread` — только `need_more_info` / `interested`, дедуп по thread + packet_type при draft/approved, выбор активных assets по типам из ТЗ.
 - API: `app/api/assets.py`, `app/api/asset_packets.py`.
 - UI: вкладки Assets, Packets; в thread modal — Build info/interested packet; Approve/Archive packet.
+- **Draft-level вложения (2.1.4):** колонки **`attached_asset_ids`** на `email_drafts` и `reply_drafts`; нормализация `utils/attached_asset_ids.py`; в edit-PATCH обоих типов драфтов; в Human UI и Tracking — компонент **`DraftAssetAttachmentsField`**, превью **`EmailDraftBodyPreview`** (`[Asset #n]` под `[Signature]`). Отправка MIME по этим id **ещё не сквозная** — см. §9.
 - **Нет** автопривязки packet → reply draft и автосмены `sent` при отправке письма.
 
 ### 5.7 Frontend
 
-- Основной операционный экран: **`frontend/src/components/TrackingView.jsx`** (много вкладок: Events, Threads, Reply drafts, Next actions, Reminders, Assets, Packets, Dead, Queue).
-- Вход: **`frontend/src/pages/AiBizOsHumanUI.jsx`**.
+- **Review workspace:** **`AiBizOsHumanUI.jsx`** — контакты и исходящие email drafts, Approve / Send later (часы, `review_notes: "send_later"`), dead mailbox стили и ограничения (Delete драфта только при `tracking_status == dead_mailbox`), Edit с rich text + вложения из Assets.
+- **Tracking:** **`TrackingView.jsx`** — Events, Threads, Reply drafts (модалка редактирования как у outreach), Next actions, Reminders, Assets, Packets, Dead mailboxes, Re-search queue; единый `border-2` для карточек; подсветка dead mailbox по цепочкам событий и тредам; убраны успешные toast `actionNote`.
+- Версия пакета фронта: **`package.json` → 2.1.4** (смотреть при handoff).
 
-### 10. Инфра и запуск
+### 5.8 Инфра и запуск
 
 - `infra/docker-compose.yml`: Postgres, Redis, backend.
 - Локальный backend в фоне: `backend/scripts/start_uvicorn_bg.sh`.
@@ -172,7 +181,9 @@ ReplyDraft ≠ AssetPacket      (письмо vs структурированн�
 | Follow-up | `models/follow_up_task.py`, `repositories/follow_up_task_repo.py`, `services/follow_up_service.py`, `api/follow_up_tasks.py` |
 | Reminders | `models/reminder.py`, `repositories/reminder_repo.py`, `services/reminder_service.py`, `services/reminder_scheduler.py`, `api/reminders.py` |
 | Assets / packets | `models/asset.py`, `models/asset_packet.py`, `repositories/asset_repo.py`, `repositories/asset_packet_repo.py`, `services/asset_packet_service.py`, `api/assets.py`, `api/asset_packets.py` |
+| Draft-level asset ids | `utils/attached_asset_ids.py`, `init_db._ensure_drafts_attached_asset_ids_columns`, `models/email_draft.py`, `models/reply_draft.py`, `api/email_drafts.py`, `api/reply_drafts.py`, репозитории драфтов |
 | Reply drafts | `models/reply_draft.py`, `api/reply_drafts.py`, `services/reply_draft_service.py`, `reply_sender.py` |
+| Human UI / превью драфтов | `pages/AiBizOsHumanUI.jsx`, `components/DraftAssetAttachmentsField.jsx`, `components/EmailDraftBodyPreview.jsx` |
 | Research / replacement | `models/research_task.py`, `api/research_tasks.py`, `services/replacement_*.py`, `research_task_runner.py` |
 | Tracking UI | `frontend/src/components/TrackingView.jsx` |
 | Proxy dev API | `frontend/vite.config.js`, `frontend/.env.development` |
@@ -192,29 +203,31 @@ ReplyDraft ≠ AssetPacket      (письмо vs структурированн�
 1. **Не смешивать `research_tasks` с follow-up логикой** — follow-up живёт в `follow_up_tasks` и отдельных API/UI.
 2. **Не вешать автомагию** там, где в ТЗ явно требовались ручные шаги: автосоздание follow-up, автосоздание reminders, автотриггер reminders при загрузке страницы, автопривязка asset packet к reply draft, автосмена `asset_packets.status` на `sent` при отправке — **пока не делалось намеренно**.
 3. **`app/init_db.py`** — аккуратно с порядком и условиями миграций; не ломать существующие `_ensure_*` без понимания боевых БД.
-4. **Разделение слоёв:** `reply_draft` = текст письма; `asset_packet` = структурированный пакет. Не переносить смысл пакета целиком в тело шаблона reply как единственный источник правды.
+4. **Разделение слоёв:** `reply_draft` = текст письма; `asset_packet` = структурированный пакет; **`attached_asset_ids`** на драфте = отдельный явный список вложений из библиотеки. Три источника не смешивать в одном поле без явного merge при отправке.
 5. **Порт 8000 vs 8001** — документировать для команды: Docker vs локальный uvicorn, иначе «ложные» 404.
 
 ---
 
-## 9. Следующий шаг: **Attach packet to reply draft**
+## 9. Следующие шаги (бэклог после 2.1.4)
 
-Цель: явно связать **`AssetPacket`** с конкретным **`ReplyDraft`**, не ломая ручной характер слоя.
+### 9.1 Отправка: **merge `attached_asset_ids` в MIME**
 
-**Предлагаемая направленность работ**
+Сейчас оператор видит в превью `[Asset #…]` и сохраняет id в БД, но **`email_sender`** (исходящий outreach) и **`reply_sender.build_reply_send_payload`** должны **явно добавить** файлы по id из `email_drafts.attached_asset_ids` / `reply_drafts.attached_asset_ids` к уже существующей логике **asset packet** (`resolve_sendable_attachments` и т.д.), с дедупом по `asset_id` и осмысленными лимитами размера.
 
-1. **Данные**  
-   - В `AssetPacket` уже есть поле **`reply_draft_id`** (FK на `reply_drafts.id`, nullable). Нужно:
-     - API: эндпоинт вида `PATCH /asset-packets/{id}` с установкой `reply_draft_id` **или** отдельный `POST /asset-packets/{id}/attach-reply-draft` с телом `{ "reply_draft_id": … }`.
-     - Валидация: тот же `run_id`, согласованный `thread_id`/`contact_id` с выбранным reply draft (чтобы не прикрепить чужой драфт).
-2. **Сервис**  
-   - Тонкая функция в `asset_packet_service` или в repo `update_asset_packet`: проставить `reply_draft_id`, опционально записать в `packet_json` метаданные (`attached_at`, `attached_by`).
-3. **UI**  
-   - В `TrackingView` на карточке **reply draft** или **asset packet**: выбор «Attach to this reply draft» / «Detach».
-   - Отображать на пакете ссылку на `reply_draft_id` и наоборот (badges).
-4. **Не делать на этом шаге**  
-   - Автоподстановка тела письма из packet в LLM без отдельного согласования.
-   - Авто `sent` на packet при отправке reply (можно отдельной итерацией с чётким ТЗ).
+### 9.2 **Attach packet to reply draft**
+
+Цель: явно связать **`AssetPacket`** с конкретным **`ReplyDraft`**, не ломая ручной характер слоя. Это **отдельная** задача от 9.1 (packet vs draft-level ids).
+
+1. **Данные** — в `AssetPacket` уже есть **`reply_draft_id`** (FK, nullable):
+   - API: `PATCH /asset-packets/{id}` с установкой `reply_draft_id` **или** `POST /asset-packets/{id}/attach-reply-draft` с телом `{ "reply_draft_id": … }`.
+   - Валидация: тот же `run_id`, согласованный `thread_id`/`contact_id` с выбранным reply draft.
+2. **Сервис** — `update_asset_packet`: проставить `reply_draft_id`, опционально метаданные в `packet_json`.
+3. **UI** — в `TrackingView` на карточке reply draft / packet: Attach / Detach, взаимные badges.
+4. **Не делать без ТЗ** — авто-подстановка тела из packet в LLM; авто `sent` на packet при отправке reply.
+
+### 9.3 Git
+
+На некоторых машинах **`git push`** к GitHub падает по SSH (`Permission denied (publickey)`); до настройки ключа теги остаются локальными.
 
 ---
 
@@ -224,4 +237,4 @@ ReplyDraft ≠ AssetPacket      (письмо vs структурированн�
 
 ---
 
-*Документ сгенерирован для передачи контекста; при существенных изменениях кода обновляйте разделы 3–6 и 9.*
+*Документ сгенерирован для передачи контекста; при существенных изменениях кода обновляйте разделы 3–6 и 9. Расширенное описание релиза 2.1.4 — **`HANDOFF.md` §12**.*

@@ -8,13 +8,22 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NativeFilterSelect } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Input } from "@/components/ui/input";
 import {
+  AlertCircle,
   AlertTriangle,
   CircleAlert,
+  Clock,
   Eye,
   EyeOff,
   FilePenLine,
@@ -60,16 +69,12 @@ const THREAD_CLASS_LABELS = {
   unclear: "Unclear",
 };
 
-const NEXT_ACTION_CLASSIFICATIONS = ["interested", "need_more_info", "ask_later", "not_interested"];
-
-const NEXT_ACTION_HINTS = {
-  interested: "Will create: Reply to interested lead",
-  need_more_info: "Will create: Send more information",
-  ask_later: "Will create: Follow up later",
-  not_interested: "Will create: Close thread",
-};
-
 const REMINDER_ACTIVE_STATUSES = ["scheduled", "triggered", "snoozed"];
+
+function toDatetimeLocalValue(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 const ASSET_LIBRARY_TYPE_OPTS = [
   { value: "deck", label: "Deck" },
@@ -95,6 +100,7 @@ export default function TrackingView({
   activeTab,
   onActiveTabChange,
   singleTabMode = false,
+  onRunWorkspaceRefresh,
 }) {
   const showSignaturePlaceholder = Boolean((runSignatureHtml ?? "").trim());
   const [events, setEvents] = useState([]);
@@ -105,19 +111,23 @@ export default function TrackingView({
   const [threads, setThreads] = useState([]);
   const [runMessages, setRunMessages] = useState([]);
   const [threadModalId, setThreadModalId] = useState(null);
+  const [threadRemindAtLocal, setThreadRemindAtLocal] = useState("");
   const [threadClassFilter, setThreadClassFilter] = useState("all");
   const [replyDrafts, setReplyDrafts] = useState([]);
-  const [followUpTasks, setFollowUpTasks] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [assets, setAssets] = useState([]);
   const [assetPackets, setAssetPackets] = useState([]);
   const [newAssetName, setNewAssetName] = useState("");
   const [newAssetType, setNewAssetType] = useState("deck");
   const [newAssetUrl, setNewAssetUrl] = useState("");
-  /** packet id → selected reply draft id string for attach flow */
-  const [packetAttachDraftId, setPacketAttachDraftId] = useState({});
-  /** packet assets edit session: draft list + library picker */
+  /** packet assets edit session: draft list + library picker + title */
   const [packetEditState, setPacketEditState] = useState(null);
+  const [packetToDelete, setPacketToDelete] = useState(null);
+  const [newPacketForm, setNewPacketForm] = useState({
+    title: "",
+    draftAssets: [],
+    addPick: "",
+  });
   /** reply draft id → send-preview fields + attachment summary */
   const [replySendPreviewByDraftId, setReplySendPreviewByDraftId] = useState({});
   /** When false, send-preview block is collapsed even if data is cached */
@@ -143,7 +153,7 @@ export default function TrackingView({
     setLoading(true);
     setError("");
     try {
-      const [er, sr, dr, cr, tr, th, msg, rep, fut, rem, ast, apk] = await Promise.all([
+      const [er, sr, dr, cr, tr, th, msg, rep, rem, ast, apk] = await Promise.all([
         fetch(`${API_BASE}/email-events/run/${runId}`),
         fetch(`${API_BASE}/sending/runs/${runId}/summary`),
         fetch(`${API_BASE}/email-drafts/run/${runId}`),
@@ -152,7 +162,6 @@ export default function TrackingView({
         fetch(`${API_BASE}/email-threads/run/${runId}`),
         fetch(`${API_BASE}/email-threads/run/${runId}/messages`),
         fetch(`${API_BASE}/reply-drafts/run/${runId}`),
-        fetch(`${API_BASE}/follow-up-tasks/run/${runId}`),
         fetch(`${API_BASE}/reminders/run/${runId}`),
         fetch(`${API_BASE}/assets`),
         fetch(`${API_BASE}/asset-packets/run/${runId}`),
@@ -178,8 +187,6 @@ export default function TrackingView({
       setRunMessages(Array.isArray(msgData) ? msgData : []);
       const repData = rep.ok ? await rep.json() : [];
       setReplyDrafts(Array.isArray(repData) ? repData : []);
-      const futData = fut.ok ? await fut.json() : [];
-      setFollowUpTasks(Array.isArray(futData) ? futData : []);
       const remData = rem.ok ? await rem.json() : [];
       setReminders(Array.isArray(remData) ? remData : []);
       const astData = ast.ok ? await ast.json() : [];
@@ -203,15 +210,15 @@ export default function TrackingView({
       setThreads([]);
       setRunMessages([]);
       setReplyDrafts([]);
-      setFollowUpTasks([]);
       setReminders([]);
       setAssets([]);
       setAssetPackets([]);
       setNewAssetName("");
       setNewAssetType("deck");
       setNewAssetUrl("");
-      setPacketAttachDraftId({});
       setPacketEditState(null);
+      setPacketToDelete(null);
+      setNewPacketForm({ title: "", draftAssets: [], addPick: "" });
       setReplySendPreviewByDraftId({});
       setReplyEditing(null);
       setThreadModalId(null);
@@ -222,6 +229,17 @@ export default function TrackingView({
     const i = setInterval(() => void load(), 3000);
     return () => clearInterval(i);
   }, [runId, load]);
+
+  useEffect(() => {
+    if (threadModalId == null) {
+      setThreadRemindAtLocal("");
+      return;
+    }
+    const d = new Date();
+    d.setDate(d.getDate() + 3);
+    d.setHours(9, 0, 0, 0);
+    setThreadRemindAtLocal(toDatetimeLocalValue(d));
+  }, [threadModalId]);
 
   const eventTone = (type) => {
     if (type === "sent")
@@ -263,14 +281,16 @@ export default function TrackingView({
 
   const draftById = useMemo(() => new Map(drafts.map((d) => [d.id, d])), [drafts]);
 
-  const activeReminderByFollowUpTaskId = useMemo(() => {
-    const candidates = reminders.filter(
-      (r) => r.follow_up_task_id && REMINDER_ACTIVE_STATUSES.includes(r.status),
-    );
-    candidates.sort((a, b) => b.id - a.id);
+  /** Earliest active reminder per thread (from thread modal). */
+  const activeThreadReminderByThreadId = useMemo(() => {
     const m = new Map();
-    for (const r of candidates) {
-      if (!m.has(r.follow_up_task_id)) m.set(r.follow_up_task_id, r);
+    for (const r of reminders) {
+      if (!r.thread_id || !REMINDER_ACTIVE_STATUSES.includes(r.status)) continue;
+      const prev = m.get(r.thread_id);
+      const t = new Date(r.remind_at).getTime();
+      if (!prev || t < new Date(prev.remind_at).getTime()) {
+        m.set(r.thread_id, r);
+      }
     }
     return m;
   }, [reminders]);
@@ -279,6 +299,39 @@ export default function TrackingView({
     if (threadClassFilter === "all") return threads;
     return threads.filter((t) => t.classification === threadClassFilter);
   }, [threads, threadClassFilter]);
+
+  /** Last message in thread is inbound → “ball in our court”, show badge and pin to top. */
+  const threadNeedsInboundAttention = useMemo(() => {
+    const byThread = new Map();
+    for (const msg of runMessages) {
+      if (!byThread.has(msg.thread_id)) byThread.set(msg.thread_id, []);
+      byThread.get(msg.thread_id).push(msg);
+    }
+    const need = new Map();
+    for (const [tid, arr] of byThread) {
+      arr.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      const last = arr[arr.length - 1];
+      need.set(tid, last?.direction === "inbound");
+    }
+    return need;
+  }, [runMessages]);
+
+  const sortedFilteredThreads = useMemo(() => {
+    const list = [...filteredThreads];
+    list.sort((a, b) => {
+      const aAtt = threadNeedsInboundAttention.get(a.id) ? 1 : 0;
+      const bAtt = threadNeedsInboundAttention.get(b.id) ? 1 : 0;
+      if (aAtt !== bAtt) return bAtt - aAtt;
+      const aRm = activeThreadReminderByThreadId.has(a.id) ? 1 : 0;
+      const bRm = activeThreadReminderByThreadId.has(b.id) ? 1 : 0;
+      if (aRm !== bRm) return bRm - aRm;
+      const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+      const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return b.id - a.id;
+    });
+    return list;
+  }, [filteredThreads, threadNeedsInboundAttention, activeThreadReminderByThreadId]);
 
   const messageCountsByThreadId = useMemo(() => {
     const m = new Map();
@@ -534,63 +587,6 @@ export default function TrackingView({
     }
   }
 
-  async function createNextActionForThread(threadId) {
-    setError("");
-    try {
-      const res = await fetch(`${API_BASE}/follow-up-tasks/thread/${threadId}/create-next-action`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Create failed (${res.status})`);
-        return;
-      }
-      await res.json();
-      await load();
-    } catch {
-      setError("Create next action failed.");
-    }
-  }
-
-  async function patchFollowUpTaskStatus(taskId, status) {
-    setError("");
-    try {
-      const res = await fetch(`${API_BASE}/follow-up-tasks/${taskId}/status`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Update failed (${res.status})`);
-        return;
-      }
-      await load();
-    } catch {
-      setError("Update follow-up task failed.");
-    }
-  }
-
-  async function createReminderForFollowUpTask(taskId) {
-    setError("");
-    try {
-      const res = await fetch(`${API_BASE}/reminders/follow-up-task/${taskId}/create`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ remind_at: null }),
-      });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Create reminder failed (${res.status})`);
-        return;
-      }
-      await res.json();
-      await load();
-    } catch {
-      setError("Create reminder failed.");
-    }
-  }
-
   async function patchReminderStatus(reminderId, status) {
     setError("");
     try {
@@ -605,6 +601,7 @@ export default function TrackingView({
         return;
       }
       await load();
+      onRunWorkspaceRefresh?.();
     } catch {
       setError("Reminder update failed.");
     }
@@ -626,24 +623,9 @@ export default function TrackingView({
         return;
       }
       await load();
+      onRunWorkspaceRefresh?.();
     } catch {
       setError("Snooze failed.");
-    }
-  }
-
-  async function triggerDueReminders() {
-    setError("");
-    try {
-      const res = await fetch(`${API_BASE}/reminders/trigger-due`, { method: "POST" });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Trigger failed (${res.status})`);
-        return;
-      }
-      await res.json();
-      await load();
-    } catch {
-      setError("Trigger due reminders failed.");
     }
   }
 
@@ -677,19 +659,38 @@ export default function TrackingView({
     }
   }
 
-  async function buildAssetPacketForThread(threadId) {
+  async function createReminderForThread(threadId) {
+    if (!threadRemindAtLocal) {
+      setError("Choose date and time for the reminder.");
+      return;
+    }
+    const remindAt = new Date(threadRemindAtLocal);
+    if (Number.isNaN(remindAt.getTime())) {
+      setError("Invalid date/time.");
+      return;
+    }
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/asset-packets/thread/${threadId}/build`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/reminders/thread/${threadId}/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ remind_at: remindAt.toISOString() }),
+      });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Build packet failed (${res.status})`);
+        setError(typeof data.detail === "string" ? data.detail : `Reminder failed (${res.status})`);
         return;
       }
-      await res.json();
+      if (data.deduplicated) {
+        setError("");
+        await load();
+        onRunWorkspaceRefresh?.();
+        return;
+      }
       await load();
+      onRunWorkspaceRefresh?.();
     } catch {
-      setError("Build asset packet failed.");
+      setError("Create reminder failed.");
     }
   }
 
@@ -737,10 +738,12 @@ export default function TrackingView({
     };
   }
 
-  function beginPacketAssetEdit(packetId, assetsArray) {
+  function beginPacketAssetEdit(p) {
+    const inner = Array.isArray(p?.packet_json?.assets) ? p.packet_json.assets : [];
     setPacketEditState({
-      packetId,
-      draftAssets: clonePacketAssetsForEdit(Array.isArray(assetsArray) ? assetsArray : []),
+      packetId: p.id,
+      titleDraft: p.title ?? "",
+      draftAssets: clonePacketAssetsForEdit(inner),
       addPick: "",
     });
   }
@@ -754,6 +757,19 @@ export default function TrackingView({
     if (!st) return;
     setError("");
     try {
+      const title = (st.titleDraft ?? "").trim();
+      if (title) {
+        const tr = await fetch(`${API_BASE}/asset-packets/${st.packetId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title }),
+        });
+        if (!tr.ok) {
+          const detail = await tr.json().catch(() => ({}));
+          setError(detail?.detail ? String(detail.detail) : `Update title failed (${tr.status})`);
+          return;
+        }
+      }
       const res = await fetch(`${API_BASE}/asset-packets/${st.packetId}/assets`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -771,18 +787,63 @@ export default function TrackingView({
     }
   }
 
-  async function savePacketAsNew(packetId) {
+  async function duplicatePacket(packetId) {
     setError("");
     try {
       const res = await fetch(`${API_BASE}/asset-packets/${packetId}/clone`, { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(typeof data.detail === "string" ? data.detail : `Clone failed (${res.status})`);
+        setError(typeof data.detail === "string" ? data.detail : `Duplicate failed (${res.status})`);
         return;
       }
       await load();
     } catch {
-      setError("Save as new packet failed.");
+      setError("Duplicate packet failed.");
+    }
+  }
+
+  async function createRunPacket() {
+    if (!runId) return;
+    const title = newPacketForm.title.trim();
+    if (!title) {
+      setError("Enter a packet title.");
+      return;
+    }
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/asset-packets/run/${runId}/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, assets: newPacketForm.draftAssets }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(typeof data.detail === "string" ? data.detail : `Create packet failed (${res.status})`);
+        return;
+      }
+      setNewPacketForm({ title: "", draftAssets: [], addPick: "" });
+      await load();
+    } catch {
+      setError("Create packet failed.");
+    }
+  }
+
+  async function confirmDeletePacket() {
+    const id = packetToDelete?.id;
+    if (!id) return;
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/asset-packets/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setError(detail?.detail ? String(detail.detail) : `Delete failed (${res.status})`);
+        return;
+      }
+      setPacketToDelete(null);
+      setPacketEditState((st) => (st?.packetId === id ? null : st));
+      await load();
+    } catch {
+      setError("Delete packet failed.");
     }
   }
 
@@ -861,35 +922,6 @@ export default function TrackingView({
       await load();
     } catch {
       setError("Regenerate failed — check network / backend.");
-    }
-  }
-
-  async function attachPacketToReplyDraft(packetId) {
-    const pick = packetAttachDraftId[packetId];
-    if (!pick || pick === "") {
-      setError("Select a reply draft.");
-      return;
-    }
-    const replyDraftId = Number(pick);
-    if (!Number.isFinite(replyDraftId)) {
-      setError("Invalid reply draft.");
-      return;
-    }
-    setError("");
-    try {
-      const res = await fetch(`${API_BASE}/asset-packets/${packetId}/attach-reply-draft`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reply_draft_id: replyDraftId }),
-      });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Attach failed (${res.status})`);
-        return;
-      }
-      await load();
-    } catch {
-      setError("Attach packet failed.");
     }
   }
 
@@ -1080,21 +1112,11 @@ export default function TrackingView({
           </Card>
           <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground">Next actions</div>
-              <div className="mt-1 text-2xl font-semibold">{summary.follow_up_tasks_open ?? 0}</div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground">
-                Open · In prog. {summary.follow_up_tasks_in_progress ?? 0} · Done{" "}
-                {summary.follow_up_tasks_completed ?? 0} · Total {summary.follow_up_tasks_total ?? 0}
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
-            <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reminders</div>
-              <div className="mt-1 text-2xl font-semibold">{summary.reminders_scheduled ?? 0}</div>
+              <div className="mt-1 text-2xl font-semibold">{summary.reminders_total ?? 0}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">
-                Trig. {summary.reminders_triggered ?? 0} · Snooze {summary.reminders_snoozed ?? 0} · Done{" "}
-                {summary.reminders_completed ?? 0} · Total {summary.reminders_total ?? 0}
+                Sched. {summary.reminders_scheduled ?? 0} · Trig. {summary.reminders_triggered ?? 0} · Snooze{" "}
+                {summary.reminders_snoozed ?? 0} · Done {summary.reminders_completed ?? 0}
               </div>
             </CardContent>
           </Card>
@@ -1121,7 +1143,6 @@ export default function TrackingView({
             <TabsTrigger value="events">Events</TabsTrigger>
             <TabsTrigger value="threads">Threads</TabsTrigger>
             <TabsTrigger value="replies">Reply drafts</TabsTrigger>
-            <TabsTrigger value="next-actions">Follow-ups</TabsTrigger>
             <TabsTrigger value="reminders">Reminders</TabsTrigger>
             <TabsTrigger value="assets-library">Assets</TabsTrigger>
             <TabsTrigger value="asset-packets">Packets</TabsTrigger>
@@ -1258,8 +1279,9 @@ export default function TrackingView({
                 <div>
                   <CardTitle>Threads</CardTitle>
                   <CardDescription>
-                    Threads appear after you send a draft. Open a thread to see outbound and inbound messages.
-                    Classification appears after a mock reply (inbox).
+                    Threads appear after you send a draft.                     Open a thread for messages, generating a reply, or a reminder.{" "}
+                    <strong>Inbound</strong> and <strong>Remind later</strong> badges (after inbound, before dead mailbox)
+                    pin threads toward the top.
                   </CardDescription>
                 </div>
                 <NativeFilterSelect
@@ -1271,7 +1293,7 @@ export default function TrackingView({
               </div>
             </CardHeader>
             <CardContent className="grid gap-3">
-            {filteredThreads.map((t) => {
+            {sortedFilteredThreads.map((t) => {
               const contact = contactById.get(t.contact_id);
               const counts = messageCountsByThreadId.get(t.id) || { in: 0, out: 0 };
               const label = t.classification;
@@ -1281,6 +1303,8 @@ export default function TrackingView({
                 : null;
               const isThreadDeadMailbox =
                 draftLifecycle === "dead_mailbox" || contact?.email_health === "dead_mailbox";
+              const needsInboundAttention = Boolean(threadNeedsInboundAttention.get(t.id));
+              const threadRemind = activeThreadReminderByThreadId.get(t.id);
               return (
                 <div
                   key={t.id}
@@ -1299,9 +1323,32 @@ export default function TrackingView({
                           />
                         ) : null}
                         <div className="font-medium">{contact?.company || `Contact #${t.contact_id}`}</div>
+                        {needsInboundAttention ? (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-green-600/50 bg-green-600/15 font-normal text-green-800 dark:border-green-600/45 dark:bg-green-950/45 dark:text-green-300"
+                            title="Last message in this thread is inbound — needs your attention"
+                          >
+                            <AlertCircle
+                              className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-400"
+                              aria-hidden
+                            />
+                            Inbound
+                          </Badge>
+                        ) : null}
+                        {threadRemind ? (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
+                            title={`Reminder: ${new Date(threadRemind.remind_at).toLocaleString()}`}
+                          >
+                            <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+                            Remind later
+                          </Badge>
+                        ) : null}
                         {isThreadDeadMailbox ? (
-                          <Badge variant="destructive" className="font-mono text-xs">
-                            dead_mailbox
+                          <Badge variant="destructive" className="font-normal text-xs">
+                            Dead mailbox
                           </Badge>
                         ) : null}
                         {label ? (
@@ -1596,119 +1643,15 @@ export default function TrackingView({
           </Card>
         </TabsContent>
 
-        <TabsContent value="next-actions" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
-            <CardHeader>
-              <CardTitle>Follow-ups</CardTitle>
-              <CardDescription>
-                Follow-up work after reply classification. Create from the thread modal with Create next action — no
-                auto-creation.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3">
-            {followUpTasks.map((ft) => {
-              const c = contactById.get(ft.contact_id);
-              const canAct = ft.status === "open" || ft.status === "in_progress";
-              return (
-                <div key={ft.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <div className="font-medium">{ft.title}</div>
-                        <div className="mt-1 text-sm text-muted-foreground">
-                          {c?.company || `Contact #${ft.contact_id}`} · {c?.name || "—"}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2">
-                          <Badge variant="outline">{ft.task_type}</Badge>
-                          <Badge variant="secondary">{ft.status}</Badge>
-                          <Badge variant="secondary">{ft.priority}</Badge>
-                          <span className="text-xs text-muted-foreground">Thread #{ft.thread_id}</span>
-                          {activeReminderByFollowUpTaskId.has(ft.id) ? (
-                            <Badge
-                              variant="outline"
-                              className="border-cyan-500/50 font-normal text-cyan-800 dark:text-cyan-200"
-                            >
-                              Reminder: {activeReminderByFollowUpTaskId.get(ft.id)?.status}
-                            </Badge>
-                          ) : null}
-                        </div>
-                        {ft.description ? (
-                          <p className="mt-2 text-sm text-muted-foreground">{ft.description}</p>
-                        ) : null}
-                        {ft.due_at ? (
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            Due: {new Date(ft.due_at).toLocaleString()}
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {canAct && ft.status === "open" ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => void patchFollowUpTaskStatus(ft.id, "in_progress")}
-                          >
-                            Start
-                          </Button>
-                        ) : null}
-                        {canAct ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            onClick={() => void patchFollowUpTaskStatus(ft.id, "completed")}
-                          >
-                            Complete
-                          </Button>
-                        ) : null}
-                        {canAct ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void patchFollowUpTaskStatus(ft.id, "cancelled")}
-                          >
-                            Cancel
-                          </Button>
-                        ) : null}
-                        {!activeReminderByFollowUpTaskId.has(ft.id) ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="border-cyan-500/40"
-                            onClick={() => void createReminderForFollowUpTask(ft.id)}
-                          >
-                            Create reminder
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                </div>
-              );
-            })}
-            {!followUpTasks.length ? (
-              <div className="text-sm text-muted-foreground">
-                No tasks yet — open a classified thread and click Create next action.
-              </div>
-            ) : null}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
         <TabsContent value="reminders" className="mt-4">
           <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardHeader>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <CardTitle>Reminders</CardTitle>
-                  <CardDescription>
-                    Internal reminders (not a calendar). Create manually from Follow-ups. For due items, click Trigger due
-                    to mark them triggered.
-                  </CardDescription>
-                </div>
-                <Button type="button" size="sm" variant="secondary" onClick={() => void triggerDueReminders()}>
-                  Trigger due reminders
-                </Button>
+              <div>
+                <CardTitle>Reminders</CardTitle>
+                <CardDescription>
+                  Dates are stored for your workflow only (not a separate calendar). Create from a thread with{" "}
+                  <strong>Set reminder</strong> under &quot;Remind me later&quot;.
+                </CardDescription>
               </div>
             </CardHeader>
             <CardContent className="grid gap-3">
@@ -1726,8 +1669,8 @@ export default function TrackingView({
                         <div className="mt-1 text-sm text-muted-foreground">
                           {c?.company || (r.contact_id != null ? `Contact #${r.contact_id}` : "—")} ·{" "}
                           {c?.name || "—"}
-                          {r.follow_up_task_id ? (
-                            <span className="text-xs"> · Follow-up #{r.follow_up_task_id}</span>
+                          {r.thread_id ? (
+                            <span className="text-xs text-muted-foreground/90"> · Thread #{r.thread_id}</span>
                           ) : null}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -1787,7 +1730,7 @@ export default function TrackingView({
             })}
             {!reminders.length ? (
               <div className="text-sm text-muted-foreground">
-                No reminders yet — create one from Follow-ups (Create reminder).
+                No reminders yet — open a thread and use <strong>Set reminder</strong>.
               </div>
             ) : null}
             </CardContent>
@@ -1867,51 +1810,103 @@ export default function TrackingView({
             <CardHeader>
               <CardTitle>Packets</CardTitle>
               <CardDescription>
-                Packets for this run. Built from the thread modal (Build … packet). Contents are a list of assets in{" "}
-                <code className="text-xs">packet_json</code>.
+                Run-level presets of library assets. In email and reply draft editors, use <strong>Assets</strong> (
+                pick individually) and <strong>Packets</strong> (merge all ids from a preset). You can also build from
+                a classified thread via the thread modal.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
-            {assetPackets.map((p) => {
-              const c = p.contact_id != null ? contactById.get(p.contact_id) : null;
-              const inner = Array.isArray(p.packet_json?.assets) ? p.packet_json.assets : [];
-              const packetThreadIdNum =
-                p.thread_id != null && String(p.thread_id).trim() !== ""
-                  ? Number(p.thread_id)
-                  : null;
-              const hasPacketThread =
-                packetThreadIdNum != null && Number.isFinite(packetThreadIdNum);
-              const threadReplyDrafts = hasPacketThread
-                ? replyDrafts.filter(
-                    (rd) =>
-                      rd.thread_id != null && Number(rd.thread_id) === packetThreadIdNum,
-                  )
-                : [];
-              const attachDraftOptions = [
-                { value: "", label: "Select reply draft…" },
-                ...threadReplyDrafts.map((rd) => ({
-                  value: String(rd.id),
-                  label: `Draft #${rd.id}: ${(rd.subject || "").slice(0, 48) || "—"}`,
-                })),
-              ];
-              const showAttach =
-                hasPacketThread &&
-                p.status !== "archived" &&
-                p.status !== "sent" &&
-                threadReplyDrafts.length > 0;
-              const canEditPacketAssets = p.status === "draft" || p.status === "approved";
-              const packetSentLocked = p.status === "sent";
-              const isEditingPacket = packetEditState?.packetId === p.id;
-              const activeLibraryAssets = assets.filter((a) => a.status === "active");
-              const addLibraryOptions = [
-                { value: "", label: "Add from library…" },
-                ...activeLibraryAssets.map((a) => ({
-                  value: String(a.id),
-                  label: `${a.asset_type}: ${(a.name || "").slice(0, 42) || `#${a.id}`}`,
-                })),
-              ];
-              return (
-                <div key={p.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
+              {(() => {
+                const activeNew = assets.filter((a) => a.status === "active");
+                const newAddOptions = [
+                  { value: "", label: "Add from library…" },
+                  ...activeNew.map((a) => ({
+                    value: String(a.id),
+                    label: `${a.asset_type}: ${(a.name || "").slice(0, 42) || `#${a.id}`}`,
+                  })),
+                ];
+                return (
+                  <div className="space-y-3 rounded-2xl border-2 border-dashed border-border bg-muted/15 p-4">
+                    <div className="font-medium">New packet</div>
+                    <p className="text-xs text-muted-foreground">
+                      Title required. Assets are optional; you can edit after creation.
+                    </p>
+                    <Input
+                      placeholder="Packet title"
+                      value={newPacketForm.title}
+                      onChange={(e) => setNewPacketForm((f) => ({ ...f, title: e.target.value }))}
+                    />
+                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+                      <NativeFilterSelect
+                        className="w-full sm:max-w-md"
+                        value={newPacketForm.addPick ?? ""}
+                        onValueChange={(v) => setNewPacketForm((f) => ({ ...f, addPick: v }))}
+                        options={newAddOptions}
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          const pick = newPacketForm.addPick;
+                          if (!pick) return;
+                          const aid = Number(pick);
+                          const lib = activeNew.find((x) => x.id === aid);
+                          if (!lib) return;
+                          if (newPacketForm.draftAssets.some((row) => row.asset_id === lib.id)) {
+                            setNewPacketForm((f) => ({ ...f, addPick: "" }));
+                            return;
+                          }
+                          setNewPacketForm((f) => ({
+                            ...f,
+                            draftAssets: [...f.draftAssets, libraryRowToPacketSnapshot(lib)],
+                            addPick: "",
+                          }));
+                        }}
+                      >
+                        Add to list
+                      </Button>
+                    </div>
+                    {newPacketForm.draftAssets.length ? (
+                      <ul className="text-xs text-muted-foreground">
+                        {newPacketForm.draftAssets.map((row, idx) => (
+                          <li key={`${row.asset_id}-${idx}`}>
+                            #{row.asset_id} · {row.title || row.name || "—"}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <Button type="button" size="sm" onClick={() => void createRunPacket()}>
+                      Create packet
+                    </Button>
+                  </div>
+                );
+              })()}
+              {assetPackets.map((p) => {
+                const c = p.contact_id != null ? contactById.get(p.contact_id) : null;
+                const inner = Array.isArray(p.packet_json?.assets) ? p.packet_json.assets : [];
+                const packetThreadIdNum =
+                  p.thread_id != null && String(p.thread_id).trim() !== ""
+                    ? Number(p.thread_id)
+                    : null;
+                const hasPacketThread =
+                  packetThreadIdNum != null && Number.isFinite(packetThreadIdNum);
+                const isArchived = p.status === "archived";
+                const isSent = p.status === "sent";
+                const isEditingPacket = packetEditState?.packetId === p.id;
+                const canEditContents =
+                  !isArchived && !isSent && (p.status === "draft" || p.status === "approved");
+                const packetSentLocked = isSent;
+                const activeLibraryAssets = assets.filter((a) => a.status === "active");
+                const addLibraryOptions = [
+                  { value: "", label: "Add from library…" },
+                  ...activeLibraryAssets.map((a) => ({
+                    value: String(a.id),
+                    label: `${a.asset_type}: ${(a.name || "").slice(0, 42) || `#${a.id}`}`,
+                  })),
+                ];
+                return (
+                  <div key={p.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{p.title}</div>
@@ -1932,106 +1927,82 @@ export default function TrackingView({
                           </span>
                           {hasPacketThread ? (
                             <span className="text-xs">Thread #{packetThreadIdNum}</span>
-                          ) : null}
+                          ) : (
+                            <span className="text-xs">Run preset</span>
+                          )}
                           <span>
                             {c?.company || (p.contact_id != null ? `Contact #${p.contact_id}` : "—")} ·{" "}
                             {c?.name || "—"}
                           </span>
                         </div>
-                        {p.reply_draft_id != null ? (
-                          <div className="mt-2 text-sm font-medium text-foreground">
-                            Attached to Reply Draft: {p.reply_draft_id}
-                          </div>
-                        ) : null}
                         {p.description ? (
                           <p className="mt-2 text-sm text-muted-foreground">{p.description}</p>
                         ) : null}
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {canEditPacketAssets && !isEditingPacket ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => beginPacketAssetEdit(p.id, inner)}
-                          >
-                            Edit packet
-                          </Button>
-                        ) : null}
-                        {!isEditingPacket ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void savePacketAsNew(p.id)}
-                          >
-                            Save as new
-                          </Button>
-                        ) : null}
-                        {p.status === "draft" ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            onClick={() => void patchAssetPacket(p.id, { status: "approved" })}
-                          >
-                            Approve packet
-                          </Button>
-                        ) : null}
-                        {p.status !== "archived" ? (
+                      {!isEditingPacket ? (
+                        <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto">
+                          {canEditContents ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              className="shrink-0"
+                              onClick={() => beginPacketAssetEdit(p)}
+                            >
+                              Edit
+                            </Button>
+                          ) : null}
                           <Button
                             type="button"
                             size="sm"
                             variant="outline"
-                            onClick={() => void patchAssetPacket(p.id, { status: "archived" })}
+                            className="shrink-0"
+                            onClick={() => void duplicatePacket(p.id)}
                           >
-                            Archive packet
+                            Duplicate
                           </Button>
-                        ) : null}
-                      </div>
+                          {!isArchived ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="shrink-0"
+                              onClick={() => void patchAssetPacket(p.id, { status: "archived" })}
+                            >
+                              Archive
+                            </Button>
+                          ) : null}
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            className="shrink-0"
+                            onClick={() => setPacketToDelete({ id: p.id, title: p.title ?? "" })}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
-                    {hasPacketThread && p.status !== "archived" && !threadReplyDrafts.length ? (
-                      <div className="text-xs text-muted-foreground">
-                        {!replyDrafts.length ? (
-                          <>
-                            This run has no reply drafts yet. Open thread #{packetThreadIdNum}, generate a reply
-                            draft, then return to Packets.
-                          </>
-                        ) : (
-                          <>
-                            This run has {replyDrafts.length} reply draft(s), but none are tied to thread #
-                            {packetThreadIdNum}. You can attach only to a draft with the same thread_id (same Open
-                            thread).
-                          </>
-                        )}
-                      </div>
-                    ) : null}
-                    {showAttach ? (
-                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
-                        <NativeFilterSelect
-                          className="w-full sm:max-w-xs"
-                          value={packetAttachDraftId[p.id] ?? ""}
-                          onValueChange={(v) =>
-                            setPacketAttachDraftId((prev) => ({ ...prev, [p.id]: v }))
-                          }
-                          options={attachDraftOptions}
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void attachPacketToReplyDraft(p.id)}
-                        >
-                          Attach to reply draft
-                        </Button>
-                      </div>
-                    ) : null}
                     {isEditingPacket ? (
                       <div className="rounded-xl border-2 border-indigo-500/30 bg-muted/20 p-3">
+                        <div className="mb-3 grid gap-2">
+                          <div className="text-xs font-medium text-muted-foreground">Title</div>
+                          <Input
+                            value={packetEditState.titleDraft ?? ""}
+                            onChange={(e) =>
+                              setPacketEditState((st) =>
+                                st && st.packetId === p.id ? { ...st, titleDraft: e.target.value } : st,
+                              )
+                            }
+                            placeholder="Packet title"
+                          />
+                        </div>
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-xs font-medium text-muted-foreground">Edit packet contents</div>
+                          <div className="text-xs font-medium text-muted-foreground">Assets</div>
                           <div className="flex flex-wrap gap-2">
                             <Button type="button" size="sm" onClick={() => void savePacketAssets()}>
-                              Save packet
+                              Save
                             </Button>
                             <Button type="button" size="sm" variant="outline" onClick={() => cancelPacketAssetEdit()}>
                               Cancel
@@ -2134,10 +2105,9 @@ export default function TrackingView({
                               const lib = activeLibraryAssets.find((x) => x.id === aid);
                               if (!lib) return;
                               if (st.draftAssets.some((row) => row.asset_id === lib.id)) {
-                                setError("That asset is already in the packet.");
+                                setPacketEditState({ ...st, addPick: "" });
                                 return;
                               }
-                              setError("");
                               setPacketEditState({
                                 ...st,
                                 draftAssets: [...st.draftAssets, libraryRowToPacketSnapshot(lib)],
@@ -2150,7 +2120,7 @@ export default function TrackingView({
                         </div>
                         {!packetEditState.draftAssets.length ? (
                           <p className="mt-2 text-xs text-muted-foreground">
-                            Empty packet is allowed — Send will not add attachments or links from the packet.
+                            Empty packet is allowed. Drafts use merged asset ids when you pick this preset.
                           </p>
                         ) : null}
                       </div>
@@ -2190,17 +2160,17 @@ export default function TrackingView({
                       </div>
                     ) : (
                       <div className="text-xs text-muted-foreground">
-                        No assets in this packet yet (add from the library or Edit packet).
+                        No assets in this packet yet — use Edit to add from the library.
                       </div>
                     )}
+                  </div>
+                );
+              })}
+              {!assetPackets.length ? (
+                <div className="text-sm text-muted-foreground">
+                  No saved packets yet — create one above or build from a classified thread (thread modal).
                 </div>
-              );
-            })}
-            {!assetPackets.length ? (
-              <div className="text-sm text-muted-foreground">
-                No packets — for need_more_info / interested threads, click Build … packet in the modal.
-              </div>
-            ) : null}
+              ) : null}
             </CardContent>
           </Card>
         </TabsContent>
@@ -2335,6 +2305,7 @@ export default function TrackingView({
               />
               <DraftAssetAttachmentsField
                 assets={assets}
+                assetPackets={assetPackets}
                 selectedIds={replyEditing.attached_asset_ids}
                 onSelectedIdsChange={(attached_asset_ids) =>
                   setReplyEditing((prev) => (prev ? { ...prev, attached_asset_ids } : prev))
@@ -2401,34 +2372,65 @@ export default function TrackingView({
                     variant="secondary"
                     onClick={() => void generateReplyDraftForThread(mt.id)}
                   >
-                    {mt.classification === "need_more_info" ? "Generate info reply" : "Generate follow-up reply"}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="border-indigo-500/40"
-                    onClick={() => void buildAssetPacketForThread(mt.id)}
-                  >
-                    {mt.classification === "need_more_info" ? "Build info packet" : "Build interested packet"}
+                    {mt.classification === "need_more_info" ? "Generate info reply" : "Generate reply draft"}
                   </Button>
                 </div>
               );
             })()}
             {(() => {
-              const mt = threads.find((x) => x.id === threadModalId);
-              if (!mt?.classification || !NEXT_ACTION_CLASSIFICATIONS.includes(mt.classification)) return null;
+              if (threadModalId == null) return null;
+              const activeForThread = activeThreadReminderByThreadId.get(threadModalId);
               return (
                 <div className="space-y-2 border-b border-border pb-3">
-                  <p className="text-xs text-muted-foreground">{NEXT_ACTION_HINTS[mt.classification]}</p>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void createNextActionForThread(mt.id)}
-                  >
-                    Create next action
-                  </Button>
+                  <div className="text-xs font-medium text-muted-foreground">Reminder</div>
+                  {activeForThread ? (
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">
+                        Active: {new Date(activeForThread.remind_at).toLocaleString()} —{" "}
+                        <span className="font-medium text-foreground">{activeForThread.status}</span>
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => void patchReminderStatus(activeForThread.id, "completed")}
+                        >
+                          Complete reminder
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void snoozeReminderOneDay(activeForThread)}
+                        >
+                          Snooze +1 day
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+                      <div className="grid w-full gap-1 sm:max-w-xs">
+                        <label className="text-xs text-muted-foreground" htmlFor="thread-remind-at">
+                          Remind me later
+                        </label>
+                        <Input
+                          id="thread-remind-at"
+                          type="datetime-local"
+                          value={threadRemindAtLocal}
+                          onChange={(e) => setThreadRemindAtLocal(e.target.value)}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="border-amber-600/50"
+                        onClick={() => void createReminderForThread(threadModalId)}
+                      >
+                        Set reminder
+                      </Button>
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -2462,6 +2464,31 @@ export default function TrackingView({
           </div>
         </div>
       ) : null}
+
+      <Dialog
+        open={packetToDelete != null}
+        onOpenChange={(o) => {
+          if (!o) setPacketToDelete(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete packet?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to delete this packet?
+            {packetToDelete?.title ? ` “${packetToDelete.title}”` : ""} This cannot be undone.
+          </p>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => setPacketToDelete(null)}>
+              Cancel
+            </Button>
+            <Button type="button" variant="destructive" onClick={() => void confirmDeletePacket()}>
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

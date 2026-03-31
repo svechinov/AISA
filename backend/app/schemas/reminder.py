@@ -28,6 +28,12 @@ class ReminderCreateForTask(BaseModel):
     remind_at: datetime | None = None
 
 
+class ReminderCreateForThread(BaseModel):
+    """When omitted, backend defaults to a few days ahead (UTC)."""
+
+    remind_at: datetime | None = None
+
+
 class ReminderStatusUpdate(BaseModel):
     status: str
     output_json: dict | None = None

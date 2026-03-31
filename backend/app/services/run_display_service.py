@@ -6,10 +6,25 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.repositories.contact_repo import list_contacts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
 from app.repositories.step_repo import get_step_by_run_and_name, list_steps_by_run
 from app.repositories.email_thread_repo import list_email_threads_by_run
 from app.services.run_summary_service import get_run_summary
+
+# Still approved/edited in DB, but not counted as “ready contacts” in setup summary.
+_UNDELIVERABLE_EMAIL_HEALTH = frozenset({"bounced", "dead_mailbox"})
+
+
+def _count_contacts_approved_reachable(db: Session, run_id: int) -> int:
+    """Approved or edited contacts that are not bounced / dead mailbox."""
+    contacts = list_contacts_by_run(db, run_id)
+    return sum(
+        1
+        for c in contacts
+        if c.review_status in {"approved", "edited"}
+        and (c.email_health or "unknown") not in _UNDELIVERABLE_EMAIL_HEALTH
+    )
 
 
 def _count_companies_from_step(db: Session, run_id: int) -> int | None:
@@ -34,6 +49,30 @@ def _count_contacts_from_find_step(db: Session, run_id: int) -> int | None:
     return len(contacts)
 
 
+def _count_validated_from_step(db: Session, run_id: int) -> int | None:
+    """Count contacts that passed through validate_contacts (from step output when completed)."""
+    st = get_step_by_run_and_name(db, run_id, "validate_contacts")
+    if not st or st.status != "completed":
+        return None
+    out = st.output_json or {}
+    valid = out.get("valid_contacts")
+    invalid = out.get("invalid_contacts")
+    if not isinstance(valid, list) or not isinstance(invalid, list):
+        return None
+    return len(valid) + len(invalid)
+
+
+def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int, int]:
+    """Due = scheduled/snoozed with remind_at <= now. Active = scheduled, triggered, or snoozed."""
+    due = sum(
+        1
+        for r in reminders
+        if r.status in ("scheduled", "snoozed") and r.remind_at and r.remind_at <= now
+    )
+    active = sum(1 for r in reminders if r.status in ("scheduled", "triggered", "snoozed"))
+    return due, active
+
+
 def get_run_setup_summary(db: Session, run_id: int) -> dict:
     """Counts for Run setup card (null = step not finished yet — hide row in UI)."""
     summary = get_run_summary(db, run_id)
@@ -42,11 +81,17 @@ def get_run_setup_summary(db: Session, run_id: int) -> dict:
     contacts_found = (
         contacts_found_step if contacts_found_step is not None else summary["contacts_found"]
     )
+    validated_step = _count_validated_from_step(db, run_id)
+    contacts_validated = (
+        validated_step
+        if validated_step is not None
+        else summary["valid_contacts"] + summary["invalid_contacts"]
+    )
     return {
         "companies_collected": companies,
         "contacts_found": contacts_found,
-        "contacts_validated": summary["valid_contacts"] + summary["invalid_contacts"],
-        "contacts_approved": summary["approved_contacts"] + summary["edited_contacts"],
+        "contacts_validated": contacts_validated,
+        "contacts_approved": _count_contacts_approved_reachable(db, run_id),
     }
 
 
@@ -68,17 +113,13 @@ def get_conversations_snapshot(db: Session, run_id: int) -> dict:
     active_threads = len([t for t in threads if (t.status or "").lower() == "open"])
     reminders = list_reminders_by_run(db, run_id)
     now = datetime.utcnow()
-    due = [
-        r
-        for r in reminders
-        if r.status in ("scheduled", "snoozed") and r.remind_at and r.remind_at <= now
-    ]
+    reminders_due, reminders_active = _reminder_due_and_active_counts(reminders, now)
     return {
         "active_threads": active_threads,
-        "replies_received": summary["messages_inbound"],
+        "replies_received": summary["events_replied"],
         "reply_drafts": summary["reply_drafts_generated"],
-        "follow_ups_open": summary["follow_up_tasks_open"] + summary["follow_up_tasks_in_progress"],
-        "reminders_due": len(due),
+        "reminders_active": reminders_active,
+        "reminders_due": reminders_due,
     }
 
 
@@ -87,6 +128,9 @@ def get_run_performance_rows(db: Session, run_id: int) -> dict:
     summary = get_run_summary(db, run_id)
     threads = list_email_threads_by_run(db, run_id)
     active_threads = len([t for t in threads if (t.status or "").lower() == "open"])
+    reminders = list_reminders_by_run(db, run_id)
+    now = datetime.utcnow()
+    reminders_due, reminders_active = _reminder_due_and_active_counts(reminders, now)
 
     return {
         "emails_sent": summary["drafts_sent"],
@@ -94,8 +138,9 @@ def get_run_performance_rows(db: Session, run_id: int) -> dict:
         "active_threads": active_threads,
         "interested": summary["threads_interested"],
         "need_more_info": summary["threads_need_info"],
-        "follow_ups_open": summary["follow_up_tasks_open"] + summary["follow_up_tasks_in_progress"],
         "packets_sent": summary["asset_packets_sent"],
+        "reminders_active": reminders_active,
+        "reminders_due": reminders_due,
     }
 
 

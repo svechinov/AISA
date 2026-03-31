@@ -248,10 +248,21 @@ function StatusBadge({ value }) {
 
 function SendLifecycleBadge({ status }) {
   const st = status || "draft";
+  if (st === "dead_mailbox") {
+    return (
+      <Badge variant="destructive" className="font-normal text-xs">
+        Dead mailbox
+      </Badge>
+    );
+  }
   const cls = sendLifecycleBadgeClass[st];
+  const label =
+    st === "bounced"
+      ? "Bounced"
+      : pretty(st);
   return (
     <Badge className={cls} variant="secondary">
-      {pretty(st)}
+      {label}
     </Badge>
   );
 }
@@ -334,7 +345,6 @@ const MAIN_NAV = [
   { value: "events", label: "Events" },
   { value: "threads", label: "Threads" },
   { value: "reply-drafts", label: "Reply drafts" },
-  { value: "follow-ups", label: "Follow-ups" },
   { value: "reminders", label: "Reminders" },
   { value: "assets", label: "Assets" },
   { value: "packets", label: "Packets" },
@@ -347,7 +357,6 @@ function mainNavToTrackingTab(nav) {
     events: "events",
     threads: "threads",
     "reply-drafts": "replies",
-    "follow-ups": "next-actions",
     reminders: "reminders",
     assets: "assets-library",
     packets: "asset-packets",
@@ -402,6 +411,7 @@ export default function AiBizOsHumanUI() {
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const [assetsLibrary, setAssetsLibrary] = useState([]);
+  const [runAssetPackets, setRunAssetPackets] = useState([]);
   const [draftForm, setDraftForm] = useState({
     subject: "",
     body: "",
@@ -437,13 +447,14 @@ export default function AiBizOsHumanUI() {
   const loadRunDetails = async (runId) => {
     if (!runId) return;
     try {
-      const [run, stepsData, contactsData, draftsData, ws, assetsData] = await Promise.all([
+      const [run, stepsData, contactsData, draftsData, ws, assetsData, packetsData] = await Promise.all([
         api(`/runs/${runId}`),
         api(`/steps/run/${runId}`),
         api(`/contacts/run/${runId}`),
         api(`/email-drafts/run/${runId}`),
         api(`/runs/${runId}/workspace`),
         api(`/assets`),
+        api(`/asset-packets/run/${runId}`),
       ]);
       setSelectedRun(run);
       setSteps(stepsData);
@@ -451,6 +462,7 @@ export default function AiBizOsHumanUI() {
       setDrafts(draftsData);
       setWorkspace(ws);
       setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
+      setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
     } catch (e) {
       setError(String(e.message || e));
     }
@@ -493,13 +505,12 @@ export default function AiBizOsHumanUI() {
 
   useEffect(() => {
     if (!selectedRun?.id) return;
-    if (selectedRun.status !== "running") return;
     const id = selectedRun.id;
     const interval = setInterval(() => {
       loadRunDetails(id);
-    }, 3000);
+    }, 4000);
     return () => clearInterval(interval);
-  }, [selectedRun?.id, selectedRun?.status]);
+  }, [selectedRun?.id]);
 
   const createProject = async () => {
     const project = await api("/projects", {
@@ -796,8 +807,12 @@ export default function AiBizOsHumanUI() {
     });
     void (async () => {
       try {
-        const assetsData = await api(`/assets`);
+        const [assetsData, packetsData] = await Promise.all([
+          api(`/assets`),
+          api(`/asset-packets/run/${selectedRun.id}`),
+        ]);
         setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
+        setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
       } catch {
         /* keep previous library if request fails */
       }
@@ -864,6 +879,9 @@ export default function AiBizOsHumanUI() {
     });
   }, [drafts, search, draftFilter]);
 
+  const contactHasBadEmailHealth = (c) =>
+    c.email_health === "dead_mailbox" || c.email_health === "bounced";
+
   const contactById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
   const draftByContactId = useMemo(() => {
     const m = new Map();
@@ -873,14 +891,22 @@ export default function AiBizOsHumanUI() {
     return m;
   }, [drafts]);
 
-  const approvedContacts = contacts.filter((c) => ["approved", "edited"].includes(c.review_status)).length;
+  const approvedContactsReachable = contacts.filter(
+    (c) => ["approved", "edited"].includes(c.review_status) && !contactHasBadEmailHealth(c),
+  ).length;
   const approvedDrafts = drafts.filter((d) => ["approved", "edited"].includes(d.review_status)).length;
   const pendingContacts = contacts.filter((c) => c.review_status === "pending").length;
 
   const pending = contactsMatchingSearch.filter((c) => c.review_status === "pending");
-  const approvedList = contactsMatchingSearch.filter((c) =>
-    ["approved", "edited"].includes(c.review_status),
-  );
+  const approvedList = useMemo(() => {
+    const raw = contactsMatchingSearch.filter((c) => ["approved", "edited"].includes(c.review_status));
+    const deliveryOrder = (c) => {
+      if (c.email_health === "dead_mailbox") return 2;
+      if (c.email_health === "bounced") return 1;
+      return 0;
+    };
+    return [...raw].sort((a, b) => deliveryOrder(a) - deliveryOrder(b) || a.id - b.id);
+  }, [contactsMatchingSearch]);
   const rejectedList = contactsMatchingSearch.filter((c) => c.review_status === "rejected");
 
   const draftsPending = filteredDrafts.filter((d) => d.review_status === "pending");
@@ -889,7 +915,7 @@ export default function AiBizOsHumanUI() {
   );
   const draftsRejectedList = filteredDrafts.filter((d) => d.review_status === "rejected");
 
-  const canContinue = approvedContacts > 0;
+  const canContinue = approvedContactsReachable > 0;
 
   /** Share of outbound drafts with a terminal delivery outcome (for “next wave” gating). */
   const outreachBatchProgress = useMemo(() => {
@@ -910,10 +936,10 @@ export default function AiBizOsHumanUI() {
       if (selectedRun.status === "needs_review") {
         return {
           label: "Approve contacts to continue",
-          disabled: approvedContacts === 0,
+          disabled: approvedContactsReachable === 0,
           hint:
-            approvedContacts === 0
-              ? "Approve or edit at least one contact first (Approve / Edit saves as edited)."
+            approvedContactsReachable === 0
+              ? "Approve or edit at least one reachable contact first (bounced / dead mailbox do not count)."
               : null,
           onClick: () => void continueRun(),
         };
@@ -954,13 +980,10 @@ export default function AiBizOsHumanUI() {
   }, [
     selectedRun,
     workspace?.display_phase,
-    approvedContacts,
+    approvedContactsReachable,
     outreachBatchProgress,
     openNewRunDialog,
   ]);
-
-  const contactHasBadEmailHealth = (c) =>
-    c.email_health === "dead_mailbox" || c.email_health === "bounced";
 
   const contactCardClass = (c) => {
     if (contactHasBadEmailHealth(c)) {
@@ -1042,8 +1065,12 @@ export default function AiBizOsHumanUI() {
                 {!badEmailHealth ? <StatusBadge value={contact.status} /> : null}
                 {!badEmailHealth ? <StatusBadge value={contact.review_status} /> : null}
                 {badEmailHealth ? (
-                  <Badge variant="destructive" className="font-mono text-xs">
-                    {contact.email_health}
+                  <Badge variant="destructive" className="font-normal text-xs">
+                    {contact.email_health === "dead_mailbox"
+                      ? "Dead mailbox"
+                      : contact.email_health === "bounced"
+                        ? "Bounced"
+                        : pretty(contact.email_health)}
                   </Badge>
                 ) : null}
                 {!contact.email ? <Badge variant="destructive">No email</Badge> : null}
@@ -1224,6 +1251,12 @@ export default function AiBizOsHumanUI() {
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div className="flex flex-wrap items-center gap-2">
+                {isDeadMailboxDraft ? (
+                  <CircleAlert
+                    className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
+                    aria-hidden
+                  />
+                ) : null}
                 <div className="text-lg font-semibold">{draft.company || "Untitled draft"}</div>
                 {isReplacementDraft ? (
                   <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
@@ -1630,8 +1663,12 @@ export default function AiBizOsHumanUI() {
                         <span className="font-medium">{workspace.performance?.need_more_info ?? 0}</span>
                       </li>
                       <li>
-                        Follow-ups open:{" "}
-                        <span className="font-medium">{workspace.performance?.follow_ups_open ?? 0}</span>
+                        Reminders (active):{" "}
+                        <span className="font-medium">{workspace.performance?.reminders_active ?? 0}</span>
+                      </li>
+                      <li>
+                        Reminders due:{" "}
+                        <span className="font-medium">{workspace.performance?.reminders_due ?? 0}</span>
                       </li>
                       <li>
                         Packets sent:{" "}
@@ -1645,7 +1682,7 @@ export default function AiBizOsHumanUI() {
                           <li>Active threads: {workspace.conversations.active_threads}</li>
                           <li>Replies received: {workspace.conversations.replies_received}</li>
                           <li>Reply drafts: {workspace.conversations.reply_drafts}</li>
-                          <li>Follow-ups open: {workspace.conversations.follow_ups_open}</li>
+                          <li>Reminders (active): {workspace.conversations.reminders_active}</li>
                           <li>Reminders due: {workspace.conversations.reminders_due}</li>
                         </ul>
                       </div>
@@ -1781,7 +1818,8 @@ export default function AiBizOsHumanUI() {
                             </Button>
                             {!canContinue ? (
                               <p className="mx-auto mt-3 max-w-md text-xs text-muted-foreground">
-                                Approve or edit at least one contact first (Approve / Edit saves as edited).
+                                Approve or edit at least one reachable contact (bounced / dead mailbox do not
+                                count).
                               </p>
                             ) : null}
                           </>
@@ -1799,9 +1837,7 @@ export default function AiBizOsHumanUI() {
                     ) : null}
 
                     <div className="space-y-3">
-                      <div className="text-sm font-medium">
-                        Approved ({approvedList.length})
-                      </div>
+                      <div className="text-sm font-medium">Approved ({approvedContactsReachable})</div>
                       <div className="grid gap-3">{approvedList.map((c) => renderContactCard(c))}</div>
                     </div>
 
@@ -1894,6 +1930,7 @@ export default function AiBizOsHumanUI() {
                 runSignatureHtml={selectedRun.sender_signature_html ?? ""}
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
+                onRunWorkspaceRefresh={() => void loadRunDetails(selectedRun.id)}
               />
             ) : null}
 
@@ -2025,7 +2062,7 @@ export default function AiBizOsHumanUI() {
             <DialogTitle>Close run?</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            This run will no longer be used for new outreach sending. Existing threads, replies, follow-ups,
+            This run will no longer be used for new outreach sending. Existing threads, replies,
             reminders, and packets will remain available.
           </p>
           <DialogFooter className="gap-2 sm:gap-0">
@@ -2062,6 +2099,7 @@ export default function AiBizOsHumanUI() {
               />
               <DraftAssetAttachmentsField
                 assets={assetsLibrary}
+                assetPackets={runAssetPackets}
                 selectedIds={draftForm.attached_asset_ids}
                 onSelectedIdsChange={(attached_asset_ids) =>
                   setDraftForm((f) => ({ ...f, attached_asset_ids }))

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AssetPacketRead(BaseModel):
@@ -25,6 +25,7 @@ class AssetPacketUpdate(BaseModel):
     description: str | None = None
     status: str | None = None
     packet_json: dict | None = None
+    reply_draft_id: int | None = None
 
 
 class AttachReplyDraftRequest(BaseModel):
@@ -52,3 +53,10 @@ class AssetPacketAssetItem(BaseModel):
 
 class UpdateAssetPacketAssetsRequest(BaseModel):
     assets: list[AssetPacketAssetItem]
+
+
+class CreateRunAssetPacketRequest(BaseModel):
+    """Run-level preset (no thread). Contents are merged into drafts via asset ids in the UI."""
+
+    title: str
+    assets: list[AssetPacketAssetItem] = Field(default_factory=list)

@@ -78,6 +78,7 @@ def update_asset_packet(
     description: str | None = None,
     status: str | None = None,
     packet_json: dict | None = None,
+    reply_draft_id: object | None = ...,
 ) -> AssetPacket:
     if title is not None:
         packet.title = title
@@ -87,11 +88,22 @@ def update_asset_packet(
         packet.status = status
     if packet_json is not None:
         packet.packet_json = packet_json
+    if reply_draft_id is not ...:
+        packet.reply_draft_id = reply_draft_id  # type: ignore[assignment]
 
     db.add(packet)
     db.commit()
     db.refresh(packet)
     return packet
+
+
+def delete_asset_packet(db: Session, packet_id: int) -> bool:
+    row = db.query(AssetPacket).filter(AssetPacket.id == packet_id).first()
+    if not row:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
 
 
 def attach_packet_to_reply_draft(
@@ -110,7 +122,7 @@ def attach_packet_to_reply_draft(
     if packet.run_id != reply.run_id:
         raise ValueError("run_id mismatch")
 
-    if packet.thread_id != reply.thread_id:
+    if packet.thread_id is not None and packet.thread_id != reply.thread_id:
         raise ValueError("thread_id mismatch")
 
     if packet.status == "archived":

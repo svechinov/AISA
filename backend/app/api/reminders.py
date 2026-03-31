@@ -11,12 +11,14 @@ from app.repositories.reminder_repo import (
 )
 from app.schemas.reminder import (
     ReminderCreateForTask,
+    ReminderCreateForThread,
     ReminderRead,
     ReminderSnoozeUpdate,
     ReminderStatusUpdate,
 )
 from app.services.reminder_scheduler import trigger_due_reminders
 from app.services.reminder_service import create_reminder_for_follow_up_task
+from app.services.reminder_thread_service import create_reminder_for_thread
 
 router = APIRouter(prefix="/reminders", tags=["reminders"])
 
@@ -41,6 +43,22 @@ def create_reminder_for_task_route(
         return create_reminder_for_follow_up_task(
             db=db,
             follow_up_task_id=follow_up_task_id,
+            remind_at=payload.remind_at,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/thread/{thread_id}/create")
+def create_reminder_for_thread_route(
+    thread_id: int,
+    payload: ReminderCreateForThread,
+    db: Session = Depends(get_db),
+):
+    try:
+        return create_reminder_for_thread(
+            db=db,
+            thread_id=thread_id,
             remind_at=payload.remind_at,
         )
     except ValueError as e:

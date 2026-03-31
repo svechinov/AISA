@@ -11,6 +11,7 @@ from app.repositories.asset_packet_repo import (
 from app.repositories.asset_repo import get_asset, list_assets
 from app.repositories.contact_repo import get_contact
 from app.repositories.email_thread_repo import get_email_thread
+from app.repositories.run_repo import get_run
 
 
 def render_assets_block_for_email(assets: list[dict]) -> str:
@@ -137,6 +138,31 @@ def clone_asset_packet(db: Session, packet_id: int) -> AssetPacket:
     db.commit()
     db.refresh(new_packet)
     return new_packet
+
+
+def create_run_asset_packet(
+    db: Session,
+    run_id: int,
+    title: str,
+    assets_payload: list[dict],
+) -> AssetPacket:
+    if not get_run(db, run_id):
+        raise ValueError(f"Run {run_id} not found")
+
+    validate_packet_assets_payload(db, assets_payload)
+    packet_json: dict = {"assets": assets_payload, "source": "run_preset"}
+    return create_asset_packet(
+        db=db,
+        run_id=run_id,
+        thread_id=None,
+        contact_id=None,
+        packet_type="preset",
+        title=title.strip() or "Packet",
+        description=None,
+        status="draft",
+        packet_json=packet_json,
+        reply_draft_id=None,
+    )
 
 
 def build_asset_packet_for_thread(db: Session, thread_id: int) -> dict:

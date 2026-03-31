@@ -8,6 +8,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from types import SimpleNamespace
+
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset
@@ -178,6 +180,22 @@ def _merge_ref_for_link(asset: Asset | None, ref: dict) -> dict:
 
 def _append_skip(skipped: list[dict], asset_id: int | None, reason: str) -> None:
     skipped.append({"asset_id": asset_id, "reason": reason})
+
+
+def resolve_sendable_attachments_for_asset_ids(
+    db: Session,
+    asset_ids: list[int],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Reuse packet resolution for a plain ordered list of library asset ids (draft attachments)."""
+    refs: list[dict] = []
+    for raw in asset_ids:
+        try:
+            aid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        refs.append({"asset_id": aid})
+    fake = SimpleNamespace(status="draft", packet_json={"assets": refs})
+    return resolve_sendable_attachments(db, fake)  # type: ignore[arg-type]
 
 
 def resolve_sendable_attachments(

@@ -17,10 +17,11 @@ from app.repositories.reply_draft_repo import (
     mark_reply_draft_sent,
     mark_reply_draft_sending,
 )
+from app.utils.attached_asset_ids import normalize_attached_asset_ids
 from app.services.asset_attachment_service import (
     finalize_sendable_attachments,
     materialize_attachment,
-    resolve_sendable_attachments,
+    resolve_sendable_attachments_for_asset_ids,
 )
 from app.services.asset_packet_service import lock_packet_after_send, render_assets_block_for_email
 from app.services.email_provider import send_email_via_provider
@@ -39,7 +40,7 @@ def validate_packet_for_reply_send(reply_draft: ReplyDraft, packet) -> None:
     if packet.run_id != reply_draft.run_id:
         raise ValueError("Attached packet run_id mismatch")
 
-    if packet.thread_id != reply_draft.thread_id:
+    if packet.thread_id is not None and packet.thread_id != reply_draft.thread_id:
         raise ValueError("Attached packet thread_id mismatch")
 
     if packet.contact_id and reply_draft.contact_id and packet.contact_id != reply_draft.contact_id:
@@ -71,7 +72,29 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     run = get_run(db, reply_draft.run_id)
     sig_html = getattr(run, "sender_signature_html", None) if run else None
 
-    if not packet:
+    draft_ids = normalize_attached_asset_ids(reply_draft.attached_asset_ids)
+    packet_ids: list[int] = []
+    if packet:
+        for ref in (packet.packet_json or {}).get("assets") or []:
+            if not isinstance(ref, dict) or ref.get("asset_id") is None:
+                continue
+            try:
+                packet_ids.append(int(ref["asset_id"]))
+            except (TypeError, ValueError):
+                continue
+
+    seen: set[int] = set()
+    merged: list[int] = []
+    for i in draft_ids:
+        if i not in seen:
+            seen.add(i)
+            merged.append(i)
+    for i in packet_ids:
+        if i not in seen:
+            seen.add(i)
+            merged.append(i)
+
+    if not merged:
         final_body = append_signature_to_body(base_body, sig_html)
         return {
             "base_body": base_body,
@@ -83,11 +106,11 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
             "linked_asset_ids": [],
             "link_only_assets": [],
             "packet_block": "",
-            "attached_packet_id": None,
+            "attached_packet_id": packet.id if packet else None,
             "skipped_attachments": [],
         }
 
-    sendable, link_only, skipped = resolve_sendable_attachments(db, packet)
+    sendable, link_only, skipped = resolve_sendable_attachments_for_asset_ids(db, merged)
     sendable = finalize_sendable_attachments(db, sendable, link_only, skipped)
     packet_block = render_assets_block_for_email(link_only)
     combined = _combine_body(base_body, packet_block)
@@ -113,7 +136,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
         "linked_asset_ids": linked_asset_ids,
         "link_only_assets": link_only,
         "packet_block": packet_block,
-        "attached_packet_id": packet.id,
+        "attached_packet_id": packet.id if packet else None,
         "skipped_attachments": skipped,
     }
 

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Paperclip, X } from "lucide-react";
+import { Layers, Paperclip, X } from "lucide-react";
 
 /** Normalize API JSON list to unique ints (order preserved). */
 export function normalizeAttachedAssetIds(raw) {
@@ -17,13 +17,50 @@ export function normalizeAttachedAssetIds(raw) {
   return out;
 }
 
+/** Extract ordered unique asset ids from a packet row (API shape). */
+export function assetIdsFromPacket(packet) {
+  const inner = Array.isArray(packet?.packet_json?.assets) ? packet.packet_json.assets : [];
+  const out = [];
+  const seen = new Set();
+  for (const row of inner) {
+    if (!row || row.asset_id == null) continue;
+    const n = Number(row.asset_id);
+    if (!Number.isFinite(n) || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+function mergeIds(existing, additions) {
+  const seen = new Set(existing);
+  const next = [...existing];
+  for (const n of additions) {
+    if (!Number.isFinite(n) || seen.has(n)) continue;
+    seen.add(n);
+    next.push(n);
+  }
+  return next;
+}
+
 /**
- * Pick Assets from the library; show chips [Asset #id] under the editor.
+ * Pick Assets from the library and/or merge presets from run Packets into attached_asset_ids.
  */
-export function DraftAssetAttachmentsField({ assets, selectedIds, onSelectedIdsChange }) {
+export function DraftAssetAttachmentsField({
+  assets,
+  selectedIds,
+  onSelectedIdsChange,
+  assetPackets = null,
+}) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [packetsOpen, setPacketsOpen] = useState(false);
 
   const byId = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets]);
+
+  const usablePackets = useMemo(() => {
+    if (!Array.isArray(assetPackets) || !assetPackets.length) return [];
+    return assetPackets.filter((p) => p.status !== "archived");
+  }, [assetPackets]);
 
   const toggle = useCallback(
     (id) => {
@@ -45,6 +82,14 @@ export function DraftAssetAttachmentsField({ assets, selectedIds, onSelectedIdsC
     [selectedIds, onSelectedIdsChange],
   );
 
+  const mergePacket = useCallback(
+    (packet) => {
+      const add = assetIdsFromPacket(packet);
+      onSelectedIdsChange(mergeIds(selectedIds, add));
+    },
+    [selectedIds, onSelectedIdsChange],
+  );
+
   const sortedList = useMemo(() => [...assets].sort((a, b) => a.id - b.id), [assets]);
 
   return (
@@ -62,6 +107,20 @@ export function DraftAssetAttachmentsField({ assets, selectedIds, onSelectedIdsC
           <Paperclip className="h-3.5 w-3.5" aria-hidden />
           Assets
         </Button>
+        {usablePackets.length ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="gap-1"
+            onClick={() => setPacketsOpen((o) => !o)}
+            aria-expanded={packetsOpen}
+            title="Add all assets from a saved packet preset"
+          >
+            <Layers className="h-3.5 w-3.5" aria-hidden />
+            Packets
+          </Button>
+        ) : null}
       </div>
       {pickerOpen ? (
         <div className="max-h-52 overflow-y-auto rounded-xl border-2 border-border bg-muted/20 p-2">
@@ -92,6 +151,31 @@ export function DraftAssetAttachmentsField({ assets, selectedIds, onSelectedIdsC
           ) : (
             <p className="px-2 py-3 text-sm text-muted-foreground">No assets in library yet.</p>
           )}
+        </div>
+      ) : null}
+      {packetsOpen && usablePackets.length ? (
+        <div className="max-h-52 overflow-y-auto rounded-xl border-2 border-border bg-muted/20 p-2">
+          <ul className="space-y-1">
+            {usablePackets.map((p) => {
+              const n = assetIdsFromPacket(p).length;
+              return (
+                <li
+                  key={p.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-background/80 px-2 py-2"
+                >
+                  <div className="min-w-0 text-sm">
+                    <span className="font-medium">{p.title || `Packet #${p.id}`}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {n} asset{n === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <Button type="button" size="sm" variant="secondary" onClick={() => mergePacket(p)}>
+                    Add assets
+                  </Button>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       ) : null}
       {selectedIds.length ? (

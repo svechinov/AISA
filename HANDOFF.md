@@ -2,6 +2,8 @@
 
 Документ для следующей итерации разработки. Репозиторий: `ai-biz-os/` (backend + frontend + `infra/`).
 
+**Обновление:** март 2026 · ориентир по коду и UI — **фронтенд `package.json` v2.1.4**. Ниже в **§12** зафиксировано всё существенное, добавленное в ветке человеко-центричного Review/Tracking и библиотеки вложений; продуктовая линия «не только VOD» (§1–6) без изменений по смыслу.
+
 **Заявленная цель владельца продукта:** система не должна восприниматься и работать как узкоспециализированный инструмент поиска VOD-площадок. Нужна **вертикально-независимая** логика аутриха: разные отрасли (страхование, фестивали, производство игрушек и т.д.) — **разные формулировки задач, роли контактов, шаблоны писем**, без жёсткой привязки к «видеоплатформам» в коде и UX.
 
 Ниже — что уже есть, где зашит VOD, и **как перестраивать логику** без потери полезного каркаса (проект → run → контакты → черновики → трекинг → треды).
@@ -207,8 +209,8 @@ ai-biz-os/backend/app/
 
 ## 9. Старые handoff-файлы
 
-- `HANDOFF CURSOR.md` — подробная архитектура, сущности, follow-up/reminders/assets; **следующий шаг там** (attach packet ↔ reply draft) может оставаться в бэклоге параллельно продуктовой эволюции.
-- `HANDOFF CHATGPT.md` — при наличии, использовать как доп. заметки; **источником правды по смене логики считать этот `HANDOFF.md`**.
+- **`HANDOFF CURSOR.md`** — компактная архитектура, таблицы сущностей, шпаргалка файлов, правила «что не ломать». Подробная расшифровка релиза 2.1.4 — **§12 ниже в этом файле**; в CURSOR синхронизированы сущности и бэклог (§9).
+- **`HANDOFF CHATGPT.md`** — доп. заметки; **источник правды по продуктовой смене «VOD → универсальный аутрич»** — этот **`HANDOFF.md` (§1–6, 10–11)**.
 
 ---
 
@@ -233,4 +235,104 @@ ai-biz-os/backend/app/
 - **Миграция колонок:** `init_db._ensure_run_outreach_context_columns()`.
 - Старые run’ы без брифа: контекст подставляется из прежнего **Campaign goal** в `input_json`, если поля брифа пустые.
 
-*Версия документа: март 2026. Обновлять при смене сценариев, шаблонов и UI создания проекта/run.*
+---
+
+## 12. Состояние операторского UI и данных на релизе **2.1.4** (март 2026)
+
+Этот раздел описывает **фактическую** реализацию в коде на момент выпуска **2.1.4** (не заменяет §1–6 по продуктовой стратегии, а дополняет handoff для разработчика/оператора).
+
+### 12.1 Версия и границы системы
+
+| Компонент | Значение |
+|-----------|----------|
+| **Frontend** | `frontend/package.json` → **`2.1.4`** |
+| **Backend** | без отдельного поля версии в репозитории; контракт API = код в `backend/app/` |
+| **Точка входа UI** | `frontend/src/pages/AiBizOsHumanUI.jsx` — дашборд проект/run, **Review workspace** (Contacts + Drafts), навигация в Tracking |
+| **Tracking** | `frontend/src/components/TrackingView.jsx` — вкладки событий, тредов, reply drafts, follow-ups, reminders, assets, packets, dead mailboxes, queue |
+
+### 12.2 Данные: вложения драфтов через библиотеку **Asset**
+
+Добавлен единый источник правды для «что прикреплено к письму» на уровне черновика (без загрузки файлов в модалку — только выбор из **`/assets`**).
+
+| Таблица | Колонка | Тип | Смысл |
+|---------|---------|-----|--------|
+| `email_drafts` | `attached_asset_ids` | JSON-массив (список int), `NOT NULL`, default `[]` | Исходящие драфты (outreach) |
+| `reply_drafts` | `attached_asset_ids` | то же | Черновики ответов |
+
+- **Миграция:** `init_db.py` → **`_ensure_drafts_attached_asset_ids_columns()`** (SQLite: `TEXT NOT NULL DEFAULT '[]'`; Postgres: `JSONB NOT NULL DEFAULT '[]'`). Выполняется при старте приложения из **`ensure_schema()`** в lifespan (`main.py`).
+- **Нормализация:** `backend/app/utils/attached_asset_ids.py` — дедуп по id, порядок сохраняется, невалидные элементы отбрасываются.
+- **API read:** поле **`attached_asset_ids`** входит в **`EmailDraftRead`** / **`ReplyDraftRead`** (Pydantic `field_validator` → нормализация).
+- **API write:** **`PATCH /email-drafts/{id}/edit`** и **`PATCH /reply-drafts/{id}/edit`** принимают опциональное тело **`attached_asset_ids: number[]`**. `null`/отсутствие ключа = не менять список (для edit-репозитория передаётся явно с фронта при Save).
+
+**Важно (бэклог отправки):** логика **`reply_sender.build_reply_send_payload`** и исходящий **`email_sender`** **пока не мержат** `ReplyDraft.attached_asset_ids` / `EmailDraft.attached_asset_ids` в реальные MIME-вложения поверх существующего пайплайна **asset packet**. Превью reply по-прежнему опирается на пакет и `resolve_sendable_attachments`. Следующей итерацией: объединить «packet + draft.attached_asset_ids» без дубликатов `asset_id` и продумать лимиты.
+
+### 12.3 Frontend: компоненты и потоки
+
+| Файл | Назначение |
+|------|------------|
+| **`DraftAssetAttachmentsField.jsx`** | Кнопка «Assets» со скрепкой, раскрывающийся список всех ассетов с чекбоксами, чипы `[Asset #id]` с удалением; экспорт **`normalizeAttachedAssetIds`** |
+| **`EmailDraftBodyPreview.jsx`** | Превью тела: HTML/plain; блок под текстом с одним пунктиром — **`[Signature]`** (если у run задана подпись) и сразу под ней строка **`[Asset #…]`** при непустом **`attachedAssetIds`** |
+
+**Review workspace — исходящий драфт (`Edit email draft`):**
+
+- Модальное окно: subject, **`EmailDraftRichTextEditor`**, **`DraftAssetAttachmentsField`**.
+- При **открытии** редактора дополнительно вызывается **`GET /assets`**, чтобы список библиотеки не зависел от устаревшего кэша (авто-`loadRunDetails` каждые 3 с только при **`selectedRun.status === "running"`**).
+- Save: `PATCH` с `subject`, `body`, **`attached_asset_ids`**.
+
+**Tracking — reply draft (`Edit reply draft`):**
+
+- Тот же **`DraftAssetAttachmentsField`**; список ассетов приходит из **`load()`** Tracking (в т.ч. интервал 3 с).
+- Save: `PATCH` с **`attached_asset_ids`**.
+
+**Превью в списках:** карточки исходящих драфтов в Review и reply drafts в Tracking передают в **`EmailDraftBodyPreview`** проп **`attachedAssetIds`**, чтобы подпись и ассеты были видны **до** отправки.
+
+### 12.4 Review workspace — поведение контактов и драфтов
+
+**Контакты (`contactCardClass`, `renderContactCard`):**
+
+- При **`email_health` ∈ {`dead_mailbox`, `bounced`}:** красная рамка (**`border-2`**, те же оттенки, что блок Dead mailboxes), иконка **`CircleAlert`**, красный бейдж со значением health, **скрыты** обычные **`StatusBadge`** по статусу/review (визуально «не валиден/не одобрен» для оператора). Для **`dead_mailbox`** **нет** кнопок **Edit** и **Reject** (и режим правки закрывается при обновлении данных, если контакт стал dead mailbox).
+- Остальные статусы: зелёная/нейтральная рамка **`border-2`** согласно review (см. общий sweep рамок в §12.5).
+
+**Исходящие драфты:**
+
+- Жизненный цикл трекинга: **`SendLifecycleBadge`** по **`tracking_status ?? status`**.
+- Если **`dead_mailbox`:** только кнопка **`Delete`**; **`DELETE /email-drafts/{id}`** разрешён **только** при **`tracking_status == "dead_mailbox"`** (очистка мёртвых черновиков из Review).
+- **Send later:** вторичная кнопка с иконкой **`Clock`**; записывает **`review_status: approved`** и **`review_notes: "send_later"`** (константа на фронте). Обычный **Approve** шлёт ревью **без** этого поля → **`review_notes`** сбрасывается в `null` на бэкенде. На карточке показывается янтарный бейдж **Send later** с часами.
+
+**Событийные тосты:** удалены глобальные «успешные» строки (`actionNote`) в Tracking — остаётся только **`error`** для ошибок.
+
+### 12.5 Tracking — вкладки и визуальная логика
+
+**Навигация (`MAIN_NAV` в Human UI):** пункт **«Reply drafts»** (регистр как в продукте); маппинг на внутренний таб Tracking **`replies`**.
+
+**Events:**
+
+- Группировка событий по **`draft_id`**; фильтр по типу события.
+- Если последнее событие в цепочке — **`dead_mailbox`**, вся карточка группы подсвечивается «красным контуром»; шаг **`dead_mailbox`** использует **`CircleAlert`** и **`border-2`** в тон контактам.
+
+**Threads:**
+
+- Карточка треда с **`linkedDraft` с lifecycle `dead_mailbox`** **или** контакт с **`email_health === "dead_mailbox"`** — оформление как у problem-contact + бейдж **`dead_mailbox`**.
+
+**Оформление карточек:** унифицирована толщина обводки **`border-2`** для основных карточек секций и списков (Review, Tracking, модалки — по дизайн-решению 2.1.x).
+
+**Dead mailboxes (текст):** в описании вкладки указано создавать replacement-задачу через **Re-search queue** (не обещаем кнопку на той же карточке как единственный путь).
+
+**Reply drafts — редактирование:** инлайн textarea убран в пользу модалки с **`EmailDraftRichTextEditor`** (как у исходящих драфтов).
+
+### 12.6 Деплой и Git
+
+- **Локальный деплой:** `scripts/deploy-local.sh` — `docker compose build/up` backend, **`npm run build`** фронта; финальный **`npm run dev`** держит терминал — для CI/одноразового деплоя обычно выполняют только build + compose.
+- **Push на GitHub:** у части окружений **`git@github.com`** падает с **`Permission denied (publickey)`** — нужен настроенный SSH-ключ или HTTPS + token; теги **`v2.1.3`**, **`v2.1.4`** могут существовать только локально до успешного `git push`.
+
+### 12.7 Краткий чек-лист для следующего разработчика
+
+- [ ] После pull: перезапустить backend (или `init_db` / `ensure_schema`), чтобы применились **`attached_asset_ids`**.
+- [ ] Проверить **`VITE_API_PROXY_TARGET`** vs реальный порт backend (Docker **8000** vs локальный uvicorn **8001** — см. `HANDOFF CURSOR.md`).
+- [ ] Не смешивать **`research_tasks`** и **`follow_up_tasks`**.
+- [ ] Реализовать использование **`attached_asset_ids`** в **`email_sender`** / доработать **`build_reply_send_payload`** при необходимости реальных вложений.
+- [ ] Продолжить нейтрализацию VOD по §4–6 приоритетно для продуктовой линии.
+
+---
+
+*Версия документа: март 2026 (полное обновление §9, §12; синхронизируйте `HANDOFF CURSOR.md` при изменении схемы БД).*
