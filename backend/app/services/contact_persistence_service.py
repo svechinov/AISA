@@ -3,11 +3,17 @@ from sqlalchemy.orm import Session
 from app.repositories.contact_repo import bulk_create_contacts, delete_contacts_by_run
 
 
-def persist_validated_contacts(db: Session, run_id: int, step_output: dict) -> dict:
+def persist_validated_contacts(
+    db: Session,
+    run_id: int,
+    step_output: dict,
+    *,
+    commit: bool = True,
+) -> dict:
     valid_contacts = step_output.get("valid_contacts", [])
     invalid_contacts = step_output.get("invalid_contacts", [])
 
-    delete_contacts_by_run(db, run_id)
+    delete_contacts_by_run(db, run_id, commit=commit)
 
     rows: list[dict] = []
 
@@ -47,7 +53,7 @@ def persist_validated_contacts(db: Session, run_id: int, step_output: dict) -> d
             }
         )
 
-    created = bulk_create_contacts(db, rows) if rows else []
+    created = bulk_create_contacts(db, rows, commit=commit) if rows else []
 
     return {
         "saved_contacts": len(created),

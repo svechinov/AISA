@@ -22,6 +22,10 @@ services:
       context: ../backend
       dockerfile: Dockerfile
     container_name: ai_biz_backend
+    # Inject keys from host backend/.env (create from backend/.env.example). Path is relative to this compose file.
+    env_file:
+      - path: ../backend/.env
+        required: false
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ai_biz_os
       REDIS_URL: redis://redis:6379/0

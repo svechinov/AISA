@@ -5,7 +5,14 @@ from sqlalchemy.orm import Session
 from app.models.step import Step
 
 
-def create_step(db: Session, run_id: int, step_name: str, input_json: dict) -> Step:
+def create_step(
+    db: Session,
+    run_id: int,
+    step_name: str,
+    input_json: dict,
+    *,
+    commit: bool = True,
+) -> Step:
     step = Step(
         run_id=run_id,
         step_name=step_name,
@@ -14,8 +21,12 @@ def create_step(db: Session, run_id: int, step_name: str, input_json: dict) -> S
         output_json={},
     )
     db.add(step)
-    db.commit()
-    db.refresh(step)
+    if commit:
+        db.commit()
+        db.refresh(step)
+    else:
+        db.flush()
+        db.refresh(step)
     return step
 
 
@@ -26,6 +37,14 @@ def list_steps_by_run(db: Session, run_id: int) -> list[Step]:
         .order_by(Step.id.asc())
         .all()
     )
+
+
+def delete_steps_by_run(db: Session, run_id: int) -> int:
+    q = db.query(Step).filter(Step.run_id == run_id)
+    n = q.count()
+    q.delete(synchronize_session=False)
+    db.commit()
+    return n
 
 
 def get_step(db: Session, step_id: int) -> Step | None:
@@ -49,14 +68,33 @@ def mark_step_running(db: Session, step: Step, input_json: dict) -> Step:
     return step
 
 
-def mark_step_completed(db: Session, step: Step, output_json: dict) -> Step:
+def update_step_progress(db: Session, step: Step, output_json: dict) -> Step:
+    """Persist partial output while status stays running (multi-round setup)."""
+    step.output_json = output_json
+    db.add(step)
+    db.commit()
+    db.refresh(step)
+    return step
+
+
+def mark_step_completed(
+    db: Session,
+    step: Step,
+    output_json: dict,
+    *,
+    commit: bool = True,
+) -> Step:
     step.status = "completed"
     step.output_json = output_json
     step.error_text = None
     step.finished_at = datetime.utcnow()
     db.add(step)
-    db.commit()
-    db.refresh(step)
+    if commit:
+        db.commit()
+        db.refresh(step)
+    else:
+        db.flush()
+        db.refresh(step)
     return step
 
 

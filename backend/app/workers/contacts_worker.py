@@ -39,23 +39,23 @@ def validate_contacts(db: Session, run_id: int, workflow_name: str, step_input: 
     contacts = step_input.get("contacts", [])
     valid_contacts = []
     invalid_contacts = []
-    seen = set()
+    seen_emails: set[str] = set()
 
     for contact in contacts:
         email = (contact.get("email") or "").strip().lower()
-        key = ((contact.get("company") or "").strip().lower(), email)
 
         if not email or "@" not in email:
             contact["status"] = "invalid"
             invalid_contacts.append(contact)
             continue
 
-        if key in seen:
+        # One row per email (same person with different company strings was creating UI duplicates).
+        if email in seen_emails:
             contact["status"] = "invalid"
             invalid_contacts.append(contact)
             continue
 
-        seen.add(key)
+        seen_emails.add(email)
         contact["status"] = "valid"
         valid_contacts.append(contact)
 

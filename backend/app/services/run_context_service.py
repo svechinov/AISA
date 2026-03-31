@@ -181,6 +181,23 @@ def build_pack_step_zero_input(run) -> dict:
     }
 
 
+def build_collect_companies_input_for_round(
+    run,
+    companies: list[dict],
+    round_idx: int,
+) -> dict:
+    """Input for collect_companies; later rounds include prior companies so the model expands the list."""
+    base = build_pack_step_zero_input(run)
+    if companies:
+        base["companies"] = companies
+        base["expansion_round"] = round_idx + 1
+        base["expansion_note"] = (
+            f"Additional pass {round_idx + 1}: {len(companies)} companies already listed in INPUT DATA. "
+            "Return NEW companies only (no duplicates); keep aligning with the goal."
+        )
+    return base
+
+
 def build_collect_companies_task(run) -> str:
     mp = coalesce_str(getattr(run, "master_prompt", None))
     return (

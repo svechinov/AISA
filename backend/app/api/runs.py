@@ -10,10 +10,22 @@ from app.services.run_context_service import (
     parse_outreach_brief_text,
     wrap_context,
 )
-from app.schemas.run import RunCardRead, RunRead, RunSignaturePatch, RunStart, RunWorkspaceRead
+from app.schemas.run import (
+    RetryCompanyFindBody,
+    RetryCompanyFindResult,
+    RunCardRead,
+    RunCompaniesRead,
+    RunRead,
+    RunSignaturePatch,
+    RunStart,
+    RunWorkspaceRead,
+)
 from app.services.orchestrator import continue_workflow_after_review, run_workflow
 from app.services.replacement_draft_service import generate_replacement_drafts
 from app.services.replacement_send_service import send_approved_replacement_drafts
+from app.services.run_restart_service import restart_run_workflow
+from app.services.retry_company_find_service import retry_find_for_collected_company
+from app.services.run_companies_status_service import get_run_companies_with_status
 from app.services.run_display_service import (
     enrich_run_for_card,
     get_conversations_snapshot,
@@ -55,6 +67,31 @@ def run_workspace_route(run_id: int, db: Session = Depends(get_db)):
     return _workspace(db, run)
 
 
+@router.get("/{run_id}/companies", response_model=RunCompaniesRead)
+def run_companies_route(run_id: int, db: Session = Depends(get_db)):
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    data = get_run_companies_with_status(db, run_id)
+    return RunCompaniesRead(**data)
+
+
+@router.post("/{run_id}/companies/retry-find", response_model=RetryCompanyFindResult)
+def retry_company_find_route(
+    run_id: int,
+    payload: RetryCompanyFindBody,
+    db: Session = Depends(get_db),
+):
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        data = retry_find_for_collected_company(db, run_id, payload.collect_index)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RetryCompanyFindResult(**data)
+
+
 @router.patch("/{run_id}/close", response_model=RunRead)
 def close_run_route(run_id: int, db: Session = Depends(get_db)):
     run = get_run(db, run_id)
@@ -64,6 +101,19 @@ def close_run_route(run_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Run is already closed")
     close_run(db, run_id)
     return get_run(db, run_id)
+
+
+@router.post("/{run_id}/restart", response_model=RunRead)
+def restart_run_route(run_id: int, db: Session = Depends(get_db)):
+    """Clear this run's setup/draft pipeline rows and run collect → find → validate again (same brief)."""
+    try:
+        restart_run_workflow(db, run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 @router.post("/start", response_model=RunRead)

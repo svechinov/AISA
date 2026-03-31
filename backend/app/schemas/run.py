@@ -1,7 +1,30 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+
+class RunCompanyRow(BaseModel):
+    collect_index: int
+    name: str
+    website: str
+    contact_status: Literal["found", "none", "pending"]
+
+
+class RunCompaniesRead(BaseModel):
+    companies: list[RunCompanyRow]
+    collect_step_status: str | None = None
+    find_step_status: str | None = None
+
+
+class RetryCompanyFindBody(BaseModel):
+    collect_index: int = Field(ge=0)
+
+
+class RetryCompanyFindResult(BaseModel):
+    contacts_before: int
+    contacts_after: int
+    new_contacts_merged: int
 
 
 class RunStart(BaseModel):

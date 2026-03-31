@@ -10,7 +10,14 @@ from app.repositories.contact_repo import list_contacts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
 from app.repositories.step_repo import get_step_by_run_and_name, list_steps_by_run
 from app.repositories.email_thread_repo import list_email_threads_by_run
+from app.repositories.run_repo import get_run
+from app.services.run_companies_status_service import _norm, _strip_url
 from app.services.run_summary_service import get_run_summary
+from app.setup_milestones import (
+    SETUP_MILESTONE_COMPANIES,
+    SETUP_MILESTONE_CONTACTS,
+    SETUP_MILESTONE_VALID_CONTACTS,
+)
 
 # Still approved/edited in DB, but not counted as “ready contacts” in setup summary.
 _UNDELIVERABLE_EMAIL_HEALTH = frozenset({"bounced", "dead_mailbox"})
@@ -27,39 +34,61 @@ def _count_contacts_approved_reachable(db: Session, run_id: int) -> int:
     )
 
 
-def _count_companies_from_step(db: Session, run_id: int) -> int | None:
+def _live_company_count(db: Session, run_id: int) -> int:
     st = get_step_by_run_and_name(db, run_id, "collect_companies")
-    if not st or st.status != "completed":
-        return None
-    out = st.output_json or {}
-    companies = out.get("companies")
-    if not isinstance(companies, list):
+    if not st:
         return 0
-    return len(companies)
+    companies = (st.output_json or {}).get("companies")
+    return len(companies) if isinstance(companies, list) else 0
 
 
-def _count_contacts_from_find_step(db: Session, run_id: int) -> int | None:
+def _live_contact_count(db: Session, run_id: int) -> int:
     st = get_step_by_run_and_name(db, run_id, "find_contacts")
-    if not st or st.status != "completed":
+    if not st:
+        return 0
+    contacts = (st.output_json or {}).get("contacts")
+    return len(contacts) if isinstance(contacts, list) else 0
+
+
+def _canonical_company_key_from_contact_row(c: dict) -> str | None:
+    """Stable key for counting distinct companies on contact dicts (find_contacts output)."""
+    if not isinstance(c, dict):
         return None
-    out = st.output_json or {}
-    contacts = out.get("contacts")
+    co = _norm(c.get("company") or "")
+    w = _strip_url(c.get("website") or "")
+    if not co and not w:
+        return None
+    return f"{co}\x1f{w}"
+
+
+def _live_distinct_companies_in_find_contacts(db: Session, run_id: int) -> int:
+    st = get_step_by_run_and_name(db, run_id, "find_contacts")
+    if not st:
+        return 0
+    contacts = (st.output_json or {}).get("contacts")
     if not isinstance(contacts, list):
         return 0
-    return len(contacts)
+    keys = {k for c in contacts if (k := _canonical_company_key_from_contact_row(c)) is not None}
+    return len(keys)
 
 
-def _count_validated_from_step(db: Session, run_id: int) -> int | None:
-    """Count contacts that passed through validate_contacts (from step output when completed)."""
+def _live_valid_contact_count(db: Session, run_id: int) -> int:
     st = get_step_by_run_and_name(db, run_id, "validate_contacts")
-    if not st or st.status != "completed":
-        return None
-    out = st.output_json or {}
-    valid = out.get("valid_contacts")
-    invalid = out.get("invalid_contacts")
-    if not isinstance(valid, list) or not isinstance(invalid, list):
-        return None
-    return len(valid) + len(invalid)
+    if not st:
+        return 0
+    v = (st.output_json or {}).get("valid_contacts")
+    return len(v) if isinstance(v, list) else 0
+
+
+def _live_validated_total_count(db: Session, run_id: int) -> int:
+    st = get_step_by_run_and_name(db, run_id, "validate_contacts")
+    if st and isinstance(st.output_json, dict):
+        v = st.output_json.get("valid_contacts")
+        i = st.output_json.get("invalid_contacts")
+        if isinstance(v, list) and isinstance(i, list):
+            return len(v) + len(i)
+    summary = get_run_summary(db, run_id)
+    return summary["valid_contacts"] + summary["invalid_contacts"]
 
 
 def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int, int]:
@@ -74,22 +103,20 @@ def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int
 
 
 def get_run_setup_summary(db: Session, run_id: int) -> dict:
-    """Counts for Run setup card (null = step not finished yet — hide row in UI)."""
+    """Live counts from step output_json (works while status is running) plus DB fallbacks."""
     summary = get_run_summary(db, run_id)
-    companies = _count_companies_from_step(db, run_id)
-    contacts_found_step = _count_contacts_from_find_step(db, run_id)
-    contacts_found = (
-        contacts_found_step if contacts_found_step is not None else summary["contacts_found"]
+    n_co = _live_company_count(db, run_id)
+    n_fi = _live_contact_count(db, run_id)
+    contacts_found = max(n_fi, summary["contacts_found"])
+    contacts_validated = max(
+        _live_validated_total_count(db, run_id),
+        summary["valid_contacts"] + summary["invalid_contacts"],
     )
-    validated_step = _count_validated_from_step(db, run_id)
-    contacts_validated = (
-        validated_step
-        if validated_step is not None
-        else summary["valid_contacts"] + summary["invalid_contacts"]
-    )
+    contacts_found_distinct_companies = _live_distinct_companies_in_find_contacts(db, run_id)
     return {
-        "companies_collected": companies,
+        "companies_collected": n_co,
         "contacts_found": contacts_found,
+        "contacts_found_distinct_companies": contacts_found_distinct_companies,
         "contacts_validated": contacts_validated,
         "contacts_approved": _count_contacts_approved_reachable(db, run_id),
     }
@@ -145,24 +172,40 @@ def get_run_performance_rows(db: Session, run_id: int) -> dict:
 
 
 def setup_steps_for_run(db: Session, run_id: int) -> list[dict]:
-    """Three setup steps with retry_count and UI status badge."""
+    """Setup steps: 'Completed' only when numeric milestones are met (not raw step.status)."""
+    run = get_run(db, run_id)
+    if not run:
+        return []
+
+    n_co = _live_company_count(db, run_id)
+    n_fi = _live_contact_count(db, run_id)
+    n_va = _live_valid_contact_count(db, run_id)
+
     names = ["collect_companies", "find_contacts", "validate_contacts"]
     titles = ["Collect companies", "Find contacts", "Validate contacts"]
     out = []
     for title, name in zip(titles, names, strict=True):
         step = get_step_by_run_and_name(db, run_id, name)
-        if not step:
-            ui_status = "Not started"
-            retry = 0
-        elif step.status == "completed":
-            ui_status = "Completed"
-            retry = step.retry_count or 0
-        elif step.status in ("running", "failed"):
-            ui_status = "In progress"
-            retry = step.retry_count or 0
+        retry = step.retry_count if step else 0
+
+        if name == "collect_companies":
+            milestone_done = n_co >= SETUP_MILESTONE_COMPANIES
+        elif name == "find_contacts":
+            milestone_done = n_co >= SETUP_MILESTONE_COMPANIES and n_fi >= SETUP_MILESTONE_CONTACTS
         else:
+            milestone_done = (
+                n_co >= SETUP_MILESTONE_COMPANIES
+                and n_fi >= SETUP_MILESTONE_CONTACTS
+                and n_va >= SETUP_MILESTONE_VALID_CONTACTS
+            )
+
+        if milestone_done:
+            ui_status = "Completed"
+        elif run.status == "pending":
             ui_status = "Not started"
-            retry = step.retry_count or 0
+        else:
+            ui_status = "In progress"
+
         out.append(
             {
                 "step_name": name,
@@ -187,13 +230,8 @@ def enrich_run_for_card(db: Session, run) -> dict:
     summary = get_run_summary(db, run.id)
     threads = list_email_threads_by_run(db, run.id)
     active_threads = len([t for t in threads if (t.status or "").lower() == "open"])
-    companies = _count_companies_from_step(db, run.id)
-    step_find = get_step_by_run_and_name(db, run.id, "find_contacts")
-    contacts_found = (
-        len(step_find.output_json.get("contacts") or [])
-        if step_find and step_find.status == "completed" and isinstance(step_find.output_json, dict)
-        else summary["contacts_found"]
-    )
+    companies = _live_company_count(db, run.id)
+    contacts_found = max(_live_contact_count(db, run.id), summary["contacts_found"])
 
     updated_at = run.created_at
     for s in list_steps_by_run(db, run.id):
@@ -211,7 +249,7 @@ def enrich_run_for_card(db: Session, run) -> dict:
         "status": run.status,
         "display_phase": get_run_display_phase(db, run),
         "closed_at": run.closed_at,
-        "companies_count": companies if companies is not None else 0,
+        "companies_count": companies,
         "contacts_count": contacts_found,
         "emails_sent": summary["drafts_sent"],
         "replies": summary["events_replied"],

@@ -32,6 +32,7 @@ import {
   CircleAlert,
   Clock,
   FileText,
+  Loader2,
   Mail,
   Pencil,
   RefreshCw,
@@ -54,11 +55,37 @@ const API_BASE =
       ? "/api"
       : "http://127.0.0.1:8000";
 
+/** Labels for GET /setup/status summary (dashboard informer). */
+const SETUP_LLM_LABELS = {
+  claude: "Claude",
+  openai: "OpenAI",
+  perplexity: "Perplexity",
+  grok: "Grok",
+};
+
+const SETUP_CDN_LABELS = {
+  cloudflare: "Cloudflare",
+  akamai: "Akamai",
+  cloudfront: "Amazon CloudFront",
+  gcp_cdn: "Google Cloud CDN",
+};
+
 const DEFAULT_OUTREACH_BRIEF =
   "Offer:\nTarget:\nRoles:\nGoal:\nTone: Professional\nNotes:\n";
 
 /** Stored in `email_drafts.review_notes` when reviewer uses the clock (defer send). */
 const OUTBOUND_REVIEW_SEND_LATER = "send_later";
+
+/**
+ * API returns runs newest-first (id desc). Surface non-closed runs first for default
+ * selection and lists so a closed wave is not shown ahead of an active one.
+ */
+function orderRunsOpenFirst(runs) {
+  if (!Array.isArray(runs) || runs.length === 0) return [];
+  const open = runs.filter((r) => !r.closed_at);
+  const closed = runs.filter((r) => r.closed_at);
+  return [...open, ...closed];
+}
 
 const BRIEF_LABEL_PREFIXES = [
   ["offer:", "offer"],
@@ -183,6 +210,10 @@ function seedNewRunFormFromRun(run) {
 
 /** Default timeout so the UI never sits on “Loading…” forever if the proxy/API hangs. */
 const API_TIMEOUT_MS = 25000;
+/** POST /runs/:id/restart runs the full LLM setup loop synchronously. */
+const RESTART_RUN_TIMEOUT_MS = 600000;
+/** Single-company find retry calls the LLM again; allow longer than default API timeout. */
+const COMPANY_RETRY_FIND_TIMEOUT_MS = 120000;
 
 function combineAbortSignals(a, b) {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
@@ -232,6 +263,17 @@ const pretty = (v) => {
     .replaceAll("_", " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
+
+function formatSetupIntegrationInformer(si) {
+  const ids = si?.llm_providers_ready;
+  const llmPart =
+    Array.isArray(ids) && ids.length > 0
+      ? ids.map((id) => SETUP_LLM_LABELS[id] || pretty(id)).join(", ")
+      : "—";
+  const cdnId = String(si?.cdn_provider ?? "").trim().toLowerCase();
+  const cdnPart = cdnId ? SETUP_CDN_LABELS[cdnId] || pretty(cdnId) : "—";
+  return { llmPart, cdnPart };
+}
 
 /** Job title for header + edit form: column `role`, else common keys in source_json (LLM / legacy). */
 function contactRoleFromPayload(contact) {
@@ -340,6 +382,7 @@ const PROJECT_VIEW_OPTS = [
 
 const MAIN_NAV = [
   { value: "runs", label: "Runs" },
+  { value: "companies", label: "Companies" },
   { value: "contacts", label: "Contacts" },
   { value: "drafts", label: "Drafts" },
   { value: "events", label: "Events" },
@@ -420,6 +463,36 @@ export default function AiBizOsHumanUI() {
   const [signatureSetupOpen, setSignatureSetupOpen] = useState(false);
   const [signatureFormHtml, setSignatureFormHtml] = useState("");
   const [signatureEditorKey, setSignatureEditorKey] = useState(0);
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
+  const [restartDialogRun, setRestartDialogRun] = useState(null);
+  /** Non-blocking: restart runs in background after confirm (no full-screen lock). */
+  const [pendingRestart, setPendingRestart] = useState(null);
+  const [companiesPanel, setCompaniesPanel] = useState(null);
+  const [companiesLoading, setCompaniesLoading] = useState(false);
+  /** Per-row: POST /companies/retry-find in flight (several retries can run in parallel). */
+  const [companyRetryLoading, setCompanyRetryLoading] = useState(() => ({}));
+  /**
+   * After retry: still no matching contact and LLM added no new rows → red "Not available", no Retry.
+   * Keyed by collect_index; reset when switching runs.
+   */
+  const [companyFindUnavailable, setCompanyFindUnavailable] = useState(() => ({}));
+  const [setupIntegration, setSetupIntegration] = useState(null);
+
+  const loadSetupIntegration = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/setup/status`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) {
+        setSetupIntegration(null);
+        return;
+      }
+      setSetupIntegration(await res.json());
+    } catch {
+      setSetupIntegration(null);
+    }
+  }, []);
 
   const loadProjects = useCallback(async (listView, options = {}) => {
     const { signal } = options;
@@ -443,6 +516,48 @@ export default function AiBizOsHumanUI() {
       if (!signal?.aborted) setLoading(false);
     }
   }, [projectView]);
+
+  const retryCompanyFind = async (runId, collectIndex) => {
+    if (!runId || collectIndex == null) return;
+    setError("");
+    setCompanyRetryLoading((prev) => ({ ...prev, [collectIndex]: true }));
+    try {
+      const result = await api(`/runs/${runId}/companies/retry-find`, {
+        method: "POST",
+        body: { collect_index: collectIndex },
+        timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
+      });
+      const merged =
+        typeof result?.new_contacts_merged === "number"
+          ? result.new_contacts_merged
+          : typeof result?.newContactsMerged === "number"
+            ? result.newContactsMerged
+            : 0;
+      const data = await api(`/runs/${runId}/companies`);
+      setCompaniesPanel(data);
+      const rowAfter = data.companies?.find((c) => c.collect_index === collectIndex);
+      if (rowAfter?.contact_status === "none" && merged === 0) {
+        setCompanyFindUnavailable((prev) => ({ ...prev, [collectIndex]: true }));
+      }
+      if (rowAfter?.contact_status === "found") {
+        setCompanyFindUnavailable((prev) => {
+          if (!prev[collectIndex]) return prev;
+          const next = { ...prev };
+          delete next[collectIndex];
+          return next;
+        });
+      }
+      await loadRunDetails(runId);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setCompanyRetryLoading((prev) => {
+        const next = { ...prev };
+        delete next[collectIndex];
+        return next;
+      });
+    }
+  };
 
   const loadRunDetails = async (runId) => {
     if (!runId) return;
@@ -481,14 +596,47 @@ export default function AiBizOsHumanUI() {
   }, [projectView, loadProjects]);
 
   useEffect(() => {
+    void loadSetupIntegration();
+  }, [loadSetupIntegration]);
+
+  useEffect(() => {
+    if (!selectedRun?.id || mainNav !== "companies") {
+      setCompaniesPanel(null);
+      return;
+    }
+    const ac = new AbortController();
+    setCompaniesLoading(true);
+    (async () => {
+      try {
+        const data = await api(`/runs/${selectedRun.id}/companies`, { signal: ac.signal });
+        if (!ac.signal.aborted) setCompaniesPanel(data);
+      } catch (e) {
+        if (e?.name !== "AbortError" && !String(e?.message || "").includes("AbortError")) {
+          setCompaniesPanel(null);
+          setError(String(e.message || e));
+        }
+      } finally {
+        if (!ac.signal.aborted) setCompaniesLoading(false);
+      }
+    })();
+    return () => ac.abort();
+  }, [selectedRun?.id, mainNav, steps]);
+
+  useEffect(() => {
+    setCompanyFindUnavailable({});
+    setCompanyRetryLoading({});
+  }, [selectedRun?.id]);
+
+  useEffect(() => {
     if (!selectedProject) return;
     const pid = projectPk(selectedProject);
     (async () => {
       try {
         const runs = await api(`/runs/project/${pid}`);
-        setRunsList(runs);
-        if (runs.length > 0) {
-          await loadRunDetails(runs[0].id);
+        const ordered = orderRunsOpenFirst(runs);
+        setRunsList(ordered);
+        if (ordered.length > 0) {
+          await loadRunDetails(ordered[0].id);
         } else {
           setSelectedRun(null);
           setSteps([]);
@@ -569,6 +717,11 @@ export default function AiBizOsHumanUI() {
     );
   }, [newRunForm, newRunBaseline]);
 
+  const integrationInformer = useMemo(
+    () => formatSetupIntegrationInformer(setupIntegration),
+    [setupIntegration],
+  );
+
   useEffect(() => {
     if (!newRunOpen) setNewRunBaseline(null);
   }, [newRunOpen]);
@@ -609,7 +762,7 @@ export default function AiBizOsHumanUI() {
       });
       setNewRunOpen(false);
       const runs = await api(`/runs/project/${pid}`);
-      setRunsList(runs);
+      setRunsList(orderRunsOpenFirst(runs));
       await loadRunDetails(run.id);
       setMainNav("contacts");
       setNewRunForm({
@@ -661,8 +814,10 @@ export default function AiBizOsHumanUI() {
       setCloseRunOpen(false);
       const pid = projectPk(selectedProject);
       const runs = await api(`/runs/project/${pid}`);
-      setRunsList(runs);
-      await loadRunDetails(closedId);
+      const ordered = orderRunsOpenFirst(runs);
+      setRunsList(ordered);
+      const nextOpen = ordered.find((r) => !r.closed_at);
+      await loadRunDetails(nextOpen ? nextOpen.id : closedId);
     } catch (e) {
       setError(String(e.message || e));
     }
@@ -674,12 +829,45 @@ export default function AiBizOsHumanUI() {
     if (selectedProject) {
       try {
         const pid = projectPk(selectedProject);
-        setRunsList(await api(`/runs/project/${pid}`));
+        setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
       } catch {
         /* ignore */
       }
     }
     setMainNav("contacts");
+  };
+
+  const openRestartDialog = (run) => {
+    setRestartDialogRun({
+      id: run.id,
+      name: (run.name && String(run.name).trim()) || `Run #${run.id}`,
+    });
+    setRestartDialogOpen(true);
+  };
+
+  const closeRestartDialog = () => {
+    setRestartDialogOpen(false);
+    setRestartDialogRun(null);
+  };
+
+  const confirmRestartRun = async () => {
+    if (!selectedProject || !restartDialogRun || pendingRestart) return;
+    const { id: runId, name: runName } = restartDialogRun;
+    setError("");
+    setRestartDialogOpen(false);
+    setRestartDialogRun(null);
+    setPendingRestart({ id: runId, name: runName });
+    try {
+      const pid = projectPk(selectedProject);
+      await api(`/runs/${runId}/restart`, { method: "POST", timeoutMs: RESTART_RUN_TIMEOUT_MS });
+      setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
+      await loadRunDetails(runId);
+      void loadSetupIntegration();
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setPendingRestart(null);
+    }
   };
 
   const continueRun = async () => {
@@ -1396,12 +1584,24 @@ export default function AiBizOsHumanUI() {
                   <NewProjectFooter projectName={projectName} onCreated={createProject} />
                 </DialogContent>
               </Dialog>
-              <Button onClick={() => void loadProjects()} variant="outline">
-                <RefreshCw className="mr-2 h-4 w-4" /> Refresh
-              </Button>
               <ThemeToggle />
             </div>
           </div>
+
+          {pendingRestart ? (
+            <div
+              role="status"
+              className="flex items-start gap-3 rounded-2xl border-2 border-border bg-muted/30 px-4 py-3 text-sm"
+            >
+              <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
+              <p className="text-muted-foreground">
+                <span className="font-medium text-foreground">Restarting {pendingRestart.name}</span>
+                {" — "}
+                the server is re-running company search and validation. You can keep using the dashboard; run stats
+                will refresh when it completes.
+              </p>
+            </div>
+          ) : null}
 
           <div className="flex flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
             <div className="space-y-1 text-sm">
@@ -1420,6 +1620,13 @@ export default function AiBizOsHumanUI() {
               <div>
                 <span className="text-muted-foreground">Status</span>{" "}
                 <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
+              </div>
+              <div className="text-foreground/90">
+                <span className="text-muted-foreground">LLMs</span>{" "}
+                <span className="font-medium">{integrationInformer.llmPart}</span>
+                <span className="px-1.5 text-muted-foreground">·</span>
+                <span className="text-muted-foreground">CDN</span>{" "}
+                <span className="font-medium">{integrationInformer.cdnPart}</span>
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1574,9 +1781,7 @@ export default function AiBizOsHumanUI() {
                         const capClass =
                           st.ui_status === "Completed"
                             ? "bg-primary text-primary-foreground"
-                            : st.ui_status === "In progress"
-                              ? "bg-secondary text-secondary-foreground"
-                              : "bg-muted text-muted-foreground";
+                            : "bg-muted text-muted-foreground";
                         return (
                           <div
                             key={st.step_name}
@@ -1600,19 +1805,23 @@ export default function AiBizOsHumanUI() {
                     <div className="rounded-2xl border-2 border-border bg-muted/30 p-3 text-sm">
                       <div className="font-medium">Setup summary</div>
                       <ul className="mt-2 space-y-1 text-muted-foreground">
-                        {workspace.setup_summary?.companies_collected != null ? (
-                          <li>
-                            Companies collected:{" "}
-                            <span className="font-medium text-foreground">
-                              {workspace.setup_summary.companies_collected}
-                            </span>
-                          </li>
-                        ) : null}
                         <li>
-                          Contacts found:{" "}
+                          Companies collected:{" "}
                           <span className="font-medium text-foreground">
+                            {workspace.setup_summary?.companies_collected ?? "—"}
+                          </span>
+                        </li>
+                        <li className="text-muted-foreground">
+                          Contacts found:{" "}
+                          <span className="font-semibold text-foreground">
                             {workspace.setup_summary?.contacts_found ?? "—"}
                           </span>
+                          {typeof workspace.setup_summary?.contacts_found_distinct_companies === "number" ? (
+                            <>
+                              {" "}
+                              [{workspace.setup_summary.contacts_found_distinct_companies} companies]
+                            </>
+                          ) : null}
                         </li>
                         <li>
                           Contacts validated:{" "}
@@ -1751,6 +1960,16 @@ export default function AiBizOsHumanUI() {
                               type="button"
                               size="sm"
                               variant="outline"
+                              disabled={r.display_phase === "Closed" || pendingRestart != null}
+                              onClick={() => openRestartDialog(r)}
+                            >
+                              <RefreshCw className="mr-1 h-4 w-4" aria-hidden />
+                              Restart
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
                               disabled={r.display_phase === "Closed"}
                               onClick={async () => {
                                 await loadRunDetails(r.id);
@@ -1763,6 +1982,166 @@ export default function AiBizOsHumanUI() {
                         </CardContent>
                       </Card>
                     ))
+                  )}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {mainNav === "companies" ? (
+              <Card className="rounded-2xl border-2 border-border shadow-none">
+                <CardHeader>
+                  <CardTitle>Companies</CardTitle>
+                  <CardDescription>
+                    List from the collect step. Status compares each company to the find-contacts step: whether any
+                    matching contact row exists, search finished with none, or search is still in progress.
+                  </CardDescription>
+                  {companiesPanel?.collect_step_status != null || companiesPanel?.find_step_status != null ? (
+                    <p className="text-xs text-muted-foreground">
+                      Collect step:{" "}
+                      <span className="font-medium text-foreground">
+                        {companiesPanel?.collect_step_status ?? "—"}
+                      </span>
+                      {" · "}
+                      Find contacts step:{" "}
+                      <span className="font-medium text-foreground">
+                        {companiesPanel?.find_step_status ?? "—"}
+                      </span>
+                    </p>
+                  ) : null}
+                </CardHeader>
+                <CardContent>
+                  {!selectedRun ? (
+                    <p className="text-sm text-muted-foreground">Select a run first.</p>
+                  ) : companiesLoading && !companiesPanel ? (
+                    <p className="text-sm text-muted-foreground">Loading companies...</p>
+                  ) : !companiesPanel?.companies?.length ? (
+                    <p className="text-sm text-muted-foreground">
+                      No companies in this run&apos;s collect step yet. They appear after search adds them (or restart
+                      the run).
+                    </p>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Badge variant="default" className="font-normal">
+                            Contacts found
+                          </Badge>
+                          <span>At least one person in find-contacts output matches this company.</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <Badge variant="secondary" className="font-normal">
+                            Not found
+                          </Badge>
+                          <span>Find-contacts finished; no matching row for this company.</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <Badge variant="destructive" className="font-normal">
+                            Not available
+                          </Badge>
+                          <span>
+                            Retry returned no new contacts and there is still no matching row — further retries are
+                            hidden.
+                          </span>
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <Badge variant="outline" className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100">
+                            Not searched yet
+                          </Badge>
+                          <span>Find-contacts still running or not completed — more results may arrive.</span>
+                        </span>
+                      </div>
+                      <div className="overflow-x-auto rounded-xl border-2 border-border">
+                        <table className="w-full min-w-[520px] text-left text-sm">
+                          <thead className="border-b border-border bg-muted/40 text-xs font-semibold text-muted-foreground">
+                            <tr>
+                              <th className="px-3 py-2">Company</th>
+                              <th className="px-3 py-2">Website</th>
+                              <th className="px-3 py-2">Contact search</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {companiesPanel.companies.map((row) => {
+                              const st = row.contact_status;
+                              const unavailable = !!companyFindUnavailable[row.collect_index];
+                              const badge =
+                                st === "found" ? (
+                                  <Badge variant="default" className="font-normal">
+                                    Contacts found
+                                  </Badge>
+                                ) : st === "none" && unavailable ? (
+                                  <Badge variant="destructive" className="font-normal">
+                                    Not available
+                                  </Badge>
+                                ) : st === "none" ? (
+                                  <Badge variant="secondary" className="font-normal">
+                                    Not found
+                                  </Badge>
+                                ) : (
+                                  <Badge
+                                    variant="outline"
+                                    className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100"
+                                  >
+                                    Not searched yet
+                                  </Badge>
+                                );
+                              const retryingRow = !!companyRetryLoading[row.collect_index];
+                              const canRetryCompanyFind =
+                                st === "none" &&
+                                !unavailable &&
+                                selectedRun &&
+                                !selectedRun.closed_at &&
+                                pendingRestart == null;
+                              return (
+                                <tr
+                                  key={`company-${row.collect_index}`}
+                                  className="border-b border-border last:border-0"
+                                >
+                                  <td className="px-3 py-2.5 font-medium">{row.name}</td>
+                                  <td className="px-3 py-2.5 text-muted-foreground">
+                                    {row.website ? (
+                                      <a
+                                        href={row.website.startsWith("http") ? row.website : `https://${row.website}`}
+                                        className="text-primary underline-offset-4 hover:underline"
+                                        target="_blank"
+                                        rel="noreferrer"
+                                      >
+                                        {row.website}
+                                      </a>
+                                    ) : (
+                                      "—"
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2.5">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {badge}
+                                      {canRetryCompanyFind ? (
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-6 rounded-full px-2.5 text-xs font-medium"
+                                          disabled={retryingRow}
+                                          onClick={() => void retryCompanyFind(selectedRun.id, row.collect_index)}
+                                        >
+                                          {retryingRow ? (
+                                            <>
+                                              <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden />
+                                              Retry
+                                            </>
+                                          ) : (
+                                            "Retry"
+                                          )}
+                                        </Button>
+                                      ) : null}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   )}
                 </CardContent>
               </Card>
@@ -1924,7 +2303,7 @@ export default function AiBizOsHumanUI() {
             </Card>
             ) : null}
 
-            {!["runs", "contacts", "drafts"].includes(mainNav) && selectedRun?.id ? (
+            {!["runs", "contacts", "drafts", "companies"].includes(mainNav) && selectedRun?.id ? (
               <TrackingView
                 runId={selectedRun.id}
                 runSignatureHtml={selectedRun.sender_signature_html ?? ""}
@@ -1934,7 +2313,7 @@ export default function AiBizOsHumanUI() {
               />
             ) : null}
 
-            {!["runs", "contacts", "drafts"].includes(mainNav) && !selectedRun?.id ? (
+            {!["runs", "contacts", "drafts", "companies"].includes(mainNav) && !selectedRun?.id ? (
               <div className="rounded-2xl border-2 border-dashed border-border p-8 text-center text-sm text-muted-foreground">
                 Select a run to view this section.
               </div>
@@ -2029,20 +2408,35 @@ export default function AiBizOsHumanUI() {
           </DialogHeader>
           <ScrollArea className="max-h-[360px] pr-3">
             <div className="space-y-2 py-2">
-              {runsList.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  className="w-full rounded-2xl border-2 border-border p-3 text-left text-sm hover:bg-muted/50"
-                  onClick={() => void openRunById(r.id)}
-                >
-                  <div className="font-medium">{r.name}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {r.display_phase} · Companies {r.companies_count} · Contacts {r.contacts_count} · Sent{" "}
-                    {r.emails_sent}
-                  </div>
-                </button>
-              ))}
+              {runsList.map((r) => {
+                const isCurrent = selectedRun?.id === r.id;
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    aria-current={isCurrent ? "true" : undefined}
+                    className={`w-full rounded-2xl border-2 p-3 text-left text-sm transition-colors hover:bg-muted/50 ${
+                      isCurrent
+                        ? "border-primary bg-primary/10 ring-2 ring-primary/25 dark:bg-primary/15"
+                        : "border-border"
+                    }`}
+                    onClick={() => void openRunById(r.id)}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{r.name}</span>
+                      {isCurrent ? (
+                        <Badge variant="secondary" className="font-normal text-xs">
+                          Current
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {r.display_phase} · Companies {r.companies_count} · Contacts {r.contacts_count} · Sent{" "}
+                      {r.emails_sent}
+                    </div>
+                  </button>
+                );
+              })}
               {!runsList.length ? (
                 <p className="text-sm text-muted-foreground">No runs in this project.</p>
               ) : null}
@@ -2111,6 +2505,36 @@ export default function AiBizOsHumanUI() {
                 Cancel
               </Button>
               <Button onClick={saveEditDraft}>Save</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {restartDialogOpen && restartDialogRun ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/50"
+            aria-label="Close"
+            onClick={closeRestartDialog}
+          />
+          <div className="relative z-50 w-full max-w-lg rounded-xl border-2 border-border bg-card p-6 shadow-lg">
+            <h2 className="text-lg font-semibold">Restart run</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">{restartDialogRun.name}</span>
+              {" — "}
+              contacts, setup steps, and email drafts for this run will be removed. Company search and validation will
+              run again using the same brief. After you confirm, this window closes; progress appears as a slim banner
+              under the page title.
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={closeRestartDialog}>
+                Cancel
+              </Button>
+              <Button type="button" onClick={() => void confirmRestartRun()} disabled={pendingRestart != null}>
+                <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
+                Restart
+              </Button>
             </div>
           </div>
         </div>

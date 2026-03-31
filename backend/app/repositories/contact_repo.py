@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
+from app.models.email_draft import EmailDraft
 
 
 def create_contact(
@@ -40,13 +41,57 @@ def create_contact(
     return contact
 
 
+_REVIEW_RANK = {"pending": 0, "rejected": 1, "approved": 2, "edited": 2}
+
+
 def list_contacts_by_run(db: Session, run_id: int) -> list[Contact]:
-    return (
+    """One visible row per normalized email; legacy duplicates collapse (draft / review / id tie-break)."""
+    rows = (
         db.query(Contact)
         .filter(Contact.run_id == run_id)
         .order_by(Contact.id.asc())
         .all()
     )
+    if not rows:
+        return []
+
+    ids = [c.id for c in rows]
+    draft_contact_ids = {
+        r[0]
+        for r in db.query(EmailDraft.contact_id)
+        .filter(EmailDraft.contact_id.in_(ids))
+        .distinct()
+        .all()
+    }
+
+    no_email: list[Contact] = []
+    by_email: dict[str, list[Contact]] = {}
+    for c in rows:
+        em = (c.email or "").strip().lower()
+        if not em or "@" not in em:
+            no_email.append(c)
+            continue
+        by_email.setdefault(em, []).append(c)
+
+    def pick_canonical(group: list[Contact]) -> Contact:
+        if len(group) == 1:
+            return group[0]
+        with_draft = [c for c in group if c.id in draft_contact_ids]
+        if with_draft:
+            return min(with_draft, key=lambda c: c.id)
+        best = group[0]
+        best_r = _REVIEW_RANK.get(best.review_status or "pending", 0)
+        for c in group[1:]:
+            cr = _REVIEW_RANK.get(c.review_status or "pending", 0)
+            if cr > best_r or (cr == best_r and c.id < best.id):
+                best, best_r = c, cr
+        return best
+
+    out: list[Contact] = list(no_email)
+    for group in by_email.values():
+        out.append(pick_canonical(group))
+    out.sort(key=lambda c: c.id)
+    return out
 
 
 def list_valid_contacts_by_run(db: Session, run_id: int) -> list[Contact]:
@@ -189,21 +234,33 @@ def mark_contact_replied(db: Session, contact: Contact) -> Contact:
     return contact
 
 
-def delete_contacts_by_run(db: Session, run_id: int) -> int:
+def delete_contacts_by_run(db: Session, run_id: int, *, commit: bool = True) -> int:
     query = db.query(Contact).filter(Contact.run_id == run_id)
     count = query.count()
     query.delete(synchronize_session=False)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return count
 
 
-def bulk_create_contacts(db: Session, contacts_data: list[dict]) -> list[Contact]:
+def bulk_create_contacts(
+    db: Session,
+    contacts_data: list[dict],
+    *,
+    commit: bool = True,
+) -> list[Contact]:
     contacts = [Contact(**item) for item in contacts_data]
     db.add_all(contacts)
-    db.commit()
-
-    for contact in contacts:
-        db.refresh(contact)
+    if commit:
+        db.commit()
+        for contact in contacts:
+            db.refresh(contact)
+    else:
+        db.flush()
+        for contact in contacts:
+            db.refresh(contact)
 
     return contacts
 
