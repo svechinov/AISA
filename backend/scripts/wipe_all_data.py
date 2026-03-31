@@ -39,13 +39,13 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 try:
-    from dotenv import load_dotenv
-except ModuleNotFoundError:
+    from app.services.env_bootstrap import load_env_from_file
+except ModuleNotFoundError as e:
+    print(f"{e}\n", file=sys.stderr)
     print(_MISSING_DEPS, file=sys.stderr)
     raise SystemExit(1) from None
 
-# Before app.config reads DATABASE_URL
-load_dotenv(_root / ".env")
+load_env_from_file()
 
 try:
     from sqlalchemy import text

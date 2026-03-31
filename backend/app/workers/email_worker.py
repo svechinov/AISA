@@ -5,7 +5,11 @@ from sqlalchemy.orm import Session
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
 from app.repositories.contact_repo import get_contact, list_sendable_contacts_by_run
-from app.repositories.email_draft_repo import delete_email_draft, find_draft_by_contact_id, get_email_draft
+from app.repositories.email_draft_repo import (
+    find_draft_by_contact_id,
+    get_email_draft,
+    update_email_draft_outreach_regenerate,
+)
 from app.repositories.run_repo import get_run, update_run_master_email_variants
 from app.services.llm_gateway import generate_json
 from app.services.outreach_personalize import (
@@ -15,6 +19,8 @@ from app.services.outreach_personalize import (
     select_variant_for_contact,
 )
 from app.services.prompt_builder import build_prompt
+from app.services.rules_service import get_effective_rules_from_run
+from app.services.run_context_service import get_prompt_setup_text
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,74 @@ FALLBACK_MASTER_VARIANTS: list[dict[str, str]] = [
 def _validated_fallback_variants() -> list[dict[str, str]]:
     wrapped = {"variants": FALLBACK_MASTER_VARIANTS}
     return normalize_variants_payload(wrapped)
+
+
+def _contact_role_for_prompt(contact: Contact) -> str:
+    r = (contact.role or "").strip()
+    if r:
+        return r
+    sj = contact.source_json or {}
+    if isinstance(sj, dict):
+        for k in ("role", "title", "job_title", "position"):
+            v = sj.get(k)
+            if v:
+                return str(v).strip()
+    return ""
+
+
+def _llm_single_outreach_email(
+    db: Session,
+    run_id: int,
+    contact: Contact,
+    campaign_brief: str,
+) -> tuple[str, str]:
+    """One subject/body via LLM; campaign_brief is Prompt setup text or equivalent run brief."""
+    role = _contact_role_for_prompt(contact)
+    try:
+        rules = get_effective_rules_from_run(db, run_id, "generate_emails")
+    except ValueError:
+        rules = []
+
+    task = (
+        f"{(campaign_brief or '').strip()}\n\n"
+        "Recipient — use only these facts for personalization; do not invent details:\n"
+        f"- Company: {contact.company or '—'}\n"
+        f"- Contact name: {contact.name or '—'}\n"
+        f"- Job title / role: {role or '—'}\n"
+        f"- Email: {contact.email or '—'}\n\n"
+        "Task:\n"
+        "Write one outbound email (subject + body) for this recipient, aligned with the campaign brief above.\n"
+        "Requirements:\n"
+        "- Subject: specific and professional\n"
+        "- Body: 5–10 sentences, clear value, consistent with the brief\n"
+        "- Address the recipient naturally using name and company where appropriate\n"
+        "- Include a brief salutation (e.g. Hi Name,) at the start of the body\n"
+        "- No markdown unless necessary\n\n"
+        "Return JSON only with keys subject and body (strings).\n"
+    )
+    prompt = build_prompt(
+        task=task,
+        data={
+            "recipient": {
+                "company": contact.company,
+                "name": contact.name,
+                "role": role,
+                "email": contact.email,
+            }
+        },
+        rules=rules,
+        output_schema={"subject": "string", "body": "string"},
+    )
+    out = generate_json(prompt, task_kind="single_outreach")
+    subject = (out.get("subject") or "").strip()
+    body = (out.get("body") or "").strip()
+    if not subject or not body:
+        raise ValueError("Model returned empty subject or body")
+    if len(body) < 120:
+        raise ValueError("Email body too short")
+    if len(body) > 12000:
+        raise ValueError("Email body too long")
+    return subject, body
 
 
 def _call_llm_for_master_variants(brief: str) -> list[dict[str, str]]:
@@ -151,21 +225,45 @@ def _variants_from_run(run) -> list[dict[str, str]]:
     return normalize_variants_payload(me)
 
 
-def build_outreach_email_entry(
+def _compose_outreach_email_payload_for_contact(
     db: Session,
     run,
     contact: Contact,
-    variants: list[dict[str, str]],
+    variants: list[dict[str, str]] | None = None,
 ) -> dict | None:
-    """One row for persist_generated_emails / generate_emails output; None if this contact should be skipped."""
+    """Build subject/body for one contact if sendable. No 'draft already exists' check."""
     if contact.status != "valid":
         return None
     if contact.review_status not in {"approved", "edited"}:
         return None
     if not (contact.email or "").strip():
         return None
-    if find_draft_by_contact_id(db, run.id, contact.id):
-        return None
+
+    prompt_saved = get_prompt_setup_text(run)
+    if prompt_saved:
+        try:
+            subject, body = _llm_single_outreach_email(db, run.id, contact, prompt_saved)
+            return {
+                "contact_id": contact.id,
+                "company": contact.company,
+                "to": contact.email,
+                "subject": subject,
+                "body": body,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Prompt-based single outreach LLM failed run_id=%s contact_id=%s: %s",
+                run.id,
+                contact.id,
+                exc,
+                exc_info=False,
+            )
+
+    if variants is None:
+        if not run.master_email:
+            generate_master_email_draft(db, run.id, run.workflow_name, {})
+            db.refresh(run)
+        variants = _variants_from_run(run)
 
     variant, variant_idx = select_variant_for_contact(run.id, contact.id, variants)
     logger.info(
@@ -190,6 +288,18 @@ def build_outreach_email_entry(
     }
 
 
+def build_outreach_email_entry(
+    db: Session,
+    run,
+    contact: Contact,
+    variants: list[dict[str, str]] | None = None,
+) -> dict | None:
+    """One row for persist_generated_emails / generate_emails output; None if this contact should be skipped."""
+    if find_draft_by_contact_id(db, run.id, contact.id):
+        return None
+    return _compose_outreach_email_payload_for_contact(db, run, contact, variants)
+
+
 def generate_emails(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:
     run = get_run(db, run_id)
     if not run:
@@ -197,7 +307,13 @@ def generate_emails(db: Session, run_id: int, workflow_name: str, step_input: di
 
     sendable_contacts = list_sendable_contacts_by_run(db, run_id)
 
-    variants = _variants_from_run(run)
+    prompt_saved = get_prompt_setup_text(run)
+    variants: list[dict[str, str]] | None = None
+    if not prompt_saved:
+        if not run.master_email:
+            generate_master_email_draft(db, run_id, workflow_name, {})
+            db.refresh(run)
+        variants = _variants_from_run(run)
 
     emails: list[dict] = []
     for contact in sendable_contacts:
@@ -217,8 +333,8 @@ def materialize_outreach_draft_for_sendable_contact(
 ) -> EmailDraft | None:
     """
     If the contact is approved/edited, valid, has email, and workflow supports drafts:
-    ensure master variants exist, persist one personalized draft when missing.
-    Returns the draft row (existing or new), or None if skipped (preconditions / workflow).
+    persist one personalized draft when missing — via Prompt setup LLM when that prompt is saved,
+    otherwise master variants + personalization (master is generated on first need).
     """
     from app.services.email_draft_persistence_service import persist_generated_emails
     from app.services.workflow_registry import WORKFLOWS
@@ -241,11 +357,7 @@ def materialize_outreach_draft_for_sendable_contact(
     if not steps or "generate_emails" not in steps:
         return None
 
-    if not run.master_email:
-        generate_master_email_draft(db, run.id, run.workflow_name, {})
-        db.refresh(run)
-    variants = _variants_from_run(run)
-    entry = build_outreach_email_entry(db, run, contact, variants)
+    entry = build_outreach_email_entry(db, run, contact)
     if not entry:
         return None
     persist_generated_emails(db, run.id, {"emails": [entry]})
@@ -268,20 +380,37 @@ def ensure_outreach_draft_for_contact(db: Session, contact: Contact) -> None:
 
 
 def regenerate_outbound_email_draft(db: Session, draft_id: int) -> EmailDraft:
-    """Delete the current draft row and build a fresh personalized email for the same contact."""
+    """Rewrite subject/body on the same draft row so UI list order (by id) does not change."""
     draft = get_email_draft(db, draft_id)
     if not draft:
         raise ValueError("Email draft not found")
     if draft.status in ("sent", "sending"):
         raise ValueError("Cannot regenerate sent or sending draft")
 
-    contact_id = draft.contact_id
-    delete_email_draft(db, draft)
-
-    contact = get_contact(db, contact_id)
+    contact = get_contact(db, draft.contact_id)
     if not contact:
         raise ValueError("Contact not found")
-    new_draft = materialize_outreach_draft_for_sendable_contact(db, contact)
-    if not new_draft:
+    run = get_run(db, draft.run_id)
+    if not run:
+        raise ValueError("Run not found")
+
+    prompt_saved = get_prompt_setup_text(run)
+    variants: list[dict[str, str]] | None = None
+    if not prompt_saved:
+        if not run.master_email:
+            generate_master_email_draft(db, run.id, run.workflow_name, {})
+            db.refresh(run)
+        variants = _variants_from_run(run)
+
+    payload = _compose_outreach_email_payload_for_contact(db, run, contact, variants)
+    if not payload:
         raise RuntimeError("Could not regenerate draft — approve the contact and ensure a valid email.")
-    return new_draft
+
+    return update_email_draft_outreach_regenerate(
+        db,
+        draft,
+        subject=payload["subject"],
+        body=payload["body"],
+        company=payload.get("company"),
+        to_email=payload.get("to"),
+    )

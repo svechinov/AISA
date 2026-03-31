@@ -25,7 +25,11 @@ from app.services.asset_attachment_service import (
 )
 from app.services.asset_packet_service import lock_packet_after_send, render_assets_block_for_email
 from app.services.email_provider import send_email_via_provider
-from app.services.sender_signature import append_signature_to_body
+from app.services.outbound_email_body import (
+    append_additional_assets_section_to_email_html,
+    append_signature_html_after,
+    normalize_draft_body_for_email_html,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +99,16 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
             merged.append(i)
 
     if not merged:
-        final_body = append_signature_to_body(base_body, sig_html)
+        br = str(base_body or "").strip()
+        base = normalize_draft_body_for_email_html(base_body) if br else ""
+        has_sig = bool(str(sig_html or "").strip())
+        base = append_additional_assets_section_to_email_html(
+            base,
+            db,
+            reply_draft.attached_asset_ids,
+            trailing_rule_if_no_signature_below=not has_sig,
+        )
+        final_body = append_signature_html_after(base, sig_html)
         return {
             "base_body": base_body,
             "final_body": final_body,
@@ -114,7 +127,16 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     sendable = finalize_sendable_attachments(db, sendable, link_only, skipped)
     packet_block = render_assets_block_for_email(link_only)
     combined = _combine_body(base_body, packet_block)
-    final_body = append_signature_to_body(combined, sig_html)
+    cr = str(combined or "").strip()
+    base = normalize_draft_body_for_email_html(combined) if cr else ""
+    has_sig = bool(str(sig_html or "").strip())
+    base = append_additional_assets_section_to_email_html(
+        base,
+        db,
+        reply_draft.attached_asset_ids,
+        trailing_rule_if_no_signature_below=not has_sig,
+    )
+    final_body = append_signature_html_after(base, sig_html)
 
     public_candidates = [_public_attachment_candidate(m) for m in sendable]
     real_attachments = [

@@ -5,7 +5,13 @@ alwaysApply: true
 
 # Деплой ai-biz-os (локально)
 
-- **Одна команда** из корня репозитория `ai-biz-os`:
+- **Из корня `ai-biz-os`:**
+
+```bash
+bash scripts/deploy-local.sh
+```
+
+- **Из корня monorepo `freeman-lab`** (обёртка вызывает `ai-biz-os/scripts/deploy-local.sh`):
 
 ```bash
 bash scripts/deploy-local.sh

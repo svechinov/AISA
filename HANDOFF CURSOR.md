@@ -162,7 +162,7 @@ Draft.attached_asset_ids ≠ AssetPacket  (ручной список вложе�
 
 - **Review workspace:** **`AiBizOsHumanUI.jsx`** — контакты и исходящие email drafts, Approve / Send later (часы, `review_notes: "send_later"`), dead mailbox стили и ограничения (Delete драфта только при `tracking_status == dead_mailbox`), Edit с rich text + вложения из Assets.
 - **Tracking:** **`TrackingView.jsx`** — Events, Threads, Reply drafts (модалка редактирования как у outreach), Next actions, Reminders, Assets, Packets, Dead mailboxes, Re-search queue; единый `border-2` для карточек; подсветка dead mailbox по цепочкам событий и тредам; убраны успешные toast `actionNote`.
-- Версия пакета фронта: **`package.json` → 2.1.4** (смотреть при handoff).
+- Версия пакета фронта: **`package.json` → 2.3.0** (смотреть при handoff).
 
 ### 5.8 Инфра и запуск
 

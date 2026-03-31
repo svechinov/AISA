@@ -3,7 +3,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.repositories.project_repo import get_project
-from app.repositories.run_repo import close_run, create_run, get_run, list_runs_by_project, update_run_signature
+from app.repositories.run_repo import (
+    close_run,
+    create_run,
+    get_run,
+    list_runs_by_project,
+    update_run_prompt_setup_text,
+    update_run_signature,
+)
 from app.services.run_context_service import (
     build_master_prompt_text,
     merge_inner_from_legacy_fields,
@@ -15,6 +22,7 @@ from app.schemas.run import (
     RetryCompanyFindResult,
     RunCardRead,
     RunCompaniesRead,
+    RunPromptSetupPatch,
     RunRead,
     RunSignaturePatch,
     RunStart,
@@ -24,7 +32,10 @@ from app.services.orchestrator import continue_workflow_after_review, run_workfl
 from app.services.replacement_draft_service import generate_replacement_drafts
 from app.services.replacement_send_service import send_approved_replacement_drafts
 from app.services.run_restart_service import restart_run_workflow
-from app.services.retry_company_find_service import retry_find_for_collected_company
+from app.services.retry_company_find_service import (
+    continue_find_for_pending_companies,
+    retry_find_for_collected_company,
+)
 from app.services.run_companies_status_service import get_run_companies_with_status
 from app.services.run_display_service import (
     enrich_run_for_card,
@@ -92,6 +103,19 @@ def retry_company_find_route(
     return RetryCompanyFindResult(**data)
 
 
+@router.post("/{run_id}/companies/continue-find", response_model=RetryCompanyFindResult)
+def continue_company_find_route(run_id: int, db: Session = Depends(get_db)):
+    """Find contacts for all companies still 'Not searched yet' (find step not completed); then complete find/validate."""
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        data = continue_find_for_pending_companies(db, run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return RetryCompanyFindResult(**data)
+
+
 @router.patch("/{run_id}/close", response_model=RunRead)
 def close_run_route(run_id: int, db: Session = Depends(get_db)):
     run = get_run(db, run_id)
@@ -105,7 +129,7 @@ def close_run_route(run_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{run_id}/restart", response_model=RunRead)
 def restart_run_route(run_id: int, db: Session = Depends(get_db)):
-    """Clear this run's setup/draft pipeline rows and run collect → find → validate again (same brief)."""
+    """Run collect → find → validate again on top of existing data (same brief); does not wipe contacts/drafts."""
     try:
         restart_run_workflow(db, run_id)
     except ValueError as e:
@@ -209,6 +233,14 @@ def send_replacement_drafts_route(run_id: int, db: Session = Depends(get_db)):
 @router.patch("/{run_id}/signature", response_model=RunRead)
 def patch_run_signature_route(run_id: int, payload: RunSignaturePatch, db: Session = Depends(get_db)):
     run = update_run_signature(db, run_id, payload.signature_html.strip() or None)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@router.patch("/{run_id}/prompt-setup", response_model=RunRead)
+def patch_run_prompt_setup_route(run_id: int, payload: RunPromptSetupPatch, db: Session = Depends(get_db)):
+    run = update_run_prompt_setup_text(db, run_id, payload.prompt_setup_text)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run

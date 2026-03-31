@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 
+from app.repositories.contact_repo import list_contacts_by_run
 from app.repositories.run_repo import get_run, update_run_status
 from app.repositories.step_repo import (
     create_step,
@@ -84,6 +85,65 @@ def _merge_contacts(existing: list[dict], new_items: list) -> list[dict]:
     return out
 
 
+def _dicts_from_step_output(step, key: str) -> list[dict]:
+    if not step or not isinstance(step.output_json, dict):
+        return []
+    raw = step.output_json.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [x for x in raw if isinstance(x, dict)]
+
+
+def _load_accumulating_setup_seed(db: Session, run_id: int) -> tuple[list[dict], list[dict], dict]:
+    """Restore in-memory setup state from step outputs and/or existing contacts (restart / extra rounds)."""
+    step_c = get_step_by_run_and_name(db, run_id, "collect_companies")
+    step_f = get_step_by_run_and_name(db, run_id, "find_contacts")
+    step_v = get_step_by_run_and_name(db, run_id, "validate_contacts")
+
+    companies = _dicts_from_step_output(step_c, "companies")
+    contacts = _dicts_from_step_output(step_f, "contacts")
+
+    last_validate: dict = {"valid_contacts": [], "invalid_contacts": []}
+    if step_v and isinstance(step_v.output_json, dict):
+        vc = step_v.output_json.get("valid_contacts")
+        ic = step_v.output_json.get("invalid_contacts")
+        if isinstance(vc, list):
+            last_validate["valid_contacts"] = [x for x in vc if isinstance(x, dict)]
+        if isinstance(ic, list):
+            last_validate["invalid_contacts"] = [x for x in ic if isinstance(x, dict)]
+
+    if not contacts:
+        for c in list_contacts_by_run(db, run_id):
+            row = {
+                "company": c.company,
+                "website": c.website,
+                "name": c.name,
+                "role": c.role,
+                "email": c.email,
+                "linkedin": c.linkedin,
+                "confidence": c.confidence,
+            }
+            sj = c.source_json if isinstance(c.source_json, dict) else {}
+            contacts.append({**sj, **{k: v for k, v in row.items() if v is not None}})
+
+    if not companies and contacts:
+        seen: set[str] = set()
+        for co in contacts:
+            k = _company_key(co)
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            nm = (co.get("company") or "").strip() or (co.get("name") or "").strip()
+            companies.append(
+                {
+                    "name": nm,
+                    "website": (co.get("website") or "").strip(),
+                }
+            )
+
+    return companies, contacts, last_validate
+
+
 def _ensure_step(db: Session, run_id: int, step_name: str):
     s = get_step_by_run_and_name(db, run_id, step_name)
     return s if s else create_step(db, run_id, step_name, {})
@@ -98,9 +158,7 @@ def run_accumulating_setup_phase(db: Session, run_id: int) -> None:
     if not run:
         raise ValueError(f"Run {run_id} not found")
 
-    companies: list[dict] = []
-    contacts: list[dict] = []
-    last_validate: dict = {"valid_contacts": [], "invalid_contacts": []}
+    companies, contacts, last_validate = _load_accumulating_setup_seed(db, run_id)
 
     step_c = _ensure_step(db, run_id, "collect_companies")
     step_f = _ensure_step(db, run_id, "find_contacts")

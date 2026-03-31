@@ -30,6 +30,8 @@ import {
   ArchiveRestore,
   ChevronRight,
   CircleAlert,
+  CircleCheck,
+  CircleX,
   Clock,
   FileText,
   Loader2,
@@ -180,6 +182,37 @@ function contextToOutreachBriefText(ctx) {
   ].join("\n");
 }
 
+/** Mirrors backend run.context_json key for saved Prompt setup textarea. */
+const PROMPT_SETUP_STORAGE_KEY = "prompt_setup_text";
+
+/** True when saved HTML has visible text (empty rich-text often stores tags only). */
+function runSignatureHasMeaningfulContent(html) {
+  const raw = String(html ?? "").trim();
+  if (!raw) return false;
+  const text = raw
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > 0;
+}
+
+function getPromptSetupEditorInitialText(run) {
+  if (!run) return DEFAULT_OUTREACH_BRIEF;
+  const cj = run.context_json;
+  if (cj && typeof cj === "object") {
+    const raw = cj[PROMPT_SETUP_STORAGE_KEY];
+    if (typeof raw === "string" && raw.length > 0) {
+      return raw;
+    }
+  }
+  const ctx = contextFromRun(run);
+  return contextToOutreachBriefText(ctx);
+}
+
 /** Prefill dialog from the current run — same name/brief as that run until the user edits (then UI adds “ · next”). */
 function seedNewRunFormFromRun(run) {
   if (!run) {
@@ -309,6 +342,25 @@ function SendLifecycleBadge({ status }) {
   );
 }
 
+/** FastAPI often returns `{ "detail": "..." | [...] }` in the response body; `api()` puts raw body in Error.message. */
+function detailFromApiErrorMessage(msg) {
+  const m = String(msg || "").trim();
+  if (!m) return "Request failed";
+  try {
+    const j = JSON.parse(m);
+    const d = j.detail;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) {
+      return d
+        .map((x) => (typeof x === "object" && x != null && x.msg != null ? String(x.msg) : JSON.stringify(x)))
+        .join("; ");
+    }
+  } catch {
+    /* plain text */
+  }
+  return m;
+}
+
 function formatApiError(e) {
   if (e?.name === "AbortError") {
     const curlHint =
@@ -326,6 +378,30 @@ function formatApiError(e) {
     return `${msg} — ${curlHint}`;
   }
   return msg;
+}
+
+/** Transient / bursty request failures — log only; no full-page error informer. */
+function isConsoleOnlyApiFailure(message) {
+  const m = String(message || "");
+  return (
+    m.includes("Failed to fetch") ||
+    m.includes("NetworkError") ||
+    m.includes("Load failed") ||
+    m.includes("Timed out or cancelled") ||
+    (m.includes("Abort") && (m.includes("aborted") || m.includes("cancel")))
+  );
+}
+
+function setUiError(setError, err) {
+  const raw = String(err?.message ?? err ?? "");
+  if (!raw) return;
+  const msg = detailFromApiErrorMessage(raw);
+  if (!msg) return;
+  if (isConsoleOnlyApiFailure(msg)) {
+    console.warn("[AiBizOsHumanUI]", msg, err);
+    return;
+  }
+  setError(msg);
 }
 
 async function api(path, { method = "GET", body, headers: hdr = {}, signal, timeoutMs = API_TIMEOUT_MS } = {}) {
@@ -452,6 +528,8 @@ export default function AiBizOsHumanUI() {
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
+  /** Keys: draft id string — outbound draft body regeneration in progress. */
+  const [regeneratingOutboundDraftIds, setRegeneratingOutboundDraftIds] = useState(() => ({}));
   const [editDraft, setEditDraft] = useState(null);
   const [assetsLibrary, setAssetsLibrary] = useState([]);
   const [runAssetPackets, setRunAssetPackets] = useState([]);
@@ -463,6 +541,8 @@ export default function AiBizOsHumanUI() {
   const [signatureSetupOpen, setSignatureSetupOpen] = useState(false);
   const [signatureFormHtml, setSignatureFormHtml] = useState("");
   const [signatureEditorKey, setSignatureEditorKey] = useState(0);
+  const [promptSetupOpen, setPromptSetupOpen] = useState(false);
+  const [promptSetupText, setPromptSetupText] = useState("");
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restartDialogRun, setRestartDialogRun] = useState(null);
   /** Non-blocking: restart runs in background after confirm (no full-screen lock). */
@@ -471,12 +551,35 @@ export default function AiBizOsHumanUI() {
   const [companiesLoading, setCompaniesLoading] = useState(false);
   /** Per-row: POST /companies/retry-find in flight (several retries can run in parallel). */
   const [companyRetryLoading, setCompanyRetryLoading] = useState(() => ({}));
+  const [continueCompanyFindLoading, setContinueCompanyFindLoading] = useState(false);
   /**
    * After retry: still no matching contact and LLM added no new rows → red "Not available", no Retry.
    * Keyed by collect_index; reset when switching runs.
    */
   const [companyFindUnavailable, setCompanyFindUnavailable] = useState(() => ({}));
   const [setupIntegration, setSetupIntegration] = useState(null);
+  const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
+  const [gmailForm, setGmailForm] = useState({
+    clientId: "",
+    clientSecret: "",
+    redirectUri: "",
+  });
+  const [gmailSetupBusy, setGmailSetupBusy] = useState(false);
+  const [gmailSetupErr, setGmailSetupErr] = useState("");
+  const [testSendBusy, setTestSendBusy] = useState(false);
+
+  const gmailSendReady = setupIntegration?.gmail_send_ready === true;
+
+  const gmailSetupHintsFromApi = useMemo(() => {
+    const raw = setupIntegration?.hints;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((h) => String(h).startsWith("Gmail setup:"));
+  }, [setupIntegration?.hints]);
+
+  const openGmailSetup = useCallback(() => {
+    setGmailSetupErr("");
+    setGmailSetupOpen(true);
+  }, []);
 
   const loadSetupIntegration = useCallback(async () => {
     try {
@@ -511,11 +614,31 @@ export default function AiBizOsHumanUI() {
       });
     } catch (e) {
       if (signal?.aborted) return;
-      setError(String(e.message || e));
+      setUiError(setError, e);
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
   }, [projectView]);
+
+  const continueCompanyFindAllPending = async (runId) => {
+    if (!runId) return;
+    setError("");
+    setContinueCompanyFindLoading(true);
+    try {
+      await api(`/runs/${runId}/companies/continue-find`, {
+        method: "POST",
+        timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
+      });
+      const data = await api(`/runs/${runId}/companies`);
+      setCompaniesPanel(data);
+      setCompanyFindUnavailable({});
+      await loadRunDetails(runId);
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setContinueCompanyFindLoading(false);
+    }
+  };
 
   const retryCompanyFind = async (runId, collectIndex) => {
     if (!runId || collectIndex == null) return;
@@ -549,7 +672,7 @@ export default function AiBizOsHumanUI() {
       }
       await loadRunDetails(runId);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     } finally {
       setCompanyRetryLoading((prev) => {
         const next = { ...prev };
@@ -579,7 +702,7 @@ export default function AiBizOsHumanUI() {
       setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
       setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -600,6 +723,28 @@ export default function AiBizOsHumanUI() {
   }, [loadSetupIntegration]);
 
   useEffect(() => {
+    if (mainNav === "drafts") void loadSetupIntegration();
+  }, [mainNav, loadSetupIntegration]);
+
+  useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const ok = sp.get("gmail_connected");
+      const gerr = sp.get("gmail_error");
+      if (!ok && !gerr) return;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("gmail_connected");
+      url.searchParams.delete("gmail_error");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      void loadSetupIntegration();
+      if (gerr) setError(decodeURIComponent(gerr));
+      if (ok) setError("");
+    } catch {
+      /* ignore malformed query */
+    }
+  }, [loadSetupIntegration]);
+
+  useEffect(() => {
     if (!selectedRun?.id || mainNav !== "companies") {
       setCompaniesPanel(null);
       return;
@@ -611,9 +756,12 @@ export default function AiBizOsHumanUI() {
         const data = await api(`/runs/${selectedRun.id}/companies`, { signal: ac.signal });
         if (!ac.signal.aborted) setCompaniesPanel(data);
       } catch (e) {
-        if (e?.name !== "AbortError" && !String(e?.message || "").includes("AbortError")) {
+        const msg = String(e?.message || e);
+        if (isConsoleOnlyApiFailure(msg)) {
+          console.warn("[AiBizOsHumanUI] companies load", msg, e);
+        } else {
           setCompaniesPanel(null);
-          setError(String(e.message || e));
+          setError(msg);
         }
       } finally {
         if (!ac.signal.aborted) setCompaniesLoading(false);
@@ -645,8 +793,13 @@ export default function AiBizOsHumanUI() {
           setWorkspace(null);
         }
       } catch (e) {
-        setRunsList([]);
-        setError(String(e?.message || e));
+        const msg = String(e?.message || e);
+        if (isConsoleOnlyApiFailure(msg)) {
+          console.warn("[AiBizOsHumanUI] runs list", msg, e);
+        } else {
+          setRunsList([]);
+          setError(msg);
+        }
       }
     })();
   }, [selectedProject]);
@@ -685,7 +838,7 @@ export default function AiBizOsHumanUI() {
       }
       await loadProjects();
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -695,7 +848,7 @@ export default function AiBizOsHumanUI() {
       await api(`/projects/${projectId}/restore`, { method: "POST" });
       await loadProjects();
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -772,7 +925,7 @@ export default function AiBizOsHumanUI() {
         outreach_brief: DEFAULT_OUTREACH_BRIEF,
       });
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -819,7 +972,7 @@ export default function AiBizOsHumanUI() {
       const nextOpen = ordered.find((r) => !r.closed_at);
       await loadRunDetails(nextOpen ? nextOpen.id : closedId);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -864,7 +1017,7 @@ export default function AiBizOsHumanUI() {
       await loadRunDetails(runId);
       void loadSetupIntegration();
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     } finally {
       setPendingRestart(null);
     }
@@ -877,7 +1030,7 @@ export default function AiBizOsHumanUI() {
       const run = await api(`/runs/${selectedRun.id}/continue`, { method: "POST" });
       await loadRunDetails(run.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -894,7 +1047,7 @@ export default function AiBizOsHumanUI() {
       });
       if (selectedRun) await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
       if (selectedRun) await loadRunDetails(selectedRun.id);
     }
   };
@@ -908,7 +1061,7 @@ export default function AiBizOsHumanUI() {
       });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -920,7 +1073,7 @@ export default function AiBizOsHumanUI() {
       await api(`/contacts/${contactId}/create-draft`, { method: "POST" });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     } finally {
       setCreateDraftContactId(null);
     }
@@ -937,18 +1090,26 @@ export default function AiBizOsHumanUI() {
       });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
   const regenerateOutboundDraft = async (draftId) => {
     if (!selectedRun) return;
+    const idKey = String(draftId);
+    setRegeneratingOutboundDraftIds((p) => ({ ...p, [idKey]: true }));
     try {
       setError("");
       await api(`/email-drafts/${draftId}/regenerate`, { method: "POST" });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
+    } finally {
+      setRegeneratingOutboundDraftIds((p) => {
+        const next = { ...p };
+        delete next[idKey];
+        return next;
+      });
     }
   };
 
@@ -960,29 +1121,116 @@ export default function AiBizOsHumanUI() {
       if (editDraft?.id === draftId) setEditDraft(null);
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
   const sendDraft = async (draftId) => {
     if (!selectedRun) return;
+    if (!gmailSendReady) {
+      openGmailSetup();
+      return;
+    }
     try {
       setError("");
       await api(`/sending/drafts/${draftId}/send`, { method: "POST" });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
+      void loadSetupIntegration();
     }
   };
 
   const sendAllApproved = async () => {
     if (!selectedRun) return;
+    if (!gmailSendReady) {
+      openGmailSetup();
+      return;
+    }
     try {
       setError("");
       await api(`/sending/runs/${selectedRun.id}/send`, { method: "POST" });
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
+      void loadSetupIntegration();
+    }
+  };
+
+  /** Sends first sendable approved draft to the same mailbox as From (self-test; no DB updates). */
+  const testSendFirstApproved = async () => {
+    if (!selectedRun) return;
+    if (!gmailSendReady) {
+      openGmailSetup();
+      return;
+    }
+    setTestSendBusy(true);
+    try {
+      setError("");
+      await api(`/sending/runs/${selectedRun.id}/mock-send-preview`, { method: "POST" });
+    } catch (e) {
+      setUiError(setError, e);
+      void loadSetupIntegration();
+    } finally {
+      setTestSendBusy(false);
+    }
+  };
+
+  const connectGmailOAuth = async () => {
+    setGmailSetupBusy(true);
+    setGmailSetupErr("");
+    try {
+      setError("");
+      const cid = gmailForm.clientId.trim();
+      const sec = gmailForm.clientSecret.trim();
+      const ruri = gmailForm.redirectUri.trim();
+      const hasFormCreds = Boolean(cid && sec);
+      const serverHasClient = setupIntegration?.gmail_client_configured === true;
+      if (!hasFormCreds && !serverHasClient) {
+        setGmailSetupErr(
+          "Add OAuth Client ID and Client secret below (saved to backend .env when allowed), " +
+            "or set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in backend/.env, restart the API, then click Connect again with empty fields.",
+        );
+        return;
+      }
+      if (cid && sec) {
+        if (!setupIntegration?.allow_env_write) {
+          throw new Error(
+            "Saving credentials from the browser is disabled. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to backend/.env, " +
+              "restart the API, then use Connect Gmail (or enable ALLOW_SETUP_ENV_WRITE for local dev).",
+          );
+        }
+        await api("/setup/gmail-credentials", {
+          method: "POST",
+          body: {
+            client_id: cid,
+            client_secret: sec,
+            ...(ruri ? { redirect_uri: ruri } : {}),
+          },
+        });
+        await loadSetupIntegration();
+      }
+      const startRes = await api("/oauth/google/start", {
+        method: "POST",
+        body: {
+          public_origin: window.location.origin,
+          return_path: window.location.pathname || "/",
+        },
+      });
+      const authUrl = startRes?.authorization_url;
+      if (!authUrl || typeof authUrl !== "string") {
+        throw new Error(
+          "API did not return authorization_url — ensure the backend is running and GET/POST /oauth/google/start is mounted.",
+        );
+      }
+      window.location.assign(authUrl);
+    } catch (e) {
+      const raw = formatApiError(e);
+      const friendly = detailFromApiErrorMessage(raw);
+      setGmailSetupErr(friendly);
+      setError(friendly);
+    } finally {
+      setGmailSetupBusy(false);
     }
   };
 
@@ -1022,7 +1270,7 @@ export default function AiBizOsHumanUI() {
       setEditDraft(null);
       await loadRunDetails(selectedRun.id);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -1030,6 +1278,26 @@ export default function AiBizOsHumanUI() {
     setSignatureFormHtml(selectedRun?.sender_signature_html ?? "");
     setSignatureEditorKey((k) => k + 1);
     setSignatureSetupOpen(true);
+  };
+
+  const openPromptSetup = () => {
+    setPromptSetupText(getPromptSetupEditorInitialText(selectedRun));
+    setPromptSetupOpen(true);
+  };
+
+  const savePromptSetup = async () => {
+    if (!selectedRun?.id) return;
+    try {
+      setError("");
+      await api(`/runs/${selectedRun.id}/prompt-setup`, {
+        method: "PATCH",
+        body: { prompt_setup_text: promptSetupText },
+      });
+      setPromptSetupOpen(false);
+      await loadRunDetails(selectedRun.id);
+    } catch (e) {
+      setUiError(setError, e);
+    }
   };
 
   const saveSignatureSetup = async () => {
@@ -1043,7 +1311,7 @@ export default function AiBizOsHumanUI() {
       await loadRunDetails(selectedRun.id);
       setSignatureSetupOpen(false);
     } catch (e) {
-      setError(String(e.message || e));
+      setUiError(setError, e);
     }
   };
 
@@ -1069,6 +1337,50 @@ export default function AiBizOsHumanUI() {
 
   const contactHasBadEmailHealth = (c) =>
     c.email_health === "dead_mailbox" || c.email_health === "bounced";
+
+  /** Stable key to group review cards by company (no backend merge). */
+  const contactCompanyGroupKey = (c) => {
+    const co = (c.company || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+    let w = (c.website || "").trim().toLowerCase();
+    w = w.replace(/^https?:\/\//, "").replace(/^www\./, "");
+    w = w.replace(/\/+$/, "");
+    if (!co && !w) return `__single_${c.id}`;
+    return `${co}\x1f${w}`;
+  };
+
+  /** Preserve list order; each value is one or more contacts sharing the same company key. */
+  const groupContactsByCompany = (list) => {
+    const keyToContacts = new Map();
+    for (const c of list) {
+      const k = contactCompanyGroupKey(c);
+      if (!keyToContacts.has(k)) keyToContacts.set(k, []);
+      keyToContacts.get(k).push(c);
+    }
+    const seen = new Set();
+    const groups = [];
+    for (const c of list) {
+      const k = contactCompanyGroupKey(c);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      groups.push(keyToContacts.get(k));
+    }
+    return groups;
+  };
+
+  const pickGroupContactCardClass = (group) => {
+    const rank = (c) => {
+      if (c.email_health === "dead_mailbox") return 0;
+      if (c.email_health === "bounced") return 1;
+      if (c.review_status === "rejected") return 2;
+      if (c.review_status === "pending") return 3;
+      return 4;
+    };
+    const worst = [...group].sort((a, b) => rank(a) - rank(b))[0];
+    return contactCardClass(worst);
+  };
 
   const contactById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
   const draftByContactId = useMemo(() => {
@@ -1097,11 +1409,24 @@ export default function AiBizOsHumanUI() {
   }, [contactsMatchingSearch]);
   const rejectedList = contactsMatchingSearch.filter((c) => c.review_status === "rejected");
 
+  const pendingGroups = useMemo(() => groupContactsByCompany(pending), [pending]);
+  const approvedGroups = useMemo(() => groupContactsByCompany(approvedList), [approvedList]);
+  const rejectedGroups = useMemo(() => groupContactsByCompany(rejectedList), [rejectedList]);
+
   const draftsPending = filteredDrafts.filter((d) => d.review_status === "pending");
   const draftsApprovedList = filteredDrafts.filter((d) =>
     ["approved", "edited"].includes(d.review_status),
   );
   const draftsRejectedList = filteredDrafts.filter((d) => d.review_status === "rejected");
+
+  /** Hide empty review buckets when a narrow filter is active (e.g. Approved → no "Pending (0)"). */
+  const showDraftsPendingSection =
+    draftFilter === "all" || draftFilter === "pending" || draftsPending.length > 0;
+  const showDraftsApprovedSection =
+    draftFilter === "all" ||
+    draftFilter === "approved" ||
+    draftFilter === "edited" ||
+    draftsApprovedList.length > 0;
 
   const canContinue = approvedContactsReachable > 0;
 
@@ -1115,6 +1440,16 @@ export default function AiBizOsHumanUI() {
     }).length;
     return { fraction: done / drafts.length, done, total: drafts.length };
   }, [drafts]);
+
+  const promptSetupSavedFilled = useMemo(() => {
+    const raw = selectedRun?.context_json?.[PROMPT_SETUP_STORAGE_KEY];
+    return typeof raw === "string" && raw.trim().length > 0;
+  }, [selectedRun?.id, selectedRun?.context_json]);
+
+  const signatureSetupFilled = useMemo(() => {
+    const html = selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "";
+    return runSignatureHasMeaningfulContent(html);
+  }, [selectedRun?.id, selectedRun?.sender_signature_html, workspace?.sender_signature_html]);
 
   const primaryCta = useMemo(() => {
     if (!selectedRun?.id) return null;
@@ -1225,7 +1560,7 @@ export default function AiBizOsHumanUI() {
   const canRegenerateOutboundDraft = (d) =>
     ["draft", "failed"].includes(d.status) && !["sent", "sending"].includes(d.status);
 
-  const renderContactCard = (contact) => {
+  const renderContactBlock = (contact, { grouped }) => {
     const rs = contact.review_status;
     const isPending = rs === "pending";
     const isRejected = rs === "rejected";
@@ -1233,192 +1568,210 @@ export default function AiBizOsHumanUI() {
     const badEmailHealth = contactHasBadEmailHealth(contact);
     const isDeadMailbox = contact.email_health === "dead_mailbox";
     return (
-      <Card key={contact.id} className={contactCardClass(contact)}>
-        <CardContent className="p-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-                {badEmailHealth ? (
-                  <CircleAlert
-                    className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
-                    aria-hidden
-                  />
-                ) : null}
+      <div>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {badEmailHealth ? (
+                <CircleAlert className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400" aria-hidden />
+              ) : null}
+              {!grouped ? (
                 <div className="text-lg font-semibold">{contact.company || "Unnamed company"}</div>
-                {isReplacement ? (
-                  <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
-                    Replacement
-                  </Badge>
-                ) : null}
-                {!badEmailHealth ? <StatusBadge value={contact.status} /> : null}
-                {!badEmailHealth ? <StatusBadge value={contact.review_status} /> : null}
-                {badEmailHealth ? (
-                  <Badge variant="destructive" className="font-normal text-xs">
-                    {contact.email_health === "dead_mailbox"
-                      ? "Dead mailbox"
-                      : contact.email_health === "bounced"
-                        ? "Bounced"
-                        : pretty(contact.email_health)}
-                  </Badge>
-                ) : null}
-                {!contact.email ? <Badge variant="destructive">No email</Badge> : null}
-                {(contact.confidence || "").toLowerCase() === "low" ? (
-                  <Badge variant="secondary">Low confidence</Badge>
-                ) : null}
-                {!badEmailHealth && contact.email_health && contact.email_health !== "unknown" ? (
-                  <Badge variant="outline" className="text-xs">
-                    Email: {pretty(contact.email_health)}
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="text-sm text-muted-foreground">
-                {contact.name || "No name"} · {contactRoleFromPayload(contact) || "No role"}
-              </div>
-              <div className="text-sm">{contact.email || "No email"}</div>
-              <div className="text-xs text-muted-foreground">{contact.website || "No website"}</div>
+              ) : null}
+              {isReplacement ? (
+                <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
+                  Replacement
+                </Badge>
+              ) : null}
+              {!badEmailHealth ? <StatusBadge value={contact.status} /> : null}
+              {!badEmailHealth ? <StatusBadge value={contact.review_status} /> : null}
+              {badEmailHealth ? (
+                <Badge variant="destructive" className="font-normal text-xs">
+                  {contact.email_health === "dead_mailbox"
+                    ? "Dead mailbox"
+                    : contact.email_health === "bounced"
+                      ? "Bounced"
+                      : pretty(contact.email_health)}
+                </Badge>
+              ) : null}
+              {!contact.email ? <Badge variant="destructive">No email</Badge> : null}
+              {(contact.confidence || "").toLowerCase() === "low" ? (
+                <Badge variant="secondary">Low confidence</Badge>
+              ) : null}
+              {!badEmailHealth && contact.email_health && contact.email_health !== "unknown" ? (
+                <Badge variant="outline" className="text-xs">
+                  Email: {pretty(contact.email_health)}
+                </Badge>
+              ) : null}
             </div>
-            <div className="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 lg:w-auto lg:flex-nowrap">
-              {!isDeadMailbox ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    setEditingContact({
-                      id: contact.id,
-                      name: contact.name ?? "",
-                      role: contactRoleFromPayload(contact),
-                      email: contact.email ?? "",
-                    })
-                  }
-                >
-                  <Pencil className="mr-1 h-3 w-3" /> Edit
-                </Button>
-              ) : null}
-              {isPending ? (
-                <>
-                  <Button size="sm" onClick={() => approveContact(contact.id)}>
-                    Approve
-                  </Button>
-                  {!isDeadMailbox ? (
-                    <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
-                      Reject
-                    </Button>
-                  ) : null}
-                </>
-              ) : null}
-              {!isPending && !isRejected && !isDeadMailbox ? (
-                <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
-                  Reject
-                </Button>
-              ) : null}
-              {isRejected ? (
+            <div className="text-sm text-muted-foreground">
+              {contact.name || "No name"} · {contactRoleFromPayload(contact) || "No role"}
+            </div>
+            <div className="text-sm">{contact.email || "No email"}</div>
+            <div className="text-xs text-muted-foreground">{contact.website || "No website"}</div>
+          </div>
+          <div className="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 lg:w-auto lg:flex-nowrap">
+            {!isDeadMailbox ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  setEditingContact({
+                    id: contact.id,
+                    name: contact.name ?? "",
+                    role: contactRoleFromPayload(contact),
+                    email: contact.email ?? "",
+                  })
+                }
+              >
+                <Pencil className="mr-1 h-3 w-3" /> Edit
+              </Button>
+            ) : null}
+            {isPending ? (
+              <>
                 <Button size="sm" onClick={() => approveContact(contact.id)}>
                   Approve
                 </Button>
-              ) : null}
-              {!isPending &&
-              !isRejected &&
-              ["approved", "edited"].includes(rs) &&
-              !draftByContactId.has(contact.id) &&
-              createDraftContactId !== contact.id ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!((contact.email || "").trim())}
-                  title={
-                    !(contact.email || "").trim()
-                      ? "Add an email to this contact first"
-                      : undefined
+                {!isDeadMailbox ? (
+                  <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
+                    Reject
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+            {!isPending && !isRejected && !isDeadMailbox ? (
+              <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
+                Reject
+              </Button>
+            ) : null}
+            {isRejected ? (
+              <Button size="sm" onClick={() => approveContact(contact.id)}>
+                Approve
+              </Button>
+            ) : null}
+            {!isPending &&
+            !isRejected &&
+            ["approved", "edited"].includes(rs) &&
+            !draftByContactId.has(contact.id) &&
+            createDraftContactId !== contact.id ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!((contact.email || "").trim())}
+                title={
+                  !(contact.email || "").trim() ? "Add an email to this contact first" : undefined
+                }
+                onClick={() => void createDraftForContact(contact.id)}
+              >
+                Create draft
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        {editingContact?.id === contact.id && !isDeadMailbox ? (
+          <div className="mt-3 space-y-2 border-t border-border pt-3">
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">Recipient name</div>
+              <Input
+                placeholder="Contact name"
+                value={editingContact.name ?? ""}
+                onChange={(e) =>
+                  setEditingContact({
+                    ...editingContact,
+                    name: e.target.value,
+                  })
+                }
+              />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">Job title</div>
+              <Input
+                placeholder="e.g. Head of Partnerships"
+                value={editingContact.role ?? ""}
+                onChange={(e) =>
+                  setEditingContact({
+                    ...editingContact,
+                    role: e.target.value,
+                  })
+                }
+              />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">Email</div>
+              <Input
+                placeholder="Email"
+                value={editingContact.email || ""}
+                disabled={contact.status === "valid"}
+                title={
+                  contact.status === "valid"
+                    ? "This email is verified — editing is disabled."
+                    : undefined
+                }
+                onChange={(e) =>
+                  setEditingContact({
+                    ...editingContact,
+                    email: e.target.value,
+                  })
+                }
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                onClick={async () => {
+                  try {
+                    setError("");
+                    const nameVal = (editingContact.name ?? "").trim();
+                    const roleVal = (editingContact.role ?? "").trim();
+                    const emailVal = (editingContact.email ?? "").trim();
+                    const body = {
+                      name: nameVal || null,
+                      role: roleVal,
+                    };
+                    if (contact.status !== "valid") {
+                      body.email = emailVal || null;
+                    }
+                    await api(`/contacts/${contact.id}/edit`, {
+                      method: "PATCH",
+                      body,
+                    });
+                    setEditingContact(null);
+                    if (selectedRun) await loadRunDetails(selectedRun.id);
+                  } catch (e) {
+                    setUiError(setError, e);
                   }
-                  onClick={() => void createDraftForContact(contact.id)}
-                >
-                  Create draft
-                </Button>
-              ) : null}
+                }}
+              >
+                Save
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setEditingContact(null)}>
+                Cancel
+              </Button>
             </div>
           </div>
-          {editingContact?.id === contact.id && !isDeadMailbox ? (
-            <div className="mt-3 space-y-2 border-t border-border pt-3">
-              <div>
-                <div className="mb-1 text-xs text-muted-foreground">Recipient name</div>
-                <Input
-                  placeholder="Contact name"
-                  value={editingContact.name ?? ""}
-                  onChange={(e) =>
-                    setEditingContact({
-                      ...editingContact,
-                      name: e.target.value,
-                    })
-                  }
-                />
-              </div>
-              <div>
-                <div className="mb-1 text-xs text-muted-foreground">Job title</div>
-                <Input
-                  placeholder="e.g. Head of Partnerships"
-                  value={editingContact.role ?? ""}
-                  onChange={(e) =>
-                    setEditingContact({
-                      ...editingContact,
-                      role: e.target.value,
-                    })
-                  }
-                />
-              </div>
-              <div>
-                <div className="mb-1 text-xs text-muted-foreground">Email</div>
-                <Input
-                  placeholder="Email"
-                  value={editingContact.email || ""}
-                  disabled={contact.status === "valid"}
-                  title={
-                    contact.status === "valid"
-                      ? "This email is verified — editing is disabled."
-                      : undefined
-                  }
-                  onChange={(e) =>
-                    setEditingContact({
-                      ...editingContact,
-                      email: e.target.value,
-                    })
-                  }
-                />
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  onClick={async () => {
-                    try {
-                      setError("");
-                      const nameVal = (editingContact.name ?? "").trim();
-                      const roleVal = (editingContact.role ?? "").trim();
-                      const emailVal = (editingContact.email ?? "").trim();
-                      const body = {
-                        name: nameVal || null,
-                        role: roleVal,
-                      };
-                      if (contact.status !== "valid") {
-                        body.email = emailVal || null;
-                      }
-                      await api(`/contacts/${contact.id}/edit`, {
-                        method: "PATCH",
-                        body,
-                      });
-                      setEditingContact(null);
-                      if (selectedRun) await loadRunDetails(selectedRun.id);
-                    } catch (e) {
-                      setError(String(e.message || e));
-                    }
-                  }}
-                >
-                  Save
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => setEditingContact(null)}>
-                  Cancel
-                </Button>
-              </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderContactGroupCard = (group) => {
+    const multi = group.length > 1;
+    const cardClass = multi ? pickGroupContactCardClass(group) : contactCardClass(group[0]);
+    const cardKey = multi ? `grp-${group.map((c) => c.id).join("-")}` : group[0].id;
+    return (
+      <Card key={cardKey} className={cardClass}>
+        <CardContent className="p-5">
+          {multi ? (
+            <div className="mb-4 border-b border-border pb-3">
+              <div className="text-lg font-semibold">{group[0].company || "Unnamed company"}</div>
             </div>
           ) : null}
+          {group.map((contact, idx) => (
+            <div key={contact.id}>
+              {idx > 0 ? <Separator className="my-4 bg-border/90" decorative /> : null}
+              {renderContactBlock(contact, { grouped: multi })}
+            </div>
+          ))}
         </CardContent>
       </Card>
     );
@@ -1432,20 +1785,25 @@ export default function AiBizOsHumanUI() {
     const isSendLater =
       draft.review_notes === OUTBOUND_REVIEW_SEND_LATER &&
       ["approved", "edited"].includes(draft.review_status);
+    const isRegeneratingOutbound = Boolean(regeneratingOutboundDraftIds[String(draft.id)]);
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
         <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start lg:gap-4">
+            <div className="min-w-0 space-y-2">
+              <div className="flex min-w-0 items-center gap-2">
                 {isDeadMailboxDraft ? (
                   <CircleAlert
                     className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
                     aria-hidden
                   />
                 ) : null}
-                <div className="text-lg font-semibold">{draft.company || "Untitled draft"}</div>
+                <div className="min-w-0 text-lg font-semibold break-words">
+                  {draft.company || "Untitled draft"}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
                 {isReplacementDraft ? (
                   <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
                     Replacement draft
@@ -1463,15 +1821,19 @@ export default function AiBizOsHumanUI() {
                     Send later
                   </Badge>
                 ) : null}
-              </div>
-              <div className="mt-2 text-sm">
-                <span className="font-medium">To:</span> {draft.to_email || "No recipient"}
-              </div>
-              <div className="text-sm">
-                <span className="font-medium">Subject:</span> {draft.subject}
+                {isRegeneratingOutbound ? (
+                  <Badge
+                    variant="outline"
+                    className="inline-flex items-center gap-1 border-pink-500/50 bg-pink-500/15 font-normal text-pink-900 dark:border-pink-400/45 dark:bg-pink-500/20 dark:text-pink-100"
+                    aria-live="polite"
+                  >
+                    <Clock className="h-3 w-3 shrink-0" aria-hidden />
+                    Regenerating
+                  </Badge>
+                ) : null}
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex min-w-0 flex-nowrap items-center justify-start gap-1.5 overflow-x-auto pt-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] sm:gap-2 lg:justify-end [&::-webkit-scrollbar]:h-1 [&_button]:shrink-0 [&_button]:whitespace-nowrap">
               {isDeadMailboxDraft ? (
                 <Button
                   type="button"
@@ -1502,7 +1864,12 @@ export default function AiBizOsHumanUI() {
                         <Clock className="h-4 w-4" aria-hidden />
                       </Button>
                       {canRegenerateOutboundDraft(draft) ? (
-                        <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isRegeneratingOutbound}
+                          onClick={() => void regenerateOutboundDraft(draft.id)}
+                        >
                           Regenerate
                         </Button>
                       ) : null}
@@ -1514,7 +1881,12 @@ export default function AiBizOsHumanUI() {
                   {["approved", "edited"].includes(draft.review_status) ? (
                     <>
                       {canRegenerateOutboundDraft(draft) ? (
-                        <Button size="sm" variant="outline" onClick={() => void regenerateOutboundDraft(draft.id)}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isRegeneratingOutbound}
+                          onClick={() => void regenerateOutboundDraft(draft.id)}
+                        >
                           Regenerate
                         </Button>
                       ) : null}
@@ -1529,12 +1901,26 @@ export default function AiBizOsHumanUI() {
                     </Button>
                   ) : null}
                   {canSendDraft(draft) ? (
-                    <Button size="sm" onClick={() => sendDraft(draft.id)}>
+                    <Button size="sm" className="gap-1.5" onClick={() => void sendDraft(draft.id)}>
+                      {!gmailSendReady ? (
+                        <CircleX
+                          className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-500"
+                          aria-hidden
+                        />
+                      ) : null}
                       Send
                     </Button>
                   ) : null}
                 </>
               )}
+            </div>
+            <div className="min-w-0 space-y-1 text-sm lg:col-span-2">
+              <div>
+                <span className="font-medium">To:</span> {draft.to_email || "No recipient"}
+              </div>
+              <div>
+                <span className="font-medium">Subject:</span> {draft.subject}
+              </div>
             </div>
           </div>
           {draft.error_message ? (
@@ -1544,8 +1930,11 @@ export default function AiBizOsHumanUI() {
           ) : null}
           <EmailDraftBodyPreview
             body={draft.body}
-            showSignaturePlaceholder={Boolean((selectedRun?.sender_signature_html ?? "").trim())}
+            showSignaturePlaceholder={runSignatureHasMeaningfulContent(
+              selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "",
+            )}
             attachedAssetIds={normalizeAttachedAssetIds(draft.attached_asset_ids)}
+            assetLibrary={assetsLibrary}
           />
         </div>
       </CardContent>
@@ -1990,24 +2379,50 @@ export default function AiBizOsHumanUI() {
             {mainNav === "companies" ? (
               <Card className="rounded-2xl border-2 border-border shadow-none">
                 <CardHeader>
-                  <CardTitle>Companies</CardTitle>
-                  <CardDescription>
-                    List from the collect step. Status compares each company to the find-contacts step: whether any
-                    matching contact row exists, search finished with none, or search is still in progress.
-                  </CardDescription>
-                  {companiesPanel?.collect_step_status != null || companiesPanel?.find_step_status != null ? (
-                    <p className="text-xs text-muted-foreground">
-                      Collect step:{" "}
-                      <span className="font-medium text-foreground">
-                        {companiesPanel?.collect_step_status ?? "—"}
-                      </span>
-                      {" · "}
-                      Find contacts step:{" "}
-                      <span className="font-medium text-foreground">
-                        {companiesPanel?.find_step_status ?? "—"}
-                      </span>
-                    </p>
-                  ) : null}
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                    <div className="min-w-0 space-y-1.5">
+                      <CardTitle>Companies</CardTitle>
+                      <CardDescription>
+                        List from the collect step. Status compares each company to the find-contacts step: whether any
+                        matching contact row exists, search finished with none, or search is still in progress.
+                      </CardDescription>
+                      {companiesPanel?.collect_step_status != null || companiesPanel?.find_step_status != null ? (
+                        <p className="text-xs text-muted-foreground">
+                          Collect step:{" "}
+                          <span className="font-medium text-foreground">
+                            {companiesPanel?.collect_step_status ?? "—"}
+                          </span>
+                          {" · "}
+                          Find contacts step:{" "}
+                          <span className="font-medium text-foreground">
+                            {companiesPanel?.find_step_status ?? "—"}
+                          </span>
+                        </p>
+                      ) : null}
+                    </div>
+                    {companiesPanel?.companies?.some((c) => c.contact_status === "pending") &&
+                    selectedRun &&
+                    !selectedRun.closed_at &&
+                    pendingRestart == null ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="shrink-0 self-start sm:mt-0.5"
+                        disabled={companiesLoading || continueCompanyFindLoading}
+                        onClick={() => void continueCompanyFindAllPending(selectedRun.id)}
+                      >
+                        {continueCompanyFindLoading ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                            Searching…
+                          </>
+                        ) : (
+                          "Continue searching"
+                        )}
+                      </Button>
+                    ) : null}
+                  </div>
                 </CardHeader>
                 <CardContent>
                   {!selectedRun ? (
@@ -2155,12 +2570,76 @@ export default function AiBizOsHumanUI() {
                     <CardTitle>Review workspace</CardTitle>
                     <CardDescription>Switch between Contacts and Drafts using the bar above.</CardDescription>
                   </div>
-                  <Input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search company, name, email, subject..."
-                    className="md:max-w-sm"
-                  />
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center md:max-w-none md:justify-end">
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        title="Send the first sendable approved draft to yourself (To = From: GMAIL_SEND_AS_EMAIL when set, else primary Gmail). Does not update drafts or the database."
+                        onClick={() => void testSendFirstApproved()}
+                        disabled={!selectedRun || approvedDrafts === 0 || testSendBusy}
+                      >
+                        {testSendBusy ? (
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                        ) : !gmailSendReady ? (
+                          <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
+                        ) : (
+                          <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
+                        )}
+                        Test
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => openPromptSetup()}
+                        disabled={!selectedRun}
+                      >
+                        {promptSetupSavedFilled ? (
+                          <CircleCheck
+                            className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500"
+                            aria-hidden
+                          />
+                        ) : (
+                          <CircleX
+                            className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
+                            aria-hidden
+                          />
+                        )}
+                        Prompt setup
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => openSignatureSetup()}
+                        disabled={!selectedRun}
+                      >
+                        {signatureSetupFilled ? (
+                          <CircleCheck
+                            className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500"
+                            aria-hidden
+                          />
+                        ) : (
+                          <CircleX
+                            className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
+                            aria-hidden
+                          />
+                        )}
+                        Signature setup
+                      </Button>
+                    </div>
+                    <Input
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Search company, name, email, subject..."
+                      className="min-w-0 sm:max-w-[220px] md:max-w-sm"
+                    />
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
@@ -2175,7 +2654,9 @@ export default function AiBizOsHumanUI() {
                         <div className="text-sm font-medium">
                           Pending ({pending.length})
                         </div>
-                        <div className="grid gap-3">{pending.map((c) => renderContactCard(c))}</div>
+                        <div className="grid gap-3">
+                          {pendingGroups.map((g) => renderContactGroupCard(g))}
+                        </div>
                         {pending.length === 0 ? (
                           <div className="text-sm text-muted-foreground">
                             No pending contacts match your search — clear search or check Approved / Rejected.
@@ -2217,7 +2698,9 @@ export default function AiBizOsHumanUI() {
 
                     <div className="space-y-3">
                       <div className="text-sm font-medium">Approved ({approvedContactsReachable})</div>
-                      <div className="grid gap-3">{approvedList.map((c) => renderContactCard(c))}</div>
+                      <div className="grid gap-3">
+                        {approvedGroups.map((g) => renderContactGroupCard(g))}
+                      </div>
                     </div>
 
                     {rejectedList.length > 0 ? (
@@ -2227,7 +2710,7 @@ export default function AiBizOsHumanUI() {
                           Rejected ({rejectedList.length})
                         </summary>
                         <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
-                          {rejectedList.map((c) => renderContactCard(c))}
+                          {rejectedGroups.map((g) => renderContactGroupCard(g))}
                         </div>
                       </details>
                     ) : null}
@@ -2244,18 +2727,17 @@ export default function AiBizOsHumanUI() {
                       <div className="flex flex-wrap items-center gap-2">
                         <Button
                           type="button"
+                          className="gap-1.5"
                           onClick={() => void sendAllApproved()}
                           disabled={!selectedRun || approvedDrafts === 0}
                         >
+                          {!gmailSendReady ? (
+                            <CircleX
+                              className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
+                              aria-hidden
+                            />
+                          ) : null}
                           Send all approved
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={() => openSignatureSetup()}
-                          disabled={!selectedRun}
-                        >
-                          Signature setup
                         </Button>
                       </div>
                       <NativeFilterSelect
@@ -2265,18 +2747,21 @@ export default function AiBizOsHumanUI() {
                         options={DRAFT_FILTER_OPTS}
                       />
                     </div>
-
                     {drafts.length > 0 ? (
                       <>
-                        <div className="space-y-3">
-                          <div className="text-sm font-medium">Pending ({draftsPending.length})</div>
-                          <div className="grid gap-3">{draftsPending.map((d) => renderDraftCard(d))}</div>
-                        </div>
+                        {showDraftsPendingSection ? (
+                          <div className="space-y-3">
+                            <div className="text-sm font-medium">Pending ({draftsPending.length})</div>
+                            <div className="grid gap-3">{draftsPending.map((d) => renderDraftCard(d))}</div>
+                          </div>
+                        ) : null}
 
-                        <div className="space-y-3">
-                          <div className="text-sm font-medium">Approved ({draftsApprovedList.length})</div>
-                          <div className="grid gap-3">{draftsApprovedList.map((d) => renderDraftCard(d))}</div>
-                        </div>
+                        {showDraftsApprovedSection ? (
+                          <div className="space-y-3">
+                            <div className="text-sm font-medium">Approved ({draftsApprovedList.length})</div>
+                            <div className="grid gap-3">{draftsApprovedList.map((d) => renderDraftCard(d))}</div>
+                          </div>
+                        ) : null}
 
                         {draftsRejectedList.length > 0 ? (
                           <details className="group rounded-2xl border-2 border-border">
@@ -2523,9 +3008,9 @@ export default function AiBizOsHumanUI() {
             <p className="mt-1 text-sm text-muted-foreground">
               <span className="font-medium text-foreground">{restartDialogRun.name}</span>
               {" — "}
-              contacts, setup steps, and email drafts for this run will be removed. Company search and validation will
-              run again using the same brief. After you confirm, this window closes; progress appears as a slim banner
-              under the page title.
+              company search and contact validation will run again on top of what you already have (same brief). Existing
+              contacts, drafts, and tracking data stay in place; new companies or contacts are merged in. After you
+              confirm, this window closes; progress appears as a slim banner under the page title.
             </p>
             <div className="mt-6 flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={closeRestartDialog}>
@@ -2535,6 +3020,296 @@ export default function AiBizOsHumanUI() {
                 <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
                 Restart
               </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {promptSetupOpen ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/50"
+            aria-label="Close"
+            onClick={() => setPromptSetupOpen(false)}
+          />
+          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
+            <h2 className="text-lg font-semibold">Prompt setup</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Labeled outreach brief (same shape as when the run was created). If nothing was saved yet, this opens with
+              the current run values. When a non-empty prompt is saved, each new approved contact gets a draft via the
+              LLM from this brief plus recipient details; Regenerate uses the same. If the prompt is empty, drafts use
+              the standard master variants from run setup. Saving updates the stored text only — use Regenerate or new
+              approvals to refresh existing drafts.
+            </p>
+            <div className="mt-4">
+              <Textarea
+                value={promptSetupText}
+                onChange={(e) => setPromptSetupText(e.target.value)}
+                className="min-h-[280px] font-mono text-sm"
+                spellCheck={false}
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setPromptSetupOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="button" onClick={() => void savePromptSetup()}>
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {gmailSetupOpen ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/50"
+            aria-label="Close"
+            onClick={() => setGmailSetupOpen(false)}
+          />
+          <div className="relative z-50 max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-xl border-2 border-border bg-card p-6 shadow-lg sm:p-8">
+            <h2 className="text-lg font-semibold">Connect Gmail</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              One Google mailbox sends all outreach from this deployment. Sending uses the real Gmail API — not a mock
+              — once the three variables at the bottom of this dialog are present in{" "}
+              <span className="font-mono text-foreground/90">backend/.env</span> for the API process that answers{" "}
+              <span className="font-mono text-foreground/90">/setup/status</span>.
+            </p>
+            <div className="mt-3 rounded-lg border border-blue-500/35 bg-blue-500/10 px-3 py-2 text-xs leading-relaxed text-foreground">
+              <span className="font-medium text-foreground">Important — finish in this browser tab: </span>
+              Do <strong>not</strong> copy links from Google screens (
+              <span className="font-mono">oauth/warning</span>, <span className="font-mono">consentsummary</span>, etc.).
+              The app only receives tokens after Google <strong>redirects your browser</strong> to{" "}
+              <span className="font-mono break-all">…/api/oauth/google/callback?code=…</span>, then back here with{" "}
+              <span className="font-mono">?gmail_connected=1</span> or <span className="font-mono">?gmail_error=…</span>{" "}
+              in the address bar. If Google shows &quot;Google hasn&apos;t verified this app&quot;, open{" "}
+              <strong>Advanced</strong> / <strong>Continue</strong> (unsafe). Until that final redirect happens, nothing is
+              written to <span className="font-mono">.env</span>.
+            </div>
+            {setupIntegration && setupIntegration.gmail_send_ready !== true ? (
+              <div className="mt-3 rounded-lg border border-amber-500/45 bg-amber-500/10 px-3 py-2.5 text-sm leading-relaxed text-amber-950 dark:text-amber-50">
+                <p className="font-medium text-foreground">If you already edited backend/.env but the status still looks wrong</p>
+                <ul className="mt-2 list-disc space-y-1.5 pl-5 text-foreground/90">
+                  <li>
+                    The UI reflects what the <strong>running API</strong> sees — not only the file open in your editor.
+                    Below, check &quot;API loads variables from&quot; and compare with the file you saved.
+                  </li>
+                  <li>
+                    <strong>Docker:</strong> Compose <span className="font-mono text-xs">env_file</span> is applied when the
+                    container is <strong>created</strong>. After adding <span className="font-mono text-xs">GOOGLE_REFRESH_TOKEN</span>{" "}
+                    on the host, recreate the backend (for example{" "}
+                    <span className="font-mono text-xs">
+                      docker compose -f infra/docker-compose.yml up -d --force-recreate backend
+                    </span>
+                    ). Optional: bind-mount <span className="font-mono text-xs">backend/.env</span> →{" "}
+                    <span className="font-mono text-xs">/app/.env</span> so file edits are picked up without stale env (
+                    <span className="font-mono text-xs">infra/docker-compose.bind-env.yml</span>).
+                  </li>
+                  <li>
+                    Key name must be exactly <span className="font-mono text-xs">GOOGLE_REFRESH_TOKEN</span> (see{" "}
+                    <span className="font-mono text-xs">backend/.env.example</span>). If you have more than one{" "}
+                    <span className="font-mono text-xs">.env</span>, the <strong>later</strong> path in the list below wins for
+                    duplicate names.
+                  </li>
+                  <li>
+                    CLI fallback (no in-app redirect): from <span className="font-mono text-xs">ai-biz-os/backend</span> run{" "}
+                    <span className="font-mono text-xs">python3 scripts/fetch_google_refresh_token.py</span> — add its localhost
+                    callback URI in Google Cloud next to the web callback.
+                  </li>
+                </ul>
+              </div>
+            ) : null}
+            {gmailSetupHintsFromApi.length ? (
+              <div
+                className="mt-3 rounded-lg border border-muted bg-muted/30 px-3 py-2 text-xs leading-relaxed text-foreground/90"
+                role="status"
+              >
+                <span className="font-medium text-foreground">API notes: </span>
+                <ul className="mt-1.5 list-disc space-y-1 pl-5">
+                  {gmailSetupHintsFromApi.map((h) => (
+                    <li key={h}>{h.replace(/^Gmail setup:\s*/, "")}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {gmailSetupErr ? (
+              <div
+                className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                role="alert"
+              >
+                {gmailSetupErr}
+              </div>
+            ) : null}
+            {setupIntegration?.env_write_blocked_reason ? (
+              <div
+                className="mt-3 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-950 dark:text-amber-100"
+                role="status"
+              >
+                <span className="font-medium">Saving to .env is disabled in the running API: </span>
+                {setupIntegration.env_write_blocked_reason}
+              </div>
+            ) : null}
+            {setupIntegration?.env_paths_found?.length ? (
+              <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                API loads variables from (later paths override earlier):{" "}
+                <span className="font-mono text-[11px] text-foreground/90">
+                  {setupIntegration.env_paths_found.join(" → ")}
+                </span>
+                . After a <strong>successful</strong> callback (see green note above),{" "}
+                <span className="font-medium text-foreground">GOOGLE_REFRESH_TOKEN</span> is written when saving is
+                allowed. In Docker without mounting host <span className="font-mono">backend/.env</span> to{" "}
+                <span className="font-mono">/app/.env</span>, the refresh token may exist only inside the container —
+                check <span className="font-mono">infra/docker-compose.yml</span> comments. Current: client{" "}
+                {setupIntegration.gmail_client_configured ? "✓" : "✗"}, refresh token{" "}
+                {setupIntegration.gmail_refresh_token_set ? "✓" : "✗"}.
+              </p>
+            ) : null}
+            <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-foreground">
+              <li>
+                In{" "}
+                <a
+                  className="font-medium text-accent underline"
+                  href="https://console.cloud.google.com/apis/credentials"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Google Cloud Console → Credentials
+                </a>
+                , create an OAuth 2.0 Client ID (Web application).
+              </li>
+              <li>
+                In that <strong>same</strong> project:{" "}
+                <a
+                  className="font-medium text-accent underline"
+                  href="https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  APIs &amp; Services → Library
+                </a>{" "}
+                → open <strong>Gmail API</strong> → <strong>Enable</strong>. Without this, OAuth succeeds but sending
+                mail returns 403 (Gmail API disabled).
+              </li>
+              <li>
+                Under Authorized redirect URIs, add:
+                <div className="mt-1 rounded-lg border border-muted bg-muted/40 px-2 py-1.5 font-mono text-xs break-all">
+                  {`${typeof window !== "undefined" ? window.location.origin : ""}/api/oauth/google/callback`}
+                </div>
+                <span className="text-muted-foreground">
+                  (Must match this app&apos;s address bar origin. Optional: set GOOGLE_REDIRECT_URI in backend
+                  <span className="font-mono">.env</span> instead.)
+                </span>
+              </li>
+              <li>
+                If Google says the app is blocked or did not pass verification: open{" "}
+                <a
+                  className="font-medium text-accent underline"
+                  href="https://console.cloud.google.com/apis/credentials/consent"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  OAuth consent screen
+                </a>
+                , leave <span className="font-medium">Publishing status</span> as <strong>Testing</strong> for dev, and
+                add your Google account under <strong>Test users</strong>. Only those accounts can sign in until the app
+                passes Google&apos;s production verification (not required for a single mailbox you control).
+              </li>
+              <li>
+                Paste Client ID and Client Secret below and save into backend <span className="font-mono">.env</span>{" "}
+                {setupIntegration?.allow_env_write ? (
+                  <span className="text-muted-foreground">(allowed here in this environment).</span>
+                ) : (
+                  <span className="text-amber-800 dark:text-amber-200">
+                    — browser save is disabled; add them to <span className="font-mono">.env</span> manually and restart
+                    the API, then leave these fields empty and click Connect.
+                  </span>
+                )}
+              </li>
+              <li>
+                Click <span className="font-medium">Connect Gmail</span>, complete consent, then the API exchanges the
+                code, sends a test email to the same mailbox with subject{" "}
+                <span className="font-mono">Business outreach dashboard check</span>, reads it back, and stores a
+                refresh token in <span className="font-mono">.env</span> when saving is enabled.
+              </li>
+              <li>
+                Access tokens refresh automatically. If the refresh is revoked or expires and cannot be renewed, the red
+                indicator returns — open this dialog and connect again.
+              </li>
+            </ol>
+            <div className="mt-4 space-y-3">
+              <div>
+                <div className="mb-1 text-xs text-muted-foreground">OAuth Client ID</div>
+                <Input
+                  value={gmailForm.clientId}
+                  onChange={(e) => setGmailForm((f) => ({ ...f, clientId: e.target.value }))}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-sm"
+                  placeholder="xxxxx.apps.googleusercontent.com"
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs text-muted-foreground">OAuth Client secret</div>
+                <Input
+                  type="password"
+                  value={gmailForm.clientSecret}
+                  onChange={(e) => setGmailForm((f) => ({ ...f, clientSecret: e.target.value }))}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-sm"
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs text-muted-foreground">Optional: override redirect URI (else origin-based)</div>
+                <Input
+                  value={gmailForm.redirectUri}
+                  onChange={(e) => setGmailForm((f) => ({ ...f, redirectUri: e.target.value }))}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-sm"
+                  placeholder="https://your-host/api/oauth/google/callback"
+                />
+              </div>
+            </div>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setGmailSetupOpen(false)} disabled={gmailSetupBusy}>
+                Cancel
+              </Button>
+              <Button type="button" onClick={() => void connectGmailOAuth()} disabled={gmailSetupBusy}>
+                {gmailSetupBusy ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                    Redirecting…
+                  </>
+                ) : (
+                  <>
+                    <Mail className="mr-2 h-4 w-4" aria-hidden />
+                    Connect Gmail
+                  </>
+                )}
+              </Button>
+            </div>
+            <div className="mt-6 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-sm leading-relaxed">
+              <p className="font-medium text-foreground">What “ready to send” actually means</p>
+              <p className="mt-1 text-muted-foreground">
+                The dashboard turns green when this deployment&apos;s API loads all three values (non-empty) from the{" "}
+                <span className="font-mono text-[13px] text-foreground/90">.env</span> chain it lists above. Names must match
+                exactly:
+              </p>
+              <ul className="mt-2 space-y-1.5 font-mono text-[13px] text-foreground/95">
+                <li className="rounded-md bg-background/80 px-2 py-1.5">GOOGLE_CLIENT_ID</li>
+                <li className="rounded-md bg-background/80 px-2 py-1.5">GOOGLE_CLIENT_SECRET</li>
+                <li className="rounded-md bg-background/80 px-2 py-1.5">GOOGLE_REFRESH_TOKEN</li>
+              </ul>
+              <p className="mt-2 text-xs text-muted-foreground">
+                They belong in <span className="font-mono text-[12px] text-foreground/80">ai-biz-os/backend/.env</span> on the
+                host (or the paths your compose file / <span className="font-mono text-[12px]">AI_BIZ_OS_DOTENV</span> use).
+                Optional: <span className="font-mono text-[12px]">GOOGLE_REDIRECT_URI</span> if your public URL is not the
+                browser origin shown in step 2.
+              </p>
             </div>
           </div>
         </div>

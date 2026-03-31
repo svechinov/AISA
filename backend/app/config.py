@@ -36,6 +36,22 @@ class Settings(BaseSettings):
     # Allow POST /setup/bootstrap to write backend/.env (never enable in production)
     ALLOW_SETUP_ENV_WRITE: bool = False
 
+    # Gmail API (single mailbox for outreach + replies; optional GOOGLE_REDIRECT_URI overrides auto callback URL)
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = ""
+    GOOGLE_REFRESH_TOKEN: str = ""
+    # Optional "From" for Gmail API — must be listed under Gmail → Settings → Accounts → Send mail as.
+    # Empty = primary address of the OAuth mailbox.
+    GMAIL_SEND_AS_EMAIL: str = ""
+    # HMAC for OAuth state (fallback: derived from DATABASE_URL if empty — stable per DB URL)
+    OAUTH_STATE_SECRET: str = ""
+
+    # Outbound mail: when False, missing Gmail credentials raise instead of fake "mock" delivery (recommended).
+    EMAIL_ALLOW_MOCK: bool = False
+    # Optional override for Drafts «Send test copy». If empty, uses OAuth mailbox (users/me/profile).
+    GMAIL_PREVIEW_RECIPIENT_EMAIL: str = ""
+
     model_config = SettingsConfigDict(**_model_cfg)
 
 

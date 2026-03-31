@@ -71,6 +71,11 @@ class RunSignaturePatch(BaseModel):
     signature_html: str = ""
 
 
+class RunPromptSetupPatch(BaseModel):
+    """Labeled brief textarea (Offer/Target/Roles/…); stored under context_json.prompt_setup_text."""
+    prompt_setup_text: str = ""
+
+
 class RunCardRead(BaseModel):
     id: int
     project_id: int

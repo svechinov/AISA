@@ -17,6 +17,7 @@ from app.api.reply_drafts import router as reply_drafts_router
 from app.api.research_tasks import router as research_tasks_router
 from app.api.sending import router as sending_router
 from app.api.setup import router as setup_router
+from app.api.oauth_google import router as oauth_google_router
 from app.api.rules import router as rules_router
 from app.api.tracking import router as tracking_router
 from app.api.runs import router as runs_router
@@ -52,6 +53,7 @@ app.add_middleware(
 )
 
 app.include_router(setup_router)
+app.include_router(oauth_google_router)
 app.include_router(projects_router)
 app.include_router(assets_router)
 app.include_router(asset_packets_router)

@@ -108,6 +108,27 @@ def update_run_signature(db: Session, run_id: int, signature_html: str | None) -
     return run
 
 
+# Stored in run.context_json; not read by get_effective_context (LLM brief uses nested `context` only).
+_PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
+
+
+def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: str) -> Run | None:
+    """Persist labeled outreach prompt text for the human UI; empty string removes the override."""
+    run = get_run(db, run_id)
+    if not run:
+        return None
+    ctx = dict(run.context_json or {})
+    if (prompt_setup_text or "").strip() == "":
+        ctx.pop(_PROMPT_SETUP_JSON_KEY, None)
+    else:
+        ctx[_PROMPT_SETUP_JSON_KEY] = prompt_setup_text
+    run.context_json = ctx
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
 def update_run_status(db: Session, run: Run, status: str):
     run.status = status
 

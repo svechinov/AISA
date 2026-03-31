@@ -1,0 +1,11 @@
+# Optional overlay: mount host backend/.env into the container at /app/.env so OAuth/setup persist to your real file.
+#
+# Requires the project (or this file's path) in Docker Desktop → Settings → Resources → File sharing
+# (paths under /Library/WebServer often must be added explicitly on macOS).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.bind-env.yml up -d --build backend
+#
+services:
+  backend:
+    volumes:
+      - ../backend/.env:/app/.env

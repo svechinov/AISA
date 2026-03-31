@@ -1626,6 +1626,7 @@ export default function TrackingView({
                       body={rd.body}
                       showSignaturePlaceholder={showSignaturePlaceholder}
                       attachedAssetIds={normalizeAttachedAssetIds(rd.attached_asset_ids)}
+                      assetLibrary={assets}
                     />
                     {rd.error_message ? (
                       <div className="text-sm text-destructive">{rd.error_message}</div>

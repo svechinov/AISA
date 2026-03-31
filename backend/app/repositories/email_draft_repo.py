@@ -120,6 +120,33 @@ def delete_email_draft(db: Session, draft: EmailDraft) -> None:
     db.commit()
 
 
+def update_email_draft_outreach_regenerate(
+    db: Session,
+    draft: EmailDraft,
+    *,
+    subject: str,
+    body: str,
+    company: str | None,
+    to_email: str | None,
+) -> EmailDraft:
+    """Replace subject/body after Regenerate; same row id and review stays put so UI order/section stay stable."""
+    draft.subject = subject
+    draft.body = body
+    draft.company = company
+    draft.to_email = to_email
+    draft.status = "draft"
+    draft.tracking_status = "draft"
+    draft.error_message = None
+    draft.provider_message_id = None
+    draft.thread_id = None
+    draft.sent_at = None
+    draft.last_event_at = datetime.utcnow()
+    db.add(draft)
+    db.commit()
+    db.refresh(draft)
+    return draft
+
+
 def delete_email_drafts_by_run(db: Session, run_id: int) -> int:
     query = db.query(EmailDraft).filter(EmailDraft.run_id == run_id)
     count = query.count()

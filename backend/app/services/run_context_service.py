@@ -171,6 +171,18 @@ def build_master_prompt_text(ctx: dict[str, str]) -> str:
     ).strip()
 
 
+# UI storage key (see run_repo); omitted from get_effective_context / wrap_context LLM fields.
+_PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
+
+
+def get_prompt_setup_text(run) -> str:
+    """Labeled outreach brief from Review workspace Prompt setup; drives per-contact draft LLM when non-empty."""
+    raw = (run.context_json or {}).get(_PROMPT_SETUP_JSON_KEY)
+    if isinstance(raw, str):
+        return raw.strip()
+    return ""
+
+
 def build_pack_step_zero_input(run) -> dict:
     ctx = get_effective_context(run)
     mp = coalesce_str(getattr(run, "master_prompt", None))

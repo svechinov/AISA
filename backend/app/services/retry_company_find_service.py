@@ -11,6 +11,7 @@ from app.repositories.run_repo import get_run
 from app.repositories.step_repo import create_step, get_step_by_run_and_name, mark_step_completed
 from app.services.contact_persistence_service import persist_validated_contacts
 from app.services.orchestrator import _merge_contacts
+from app.services.run_companies_status_service import _contact_matches_company, _entity_keys
 from app.workers.contacts_worker import find_contacts, validate_contacts
 
 _RETRY_LOCK_GUARD = threading.Lock()
@@ -29,6 +30,102 @@ def _retry_serial_lock(run_id: int) -> threading.Lock:
 
 def _session_is_sqlite(db: Session) -> bool:
     return db.get_bind().dialect.name == "sqlite"
+
+
+def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
+    """
+    For runs where find_contacts is not completed, run find once for every collected company
+    that still has no matching contact in the find output. Then mark find (and validate) completed.
+
+    Collect may still be running (partial output via update_step_progress); we only require at least one
+    company dict in collect output. Matches Companies UI \"Not searched yet\" (find not completed).
+    """
+    run = get_run(db, run_id)
+    if not run:
+        raise ValueError("Run not found")
+    if run.closed_at is not None:
+        raise ValueError("Run is closed")
+
+    step_collect = get_step_by_run_and_name(db, run_id, "collect_companies")
+    step_find = get_step_by_run_and_name(db, run_id, "find_contacts")
+
+    if not step_collect:
+        raise ValueError("Collect companies step not found")
+    if step_collect.status == "failed":
+        raise ValueError("Collect companies step failed — fix the run and try again")
+
+    out_c = step_collect.output_json if isinstance(step_collect.output_json, dict) else {}
+    raw_companies = out_c.get("companies")
+    if not isinstance(raw_companies, list) or not any(isinstance(c, dict) for c in raw_companies):
+        raise ValueError(
+            "No companies in the collect step yet — wait until search has added at least one company",
+        )
+
+    find_completed = bool(step_find and step_find.status == "completed")
+    if find_completed:
+        raise ValueError("Find contacts step is already completed")
+
+    raw_contacts: list = []
+    if step_find and isinstance(step_find.output_json, dict):
+        rc = step_find.output_json.get("contacts")
+        if isinstance(rc, list):
+            raw_contacts = [x for x in rc if isinstance(x, dict)]
+
+    pending_companies: list[dict] = []
+    for co in raw_companies:
+        if not isinstance(co, dict):
+            continue
+        ckeys = _entity_keys(co)
+        has_contact = any(
+            isinstance(ct, dict) and _contact_matches_company(ct, ckeys) for ct in raw_contacts
+        )
+        if not has_contact:
+            pending_companies.append(co)
+
+    if not pending_companies:
+        if not step_find:
+            step_find = create_step(db, run_id, "find_contacts", {}, commit=True)
+        mark_step_completed(db, step_find, {"contacts": raw_contacts}, commit=True)
+        vin = {"contacts": raw_contacts}
+        last_validate = validate_contacts(db, run_id, run.workflow_name, vin)
+        st_v = get_step_by_run_and_name(db, run_id, "validate_contacts")
+        if not st_v:
+            st_v = create_step(db, run_id, "validate_contacts", vin, commit=True)
+        mark_step_completed(db, st_v, last_validate, commit=True)
+        persist_validated_contacts(db, run_id, last_validate, commit=True)
+        return {
+            "contacts_before": len(raw_contacts),
+            "contacts_after": len(raw_contacts),
+            "new_contacts_merged": 0,
+        }
+
+    if not step_find:
+        create_step(db, run_id, "find_contacts", {}, commit=True)
+
+    out_new = find_contacts(
+        db,
+        run_id,
+        run.workflow_name,
+        {"companies": pending_companies},
+    )
+    batch = out_new.get("contacts") if isinstance(out_new.get("contacts"), list) else []
+
+    if _session_is_sqlite(db):
+        with _retry_serial_lock(run_id):
+            return _merge_validate_persist_locked(
+                db,
+                run_id,
+                run.workflow_name,
+                batch,
+                use_row_lock=False,
+            )
+    return _merge_validate_persist_locked(
+        db,
+        run_id,
+        run.workflow_name,
+        batch,
+        use_row_lock=True,
+    )
 
 
 def retry_find_for_collected_company(db: Session, run_id: int, collect_index: int) -> dict:

@@ -2,25 +2,55 @@ import { useMemo } from "react";
 import DOMPurify from "dompurify";
 import { isProbablyHtmlEmailBody } from "@/lib/emailDraftBody";
 
-function trailingPreviewBlock({ showSignaturePlaceholder, attachedAssetIds }) {
-  const hasSig = Boolean(showSignaturePlaceholder);
+function primaryAssetHref(asset) {
+  if (!asset) return "";
+  const u = (asset.url || "").trim();
+  if (u) return u;
+  return (asset.download_url || "").trim();
+}
+
+function assetLabelsForPreview(attachedAssetIds, assetLibrary) {
   const ids = Array.isArray(attachedAssetIds) ? attachedAssetIds : [];
-  const hasAssets = ids.length > 0;
+  const lib = Array.isArray(assetLibrary) ? assetLibrary : [];
+  const byId = new Map(lib.filter((a) => a && a.id != null).map((a) => [a.id, a]));
+  return ids.map((id) => {
+    const a = byId.get(id);
+    const name = (a?.name || "").trim();
+    const href = primaryAssetHref(a);
+    return { id, label: name || `Asset #${id}`, href };
+  });
+}
+
+function trailingPreviewBlock({ showSignaturePlaceholder, attachedAssetIds, assetLibrary }) {
+  const hasSig = Boolean(showSignaturePlaceholder);
+  const assetItems = assetLabelsForPreview(attachedAssetIds, assetLibrary);
+  const hasAssets = assetItems.length > 0;
   if (!hasSig && !hasAssets) return null;
   return (
-    <div className="mt-2 w-full border-t border-dashed border-border/60 pt-2">
-      {hasSig ? (
-        <span className="block font-mono text-sm leading-6 text-muted-foreground">[Signature]</span>
-      ) : null}
+    <div className="mt-2 w-full space-y-0 text-sm leading-6 text-foreground">
       {hasAssets ? (
-        <div
-          className={`flex flex-wrap gap-x-3 gap-y-1 ${hasSig ? "mt-2" : ""}`}
-        >
-          {ids.map((id) => (
-            <span key={id} className="font-mono text-sm leading-6 text-muted-foreground">
-              [Asset #{id}]
-            </span>
-          ))}
+        <div className="space-y-2">
+          <div className="border-t border-border/60" />
+          <p className="m-0 font-semibold">Additional assets</p>
+          <ul className="m-0 mb-0 list-disc space-y-0.5 pl-5">
+            {assetItems.map(({ id, label, href }) => (
+              <li key={id}>
+                {href ? (
+                  <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary underline break-all">
+                    {label}
+                  </a>
+                ) : (
+                  label
+                )}
+              </li>
+            ))}
+          </ul>
+          {!hasSig ? <div className="border-t border-border/60 pb-0.5" /> : null}
+        </div>
+      ) : null}
+      {hasSig ? (
+        <div className={hasAssets ? "mt-3 border-t border-dashed border-border/60 pt-2" : "border-t border-dashed border-border/60 pt-2"}>
+          <span className="block font-mono text-muted-foreground">[Signature]</span>
         </div>
       ) : null}
     </div>
@@ -31,6 +61,7 @@ export function EmailDraftBodyPreview({
   body,
   showSignaturePlaceholder = false,
   attachedAssetIds = [],
+  assetLibrary = [],
 }) {
   const safeHtml = useMemo(() => {
     const s = body ?? "";
@@ -42,7 +73,11 @@ export function EmailDraftBodyPreview({
     });
   }, [body]);
 
-  const trailing = trailingPreviewBlock({ showSignaturePlaceholder, attachedAssetIds });
+  const trailing = trailingPreviewBlock({
+    showSignaturePlaceholder,
+    attachedAssetIds,
+    assetLibrary,
+  });
 
   if (safeHtml) {
     return (

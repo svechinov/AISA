@@ -6,7 +6,41 @@ import os
 import re
 from pathlib import Path
 
-from dotenv import load_dotenv
+
+def _load_dotenv_file(path: str | os.PathLike[str] | None = None, *, override: bool = False) -> bool:
+    """Load .env if python-dotenv is installed; otherwise no-op (return False)."""
+    try:
+        from dotenv import load_dotenv as _load
+    except ModuleNotFoundError:
+        return False
+    if path is None:
+        return bool(_load(override=override))
+    return bool(_load(str(path), override=override))
+
+
+def _load_env_file_manual(path: Path, *, override: bool) -> None:
+    """Minimal KEY=VAL .env parser when python-dotenv is not installed."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[7:].strip()
+        if "=" not in s:
+            continue
+        key, _, raw = s.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        val = raw.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if override or key not in os.environ:
+            os.environ[key] = val
 
 # Project tree (local): .../ai-biz-os/backend/app/services/env_bootstrap.py
 # BACKEND_ROOT = .../backend
@@ -90,6 +124,9 @@ def ordered_env_candidates() -> list[Path]:
         paths.append(rp)
     if ENV_FILE_PATH.is_file():
         paths.append(ENV_FILE_PATH.resolve())
+    elif ENV_FILE_PATH.exists() and not ENV_FILE_PATH.is_file():
+        # Docker occasionally ends up with a directory at /.env — skip, avoid read errors
+        pass
     return paths
 
 
@@ -104,7 +141,46 @@ def discover_env_files() -> list[Path]:
 
 def load_env_from_file() -> None:
     for p in ordered_env_candidates():
-        load_dotenv(p, override=True)
+        try:
+            if not _load_dotenv_file(p, override=True):
+                _load_env_file_manual(p, override=True)
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+
+
+def peek_env_key_from_files(key: str) -> str:
+    """
+    Last non-empty assignment for `key` across ordered_env_candidates() (same precedence as loading).
+    Used when os.environ is missing a value despite the file containing it (dotenv edge cases / partial reads).
+    """
+    want = (key or "").strip()
+    if not want:
+        return ""
+    last: str = ""
+    for path in ordered_env_candidates():
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("export "):
+                s = s[7:].strip()
+            if "=" not in s:
+                continue
+            k, _, raw = s.partition("=")
+            if k.strip() != want:
+                continue
+            val = raw.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            if val:
+                last = val
+    return last.strip()
 
 
 def llm_configured_from_environ() -> bool:
@@ -124,12 +200,31 @@ def cdn_configured_from_environ() -> bool:
     return bool(p and k and p in VALID_CDN)
 
 
-def bootstrap_env_write_allowed() -> bool:
+def env_write_blocked_reason() -> str:
+    """
+    Empty string -> API may write .env (same rules as bootstrap_env_write_allowed).
+    Non-empty -> human-readable reason (show in UI); OAuth persist uses this too.
+    """
     load_env_from_file()
     if os.environ.get("APP_ENV", "").strip().lower() == "production":
-        return False
-    val = os.environ.get("ALLOW_SETUP_ENV_WRITE", "").strip().lower()
-    return val in ("1", "true", "yes", "on")
+        return "APP_ENV=production disables writing secrets from the API (including GOOGLE_REFRESH_TOKEN)."
+    val = os.environ.get("ALLOW_SETUP_ENV_WRITE", "").strip()
+    lc = val.lower()
+    if lc in ("1", "true", "yes", "on"):
+        return ""
+    if not val:
+        return (
+            "ALLOW_SETUP_ENV_WRITE is not enabled in this API process. "
+            "Set ALLOW_SETUP_ENV_WRITE=true in the .env that this process loads (or in docker-compose `environment` / `env_file`) "
+            "and restart the server — editing a file on the host is not enough if the container never sees that variable."
+        )
+    return (
+        f"ALLOW_SETUP_ENV_WRITE={val!r} is not accepted; use true, 1, yes, or on (then restart the API)."
+    )
+
+
+def bootstrap_env_write_allowed() -> bool:
+    return env_write_blocked_reason() == ""
 
 
 def build_setup_hints(
@@ -207,15 +302,21 @@ def _escape_env_value(val: str) -> str:
     return val
 
 
-def upsert_env_file(updates: dict[str, str]) -> None:
+def upsert_env_file_at(path: Path, updates: dict[str, str]) -> None:
     """
-    Merge updates into backend/.env. Preserves unrelated keys and comment lines.
+    Merge updates into one .env file. Preserves unrelated keys and comment lines.
     Empty string in updates removes that key's line if it existed, or adds nothing.
     """
-    ENV_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = (
-        ENV_FILE_PATH.read_text(encoding="utf-8").splitlines() if ENV_FILE_PATH.is_file() else []
-    )
+    path = path.resolve()
+    if path.exists() and not path.is_file():
+        raise OSError(f"Not a file (is it a directory?): {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lines: list[str] = (
+            path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        )
+    except UnicodeDecodeError:
+        lines = []
 
     out: list[str] = []
     keys_seen_in_updates: set[str] = set()
@@ -244,5 +345,24 @@ def upsert_env_file(updates: dict[str, str]) -> None:
             if val:
                 out.append(f"{key}={_escape_env_value(val)}")
 
-    ENV_FILE_PATH.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+
+
+def upsert_env_file(updates: dict[str, str]) -> None:
+    """Merge updates into backend/.env (package root), then reload process env from all candidates."""
+    upsert_env_file_at(ENV_FILE_PATH, updates)
+    load_env_from_file()
+
+
+def upsert_env_files_everywhere(updates: dict[str, str]) -> None:
+    """
+    Merge updates into every dotenv file the app loads (candidates), plus backend/.env always.
+
+    Used for GOOGLE_REFRESH_TOKEN so the token is visible wherever the developer looks and
+    Docker/env_file paths that point at backend/.env still receive the value.
+    """
+    targets: set[Path] = {p.resolve() for p in ordered_env_candidates()}
+    targets.add(ENV_FILE_PATH.resolve())
+    for p in sorted(targets, key=lambda x: str(x)):
+        upsert_env_file_at(p, updates)
     load_env_from_file()
