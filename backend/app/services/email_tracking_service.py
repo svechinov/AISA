@@ -22,6 +22,21 @@ def register_replied_event(db: Session, draft_id: int, payload_json: dict | None
     if not draft:
         raise ValueError(f"Draft {draft_id} not found")
 
+    if draft.tracking_status == "replied":
+        return {
+            "draft_id": draft.id,
+            "event_id": None,
+            "status": "replied",
+            "skipped": True,
+        }
+    if draft.tracking_status in ("bounced", "dead_mailbox"):
+        return {
+            "draft_id": draft.id,
+            "event_id": None,
+            "status": draft.tracking_status,
+            "skipped": True,
+        }
+
     mark_email_draft_replied(db, draft)
 
     contact = get_contact(db, draft.contact_id)
@@ -42,6 +57,7 @@ def register_replied_event(db: Session, draft_id: int, payload_json: dict | None
         "draft_id": draft.id,
         "event_id": event.id,
         "status": "replied",
+        "skipped": False,
     }
 
 
@@ -54,6 +70,21 @@ def register_bounced_event(
     draft = get_email_draft(db, draft_id)
     if not draft:
         raise ValueError(f"Draft {draft_id} not found")
+
+    if draft.tracking_status in ("bounced", "dead_mailbox"):
+        return {
+            "draft_id": draft.id,
+            "event_id": None,
+            "status": draft.tracking_status,
+            "skipped": True,
+        }
+    if draft.tracking_status == "replied":
+        return {
+            "draft_id": draft.id,
+            "event_id": None,
+            "status": "replied",
+            "skipped": True,
+        }
 
     mark_email_draft_bounced(db, draft, error_message=error_message)
 
@@ -76,6 +107,7 @@ def register_bounced_event(
         "draft_id": draft.id,
         "event_id": event.id,
         "status": "bounced",
+        "skipped": False,
     }
 
 
@@ -88,6 +120,21 @@ def register_dead_mailbox_event(
     draft = get_email_draft(db, draft_id)
     if not draft:
         raise ValueError(f"Draft {draft_id} not found")
+
+    if draft.tracking_status in ("dead_mailbox", "bounced"):
+        return {
+            "draft_id": draft.id,
+            "event_id": None,
+            "status": draft.tracking_status,
+            "skipped": True,
+        }
+    if draft.tracking_status == "replied":
+        return {
+            "draft_id": draft.id,
+            "event_id": None,
+            "status": "replied",
+            "skipped": True,
+        }
 
     mark_email_draft_dead_mailbox(db, draft, error_message=error_message)
 
@@ -124,4 +171,5 @@ def register_dead_mailbox_event(
         "draft_id": draft.id,
         "event_id": event.id,
         "status": "dead_mailbox",
+        "skipped": False,
     }

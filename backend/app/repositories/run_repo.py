@@ -110,6 +110,35 @@ def update_run_signature(db: Session, run_id: int, signature_html: str | None) -
 
 # Stored in run.context_json; not read by get_effective_context (LLM brief uses nested `context` only).
 _PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
+_HUMAN_UI_JSON_KEY = "_human_ui"
+
+
+def update_run_human_ui_preferences(
+    db: Session,
+    run_id: int,
+    *,
+    event_chain_collapsed: dict[str, bool] | None = None,
+) -> Run | None:
+    """Persist dashboard UI flags (per-draft event chain collapse, etc.)."""
+    run = get_run(db, run_id)
+    if not run:
+        return None
+    ctx = dict(run.context_json or {})
+    ui = dict(ctx.get(_HUMAN_UI_JSON_KEY) or {})
+    if event_chain_collapsed is not None:
+        chain = dict(ui.get("event_chain_collapsed") or {})
+        for k, v in event_chain_collapsed.items():
+            sk = str(k).strip()
+            if not sk:
+                continue
+            chain[sk] = bool(v)
+        ui["event_chain_collapsed"] = chain
+    ctx[_HUMAN_UI_JSON_KEY] = ui
+    run.context_json = ctx
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: str) -> Run | None:

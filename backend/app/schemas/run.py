@@ -76,6 +76,13 @@ class RunPromptSetupPatch(BaseModel):
     prompt_setup_text: str = ""
 
 
+class RunHumanUiPatch(BaseModel):
+    """Human dashboard-only UI state; stored under context_json._human_ui (ignored by LLM brief)."""
+
+    #: Merges into `_human_ui.event_chain_collapsed` — draft id (string) → collapsed (true = events hidden).
+    event_chain_collapsed: dict[str, bool] | None = None
+
+
 class RunCardRead(BaseModel):
     id: int
     project_id: int

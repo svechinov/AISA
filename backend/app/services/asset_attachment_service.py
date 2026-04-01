@@ -5,9 +5,9 @@ from __future__ import annotations
 import mimetypes
 import os
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
+import httpx
 from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.asset import Asset
 from app.models.asset_packet import AssetPacket
 from app.repositories.asset_repo import get_asset
+from app.services.cdn_upload_service import r2_get_object_bytes, r2_upload_ready
 
 # Conservative default; real provider can override via env later.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("MAX_EMAIL_ATTACHMENT_BYTES", str(25 * 1024 * 1024)))
@@ -23,6 +24,24 @@ MAX_TOTAL_EMAIL_ATTACHMENTS_BYTES = int(
 )
 ASSET_STORAGE_ROOT = os.environ.get("ASSET_STORAGE_ROOT", "").strip()
 URL_FETCH_TIMEOUT_SEC = float(os.environ.get("ATTACHMENT_URL_FETCH_TIMEOUT", "30"))
+
+# Browser-like headers: some CDNs/R2 public buckets reject minimal urllib clients.
+ATTACHMENT_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+}
+
+
+def _is_r2_s3_api_host(url: str) -> bool:
+    """R2 S3 endpoint is not for anonymous HTTP GET; use GetObject with credentials."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host.endswith(".r2.cloudflarestorage.com")
 
 
 def _norm_key_part(v) -> str | None:
@@ -151,16 +170,30 @@ def _verify_readable(local_path: str) -> None:
 
 
 def _fetch_url_content_length(url: str) -> int | None:
-    """Best-effort Content-Length from GET open; raises on failure."""
-    req = Request(url, headers={"User-Agent": "ai-biz-os/attachment-probe"})
-    try:
-        with urlopen(req, timeout=URL_FETCH_TIMEOUT_SEC) as resp:  # noqa: S310 — explicit download_url only
-            length = resp.headers.get("Content-Length")
-            if length and str(length).isdigit():
-                return int(length)
-            return None
-    except (HTTPError, URLError, TimeoutError, ValueError) as e:
-        raise OSError(str(e)) from e
+    """
+    Best-effort Content-Length (HEAD, then streaming GET headers only).
+    Returns None if reachable but length unknown. Raises OSError if unreachable.
+    """
+    timeout = httpx.Timeout(URL_FETCH_TIMEOUT_SEC)
+    last_err: Exception | None = None
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        try:
+            h = client.head(url, headers=ATTACHMENT_HTTP_HEADERS)
+            if not h.is_error:
+                cl = h.headers.get("content-length")
+                if cl and str(cl).isdigit():
+                    return int(cl)
+        except httpx.HTTPError as e:
+            last_err = e
+        try:
+            with client.stream("GET", url, headers=ATTACHMENT_HTTP_HEADERS) as r:
+                r.raise_for_status()
+                cl = r.headers.get("content-length")
+                if cl and str(cl).isdigit():
+                    return int(cl)
+        except httpx.HTTPError as e:
+            raise OSError(str(e)) from (last_err or e)
+    return None
 
 
 def _merge_ref_for_link(asset: Asset | None, ref: dict) -> dict:
@@ -274,15 +307,34 @@ def resolve_sendable_attachments(
             fname = _resolve_display_filename(asset, ref, None)
             if not fname:
                 fname = os.path.basename(download_url.split("?")[0]) or f"asset-{asset.id}"
-            try:
-                cl = _fetch_url_content_length(download_url)
-                if cl is not None and cl > MAX_ATTACHMENT_BYTES:
-                    link_only.append(_merge_ref_for_link(asset, ref))
-                    _append_skip(skipped, asset.id, "download_url content exceeds max size")
-                    continue
-            except OSError as e:
+
+            sk = _norm_key_part(asset.storage_key)
+            skip_http_probe = bool(
+                sk and r2_upload_ready() and _is_r2_s3_api_host(download_url),
+            )
+
+            cl: int | None = None
+            if not skip_http_probe:
+                try:
+                    cl = _fetch_url_content_length(download_url)
+                except OSError as e:
+                    if asset.file_size_bytes is not None:
+                        cl = int(asset.file_size_bytes)
+                    elif sk and r2_upload_ready():
+                        cl = None
+                    else:
+                        link_only.append(_merge_ref_for_link(asset, ref))
+                        _append_skip(skipped, asset.id, f"download_url not reachable: {e}")
+                        continue
+            else:
+                cl = int(asset.file_size_bytes) if asset.file_size_bytes is not None else None
+
+            eff_size = cl
+            if eff_size is None and asset.file_size_bytes is not None:
+                eff_size = int(asset.file_size_bytes)
+            if eff_size is not None and eff_size > MAX_ATTACHMENT_BYTES:
                 link_only.append(_merge_ref_for_link(asset, ref))
-                _append_skip(skipped, asset.id, f"download_url not reachable: {e}")
+                _append_skip(skipped, asset.id, "download_url content exceeds max size")
                 continue
 
             mime = _guess_mime(fname, asset)
@@ -296,8 +348,8 @@ def resolve_sendable_attachments(
                     "source_path": None,
                     "source_url": download_url,
                     "file_path": None,
-                    "storage_key": None,
-                    "file_size_bytes": int(cl) if cl is not None else None,
+                    "storage_key": sk,
+                    "file_size_bytes": eff_size,
                 },
             )
             continue
@@ -320,20 +372,48 @@ def materialize_attachment(meta: dict) -> tuple[bytes, str, str]:
             raise ValueError("attachment exceeds max size")
         return data, filename, mime
 
-    url = meta.get("download_url")
+    url = ((meta.get("download_url") or "") or "").strip() or None
+    sk = _norm_key_part(meta.get("storage_key"))
+
+    if sk and r2_upload_ready() and url and _is_r2_s3_api_host(url):
+        data = r2_get_object_bytes(sk, max_bytes=MAX_ATTACHMENT_BYTES)
+        return data, filename, mime
+
+    if sk and r2_upload_ready() and not url:
+        data = r2_get_object_bytes(sk, max_bytes=MAX_ATTACHMENT_BYTES)
+        return data, filename, mime
+
     if not url:
         raise ValueError("no attachment source")
 
-    req = Request(url, headers={"User-Agent": "ai-biz-os/attachment-fetch"})
-    with urlopen(req, timeout=URL_FETCH_TIMEOUT_SEC) as resp:  # noqa: S310
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            block = resp.read(65536)
-            if not block:
-                break
-            total += len(block)
-            if total > MAX_ATTACHMENT_BYTES:
-                raise ValueError("download exceeds max attachment size")
-            chunks.append(block)
+    timeout = httpx.Timeout(URL_FETCH_TIMEOUT_SEC)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            with client.stream("GET", url, headers=ATTACHMENT_HTTP_HEADERS) as r:
+                r.raise_for_status()
+                for block in r.iter_bytes(65536):
+                    total += len(block)
+                    if total > MAX_ATTACHMENT_BYTES:
+                        raise ValueError("download exceeds max attachment size")
+                    chunks.append(block)
+    except httpx.HTTPStatusError as e:
+        if (
+            sk
+            and r2_upload_ready()
+            and e.response is not None
+            and e.response.status_code in (400, 401, 403, 404)
+        ):
+            data = r2_get_object_bytes(sk, max_bytes=MAX_ATTACHMENT_BYTES)
+            return data, filename, mime
+        raise OSError(f"attachment download failed: {e}") from e
+    except httpx.HTTPError as e:
+        if sk and r2_upload_ready():
+            try:
+                data = r2_get_object_bytes(sk, max_bytes=MAX_ATTACHMENT_BYTES)
+                return data, filename, mime
+            except OSError:
+                pass
+        raise OSError(f"attachment download failed: {e}") from e
     return b"".join(chunks), filename, mime

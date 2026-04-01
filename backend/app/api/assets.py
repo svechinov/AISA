@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.repositories.asset_repo import create_asset, list_assets
 from app.schemas.asset import AssetCreate, AssetRead
+from app.services.cdn_upload_service import upload_bytes_to_project_cdn, upload_max_bytes
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -11,6 +12,47 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 @router.get("", response_model=list[AssetRead])
 def list_assets_route(db: Session = Depends(get_db)):
     return list_assets(db, status=None)
+
+
+@router.post("/upload", response_model=AssetRead)
+def upload_asset_route(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    asset_type: str = Form("other"),
+    db: Session = Depends(get_db),
+):
+    raw_name = (name or "").strip()
+    if not raw_name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    max_b = upload_max_bytes()
+    data = file.file.read(max_b + 1)
+    if len(data) > max_b:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {max_b // (1024 * 1024)} MB).",
+        )
+    orig = (file.filename or "upload").strip() or "upload"
+    ct = (file.content_type or "").strip() or None
+    try:
+        meta = upload_bytes_to_project_cdn(data, original_filename=orig, content_type=ct)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    return create_asset(
+        db=db,
+        asset_type=(asset_type or "other").strip() or "other",
+        name=raw_name,
+        description=None,
+        url=meta["url"],
+        file_path=None,
+        download_url=meta["url"],
+        storage_key=meta.get("storage_key"),
+        filename=meta.get("filename"),
+        mime_type=meta.get("mime_type"),
+        file_size_bytes=meta.get("file_size_bytes"),
+        status="active",
+        metadata_json=meta.get("metadata_json") or {},
+    )
 
 
 @router.post("", response_model=AssetRead)

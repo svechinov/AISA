@@ -129,13 +129,16 @@ def update_email_draft_outreach_regenerate(
     company: str | None,
     to_email: str | None,
 ) -> EmailDraft:
-    """Replace subject/body after Regenerate; same row id and review stays put so UI order/section stay stable."""
+    """Replace subject/body after Regenerate; same row id. Review resets to pending so the user can Approve again."""
     draft.subject = subject
     draft.body = body
     draft.company = company
     draft.to_email = to_email
     draft.status = "draft"
     draft.tracking_status = "draft"
+    draft.review_status = "pending"
+    draft.review_notes = None
+    draft.reviewed_at = None
     draft.error_message = None
     draft.provider_message_id = None
     draft.thread_id = None
@@ -168,6 +171,26 @@ def update_email_draft_review(
     db.commit()
     db.refresh(draft)
     return draft
+
+
+def bulk_set_attached_assets_for_pending_drafts(
+    db: Session,
+    run_id: int,
+    attached_asset_ids: list[int],
+) -> int:
+    """Copy normalized asset ids onto every draft in the run still in pending review. Returns count updated."""
+    normalized = normalize_attached_asset_ids(attached_asset_ids)
+    drafts = (
+        db.query(EmailDraft)
+        .filter(EmailDraft.run_id == run_id, EmailDraft.review_status == "pending")
+        .all()
+    )
+    for d in drafts:
+        d.attached_asset_ids = list(normalized)
+        db.add(d)
+    if drafts:
+        db.commit()
+    return len(drafts)
 
 
 def update_email_draft_fields(
@@ -254,7 +277,8 @@ def mark_email_draft_bounced(
 ) -> EmailDraft:
     draft.tracking_status = "bounced"
     draft.last_event_at = datetime.utcnow()
-    draft.error_message = error_message
+    # Delivery diagnostics live on email_events; avoid surfacing DSN/HTML in human draft review.
+    draft.error_message = None
     db.add(draft)
     db.commit()
     db.refresh(draft)
@@ -268,7 +292,7 @@ def mark_email_draft_dead_mailbox(
 ) -> EmailDraft:
     draft.tracking_status = "dead_mailbox"
     draft.last_event_at = datetime.utcnow()
-    draft.error_message = error_message
+    draft.error_message = None
     db.add(draft)
     db.commit()
     db.refresh(draft)

@@ -13,6 +13,18 @@ def get_email_message_by_provider_id(db: Session, provider_message_id: str) -> E
     )
 
 
+def get_email_message_by_rfc_message_id(db: Session, rfc_message_id: str) -> EmailMessage | None:
+    rid = (rfc_message_id or "").strip()
+    if not rid:
+        return None
+    return (
+        db.query(EmailMessage)
+        .filter(EmailMessage.rfc_message_id == rid)
+        .order_by(EmailMessage.id.desc())
+        .first()
+    )
+
+
 def create_email_message(
     db: Session,
     thread_id: int,
@@ -25,6 +37,7 @@ def create_email_message(
     subject: str,
     body: str,
     provider_message_id: str | None = None,
+    rfc_message_id: str | None = None,
 ) -> EmailMessage:
     message = EmailMessage(
         thread_id=thread_id,
@@ -37,7 +50,17 @@ def create_email_message(
         subject=subject,
         body=body,
         provider_message_id=provider_message_id,
+        rfc_message_id=(rfc_message_id.strip() if rfc_message_id else None),
     )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def update_email_message_rfc_message_id(db: Session, message: EmailMessage, rfc_message_id: str | None) -> EmailMessage:
+    rid = (rfc_message_id or "").strip() or None
+    message.rfc_message_id = rid
     db.add(message)
     db.commit()
     db.refresh(message)

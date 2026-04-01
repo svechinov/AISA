@@ -126,6 +126,9 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
 
     sendable, link_only, skipped = resolve_sendable_attachments_for_asset_ids(db, merged)
     sendable = finalize_sendable_attachments(db, sendable, link_only, skipped)
+    mime_exclude = frozenset(
+        int(m["asset_id"]) for m in sendable if m.get("asset_id") is not None
+    )
     packet_block = render_assets_block_for_email(link_only)
     combined = _combine_body(base_body, packet_block)
     cr = str(combined or "").strip()
@@ -136,6 +139,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
         db,
         reply_draft.attached_asset_ids,
         trailing_rule_if_no_signature_below=not has_sig,
+        exclude_asset_ids=mime_exclude,
     )
     final_body = append_signature_html_after(base, sig_html)
 
@@ -242,6 +246,7 @@ def send_one_reply_draft(db: Session, draft_id: int) -> dict:
             subject=draft.subject,
             body=final_body,
             provider_message_id=result.get("provider_message_id"),
+            rfc_message_id=result.get("rfc_message_id"),
         )
     except Exception:
         logger.exception(

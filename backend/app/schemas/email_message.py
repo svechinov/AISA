@@ -15,6 +15,7 @@ class EmailMessageRead(BaseModel):
     subject: str
     body: str
     provider_message_id: str | None
+    rfc_message_id: str | None = None
     created_at: datetime
 
     class Config:

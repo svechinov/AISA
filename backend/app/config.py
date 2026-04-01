@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     # CDN / object storage integration (provider-specific credentials may need extra vars; see .env.example)
     CDN_PROVIDER: str = ""
     CDN_API_KEY: str = ""
+    # Cloudflare R2 (S3-compatible) — file uploads from Human UI «Add file»
+    CDN_ACCOUNT_ID: str = ""
+    CDN_R2_BUCKET: str = ""
+    CDN_R2_ACCESS_KEY_ID: str = ""
+    CDN_R2_SECRET_ACCESS_KEY: str = ""
+    # Public URL prefix for R2 objects (custom domain or *.r2.dev), no trailing slash
+    CDN_R2_PUBLIC_BASE_URL: str = ""
+    CDN_UPLOAD_MAX_BYTES_MB: int = 50
 
     # Allow POST /setup/bootstrap to write backend/.env (never enable in production)
     ALLOW_SETUP_ENV_WRITE: bool = False
@@ -51,6 +59,8 @@ class Settings(BaseSettings):
     EMAIL_ALLOW_MOCK: bool = False
     # Optional override for Drafts «Send test copy». If empty, uses OAuth mailbox (users/me/profile).
     GMAIL_PREVIEW_RECIPIENT_EMAIL: str = ""
+    # Background Gmail sync: poll threads + bounces (seconds). 0 = disabled (use POST /gmail-sync/*).
+    GMAIL_SYNC_INTERVAL_SECONDS: int = 120
 
     model_config = SettingsConfigDict(**_model_cfg)
 

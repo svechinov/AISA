@@ -30,6 +30,7 @@ from app.services.gmail_oauth import (
     gmail_list_message_refs_paginated,
     gmail_profile_email,
     list_send_as_emails,
+    normalize_rfc_message_id_header,
     refresh_access_token,
 )
 from app.services.outbound_email_body import html_to_plain_text_for_mime, looks_like_html_fragment
@@ -163,6 +164,7 @@ class _ParsedGmailMessage:
     to_email: str
     body: str
     from_addresses: frozenset[str]
+    rfc_message_id: str | None
 
 
 def _parse_gmail_full(json_msg: dict[str, object]) -> _ParsedGmailMessage | None:
@@ -188,6 +190,7 @@ def _parse_gmail_full(json_msg: dict[str, object]) -> _ParsedGmailMessage | None
     to_email = _first_address(to_hdr)
     body = _normalize_imported_message_body(_raw_body_from_payload(payload if isinstance(payload, dict) else None))
     from_set = frozenset(_addresses_from_header(from_hdr))
+    rfc_mid = normalize_rfc_message_id_header(hmap.get("message-id"))
     return _ParsedGmailMessage(
         provider_message_id=mid,
         provider_thread_id=tid,
@@ -197,6 +200,7 @@ def _parse_gmail_full(json_msg: dict[str, object]) -> _ParsedGmailMessage | None
         to_email=to_email,
         body=body,
         from_addresses=from_set,
+        rfc_message_id=rfc_mid,
     )
 
 
@@ -310,6 +314,7 @@ def import_inbox_and_sent_six_months(
             subject=row.subject,
             body=row.body,
             provider_message_id=row.provider_message_id,
+            rfc_message_id=row.rfc_message_id,
         )
         imported += 1
 

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { FileAssetBadge } from "@/components/FileAssetBadge";
 import { Layers, Paperclip, X } from "lucide-react";
 
 /** Normalize API JSON list to unique ints (order preserved). */
@@ -143,6 +144,7 @@ export function DraftAssetAttachmentsField({
                           {a.asset_type}
                         </Badge>
                       ) : null}
+                      <FileAssetBadge asset={a} className="ml-2 align-middle" />
                     </span>
                   </label>
                 </li>
@@ -187,6 +189,7 @@ export function DraftAssetAttachmentsField({
               title={byId.get(id)?.name || undefined}
             >
               [Asset #{id}]
+              <FileAssetBadge asset={byId.get(id)} className="font-sans align-middle" />
               <button
                 type="button"
                 className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"

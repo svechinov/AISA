@@ -8,6 +8,7 @@ from app.repositories.run_repo import (
     create_run,
     get_run,
     list_runs_by_project,
+    update_run_human_ui_preferences,
     update_run_prompt_setup_text,
     update_run_signature,
 )
@@ -22,6 +23,7 @@ from app.schemas.run import (
     RetryCompanyFindResult,
     RunCardRead,
     RunCompaniesRead,
+    RunHumanUiPatch,
     RunPromptSetupPatch,
     RunRead,
     RunSignaturePatch,
@@ -241,6 +243,18 @@ def patch_run_signature_route(run_id: int, payload: RunSignaturePatch, db: Sessi
 @router.patch("/{run_id}/prompt-setup", response_model=RunRead)
 def patch_run_prompt_setup_route(run_id: int, payload: RunPromptSetupPatch, db: Session = Depends(get_db)):
     run = update_run_prompt_setup_text(db, run_id, payload.prompt_setup_text)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@router.patch("/{run_id}/human-ui", response_model=RunRead)
+def patch_run_human_ui_route(run_id: int, payload: RunHumanUiPatch, db: Session = Depends(get_db)):
+    run = update_run_human_ui_preferences(
+        db,
+        run_id,
+        event_chain_collapsed=payload.event_chain_collapsed,
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run

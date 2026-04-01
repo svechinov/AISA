@@ -490,6 +490,52 @@ def gmail_get_message_full(access_token: str, message_id: str) -> dict[str, Any]
         raise GmailOAuthError("Gmail message response was not JSON") from e
 
 
+def gmail_get_thread_full(access_token: str, thread_id: str) -> dict[str, Any]:
+    """Full thread resource including all messages (format=full)."""
+    tid = (thread_id or "").strip()
+    if not tid:
+        raise GmailOAuthError("thread id is empty")
+    with httpx.Client(timeout=120.0) as client:
+        r = client.get(
+            f"{GMAIL_API}/users/me/threads/{tid}",
+            params={"format": "full"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    _raise_unless_gmail_http_ok(r, fallback="gmail get thread failed")
+    try:
+        return r.json()
+    except json.JSONDecodeError as e:
+        raise GmailOAuthError("Gmail thread response was not JSON") from e
+
+
+def normalize_rfc_message_id_header(raw: str | None) -> str | None:
+    """Strip angle brackets and whitespace for comparisons."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.startswith("<") and s.endswith(">") and len(s) > 2:
+        s = s[1:-1].strip()
+    return s if s else None
+
+
+def gmail_message_rfc_id_from_full_json(json_msg: dict[str, Any]) -> str | None:
+    """Read Message-ID from a messages.get JSON (format=full)."""
+    payload = json_msg.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    headers_raw = payload.get("headers")
+    if not isinstance(headers_raw, list):
+        return None
+    for h in headers_raw:
+        if not isinstance(h, dict):
+            continue
+        if str(h.get("name") or "").strip().lower() == "message-id":
+            return normalize_rfc_message_id_header(str(h.get("value") or ""))
+    return None
+
+
 def verify_gmail_roundtrip_with_code(code: str, redirect_uri: str) -> None:
     """Exchange code, send test mail to self, confirm it appears in mailbox; persist refresh on success."""
     tokens = exchange_code_for_tokens(code, redirect_uri)
@@ -570,6 +616,13 @@ def send_mime_gmail(
     _raise_unless_gmail_http_ok(r, fallback="gmail send failed")
     data = r.json()
     mid = data.get("id")
+    rfc_mid: str | None = None
+    if mid:
+        try:
+            full = gmail_get_message_full(access, str(mid))
+            rfc_mid = gmail_message_rfc_id_from_full_json(full)
+        except (GmailOAuthError, httpx.HTTPError, TypeError, ValueError):
+            rfc_mid = None
     return {
         "provider_message_id": mid,
         "thread_id": data.get("threadId") or mid,
@@ -578,6 +631,7 @@ def send_mime_gmail(
         "from_email": from_addr,
         "to_email": to_email,
         "subject": subj,
+        "rfc_message_id": rfc_mid,
     }
 
 
@@ -592,6 +646,13 @@ def send_html_via_gmail(*, to_email: str, subject: str, body_html: str) -> dict[
         body_html=body_html,
     )
     mid = data.get("id")
+    rfc_mid: str | None = None
+    if mid:
+        try:
+            full = gmail_get_message_full(access, str(mid))
+            rfc_mid = gmail_message_rfc_id_from_full_json(full)
+        except (GmailOAuthError, httpx.HTTPError, TypeError, ValueError):
+            rfc_mid = None
     return {
         "provider_message_id": mid,
         "thread_id": data.get("threadId") or mid,
@@ -600,4 +661,5 @@ def send_html_via_gmail(*, to_email: str, subject: str, body_html: str) -> dict[
         "from_email": from_addr,
         "to_email": to_email,
         "subject": _sanitize_rfc_subject(subject),
+        "rfc_message_id": rfc_mid,
     }

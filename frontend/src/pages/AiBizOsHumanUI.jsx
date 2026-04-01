@@ -25,6 +25,7 @@ import {
   normalizeAttachedAssetIds,
 } from "@/components/DraftAssetAttachmentsField";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { cn } from "@/lib/utils";
 import {
   Archive,
   ArchiveRestore,
@@ -79,6 +80,58 @@ const DEFAULT_OUTREACH_BRIEF =
 
 /** Stored in `email_drafts.review_notes` when reviewer uses the clock (defer send). */
 const OUTBOUND_REVIEW_SEND_LATER = "send_later";
+
+/** Company-level green “Pending”: draft sent and still waiting or in active reply — not bounce/dead only. */
+const COMPANY_OUTREACH_PENDING_TRACKING = new Set(["sent", "replied"]);
+
+function _normCompanyToken(s) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function _stripWebsiteKey(url) {
+  let u = _normCompanyToken(url);
+  u = u.replace(/^https?:\/\//, "").replace(/^www\./, "");
+  return u.replace(/\/+$/, "");
+}
+
+/** Intersecting keys for Companies row ↔ run contact (same idea as backend run_companies_status_service). */
+function entityKeysForCompanyRowOrContact(obj) {
+  const keys = new Set();
+  const name = _normCompanyToken("name" in obj ? obj.name : obj.company);
+  if (name) keys.add(name);
+  const web = String(obj.website || "").trim();
+  if (web) {
+    const stripped = _stripWebsiteKey(web);
+    if (stripped) keys.add(stripped);
+    keys.add(_normCompanyToken(web));
+  }
+  return [...keys].filter(Boolean);
+}
+
+function contactMatchesCompaniesTableRow(contact, row) {
+  const a = new Set(entityKeysForCompanyRowOrContact({ name: row.name, website: row.website }));
+  const b = new Set(entityKeysForCompanyRowOrContact({ company: contact.company, website: contact.website }));
+  if (!a.size || !b.size) return false;
+  for (const k of a) {
+    if (b.has(k)) return true;
+  }
+  return false;
+}
+
+/** Companies “Contacts found” → show Not available when every matched contact is bounced or dead mailbox. */
+function companyHasOnlyBouncedOrDeadContacts(contacts, row) {
+  const matched = (contacts || []).filter((c) => contactMatchesCompaniesTableRow(c, row));
+  if (!matched.length) return false;
+  return matched.every((c) => c.email_health === "bounced" || c.email_health === "dead_mailbox");
+}
+
+/** After send, outbound leaves Review → Drafts (track in Events / Threads). */
+function isOutboundDraftClosedForReview(d) {
+  return Boolean(d && String(d.status) === "sent");
+}
 
 /**
  * API returns runs newest-first (id desc). Surface non-closed runs first for default
@@ -484,6 +537,20 @@ function filterShadowNoEmailContacts(contactsList) {
   });
 }
 
+/** Review contacts tab bucket. Order: delivery health → usable email → review_status. */
+function contactReviewTabBucket(c) {
+  const em = String(c?.email ?? "").trim().toLowerCase();
+  const hasUsableEmail = em.includes("@");
+  if (c.email_health === "dead_mailbox") return "dead_mailbox";
+  if (c.email_health === "bounced") return "bounced";
+  if (!hasUsableEmail) return "no_email";
+  const rs = c.review_status;
+  if (rs === "pending") return "pending";
+  if (rs === "rejected") return "rejected";
+  if (rs === "approved" || rs === "edited") return "approved";
+  return "no_email";
+}
+
 function NewProjectFooter({ projectName, onCreated }) {
   const { setOpen } = useDialog();
   return (
@@ -535,18 +602,6 @@ function mainNavToTrackingTab(nav) {
   return map[nav] || "events";
 }
 
-const DRAFT_FILTER_OPTS = [
-  { value: "all", label: "All drafts" },
-  { value: "pending", label: "Pending review" },
-  { value: "approved", label: "Approved" },
-  { value: "edited", label: "Edited" },
-  { value: "rejected", label: "Rejected" },
-  { value: "draft", label: "Draft status" },
-  { value: "sending", label: "Sending" },
-  { value: "sent", label: "Sent" },
-  { value: "failed", label: "Failed" },
-];
-
 export default function AiBizOsHumanUI() {
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
@@ -558,7 +613,8 @@ export default function AiBizOsHumanUI() {
   const [error, setError] = useState("");
   const [projectName, setProjectName] = useState("New campaign");
   const [search, setSearch] = useState("");
-  const [draftFilter, setDraftFilter] = useState("all");
+  const [draftShowApproved, setDraftShowApproved] = useState(true);
+  const [draftShowPendingReview, setDraftShowPendingReview] = useState(true);
   const [projectView, setProjectView] = useState("active");
   const [mainNav, setMainNav] = useState("runs");
   const [runsList, setRunsList] = useState([]);
@@ -580,7 +636,13 @@ export default function AiBizOsHumanUI() {
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   /** Keys: draft id string — outbound draft body regeneration in progress. */
   const [regeneratingOutboundDraftIds, setRegeneratingOutboundDraftIds] = useState(() => ({}));
+  /** Keys: draft id string — POST /sending/drafts/:id/send in flight (Review → Drafts). */
+  const [sendingOutboundDraftIds, setSendingOutboundDraftIds] = useState(() => ({}));
+  /** POST /sending/runs/:id/send in flight (Send all approved). */
+  const [sendAllApprovedBusy, setSendAllApprovedBusy] = useState(false);
   const [editDraft, setEditDraft] = useState(null);
+  const [editDraftSaving, setEditDraftSaving] = useState(false);
+  const [applyAssetsToAllPendingDrafts, setApplyAssetsToAllPendingDrafts] = useState(false);
   const [assetsLibrary, setAssetsLibrary] = useState([]);
   const [runAssetPackets, setRunAssetPackets] = useState([]);
   const [draftForm, setDraftForm] = useState({
@@ -603,9 +665,8 @@ export default function AiBizOsHumanUI() {
   const [companyRetryLoading, setCompanyRetryLoading] = useState(() => ({}));
   const [companyRetryAllLoading, setCompanyRetryAllLoading] = useState(false);
   const [companiesPage, setCompaniesPage] = useState(1);
-  const [contactsPendingPage, setContactsPendingPage] = useState(1);
-  const [contactsApprovedPage, setContactsApprovedPage] = useState(1);
-  const [contactsRejectedPage, setContactsRejectedPage] = useState(1);
+  const [contactReviewTab, setContactReviewTab] = useState("pending");
+  const [contactsReviewPage, setContactsReviewPage] = useState(1);
   const [continueCompanyFindLoading, setContinueCompanyFindLoading] = useState(false);
   /**
    * After retry: still no matching contact and LLM added no new rows → red "Not available", no Retry.
@@ -921,6 +982,10 @@ export default function AiBizOsHumanUI() {
 
   useEffect(() => {
     if (mainNav === "drafts") void loadSetupIntegration();
+  }, [mainNav, loadSetupIntegration]);
+
+  useEffect(() => {
+    if (mainNav === "assets") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
 
   useEffect(() => {
@@ -1356,6 +1421,8 @@ export default function AiBizOsHumanUI() {
       openGmailSetup();
       return;
     }
+    const idKey = String(draftId);
+    setSendingOutboundDraftIds((p) => ({ ...p, [idKey]: true }));
     try {
       setError("");
       await api(`/sending/drafts/${draftId}/send`, { method: "POST" });
@@ -1363,6 +1430,12 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
+    } finally {
+      setSendingOutboundDraftIds((p) => {
+        const next = { ...p };
+        delete next[idKey];
+        return next;
+      });
     }
   };
 
@@ -1372,6 +1445,7 @@ export default function AiBizOsHumanUI() {
       openGmailSetup();
       return;
     }
+    setSendAllApprovedBusy(true);
     try {
       setError("");
       await api(`/sending/runs/${selectedRun.id}/send`, { method: "POST" });
@@ -1379,6 +1453,8 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
+    } finally {
+      setSendAllApprovedBusy(false);
     }
   };
 
@@ -1545,6 +1621,7 @@ export default function AiBizOsHumanUI() {
   };
 
   const openEditDraft = (d) => {
+    setApplyAssetsToAllPendingDrafts(false);
     setEditDraft(d);
     setDraftForm({
       subject: d.subject ?? "",
@@ -1566,7 +1643,8 @@ export default function AiBizOsHumanUI() {
   };
 
   const saveEditDraft = async () => {
-    if (!editDraft || !selectedRun) return;
+    if (!editDraft || !selectedRun || editDraftSaving) return;
+    setEditDraftSaving(true);
     try {
       setError("");
       await api(`/email-drafts/${editDraft.id}/edit`, {
@@ -1575,12 +1653,15 @@ export default function AiBizOsHumanUI() {
           subject: draftForm.subject,
           body: draftForm.body,
           attached_asset_ids: draftForm.attached_asset_ids,
+          apply_assets_to_pending_drafts: applyAssetsToAllPendingDrafts,
         },
       });
       setEditDraft(null);
       await loadRunDetails(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
+    } finally {
+      setEditDraftSaving(false);
     }
   };
 
@@ -1634,28 +1715,39 @@ export default function AiBizOsHumanUI() {
     });
   }, [contactsVisible, search]);
 
+  const draftsVisibleInReview = useMemo(
+    () => (Array.isArray(drafts) ? drafts.filter((d) => !isOutboundDraftClosedForReview(d)) : []),
+    [drafts],
+  );
+
   const filteredDrafts = useMemo(() => {
-    return drafts.filter((d) => {
+    return draftsVisibleInReview.filter((d) => {
       const q = search.trim().toLowerCase();
       const matchesSearch =
         !q || [d.company, d.to_email, d.subject, d.body].some((v) => (v || "").toLowerCase().includes(q));
-      const matchesFilter =
-        draftFilter === "all" || d.review_status === draftFilter || d.status === draftFilter;
-      return matchesSearch && matchesFilter;
+      const isApprovedBucket = ["approved", "edited"].includes(d.review_status);
+      const isPendingBucket = d.review_status === "pending" || d.review_status === "rejected";
+      const matchesBucket =
+        (draftShowApproved && isApprovedBucket) || (draftShowPendingReview && isPendingBucket);
+      return matchesSearch && matchesBucket;
     });
-  }, [drafts, search, draftFilter]);
+  }, [draftsVisibleInReview, search, draftShowApproved, draftShowPendingReview]);
 
   const contactHasBadEmailHealth = (c) =>
     c.email_health === "dead_mailbox" || c.email_health === "bounced";
 
   const contactHasEmail = (c) => Boolean((c?.email || "").trim());
 
-  /** Stable key to group review cards by company (no backend merge). */
-  const contactCompanyGroupKey = (c) => {
-    const co = (c.company || "")
+  /** Normalized company name only — for “touched” badge across split website-based groups. */
+  const contactCompanyNameOnlyKey = (c) =>
+    (c.company || "")
       .trim()
       .toLowerCase()
       .replace(/\s+/g, " ");
+
+  /** Stable key to group review cards by company (no backend merge). */
+  const contactCompanyGroupKey = (c) => {
+    const co = contactCompanyNameOnlyKey(c);
     let w = (c.website || "").trim().toLowerCase();
     w = w.replace(/^https?:\/\//, "").replace(/^www\./, "");
     w = w.replace(/\/+$/, "");
@@ -1663,18 +1755,18 @@ export default function AiBizOsHumanUI() {
     return `${co}\x1f${w}`;
   };
 
-  /** Preserve list order; each value is one or more contacts sharing the same company key. */
-  const groupContactsByCompany = (list) => {
+  /** Same company header only when review_status matches (per-tab list is already same delivery bucket). */
+  const groupContactsByCompanyAndReviewStatus = (list) => {
     const keyToContacts = new Map();
     for (const c of list) {
-      const k = contactCompanyGroupKey(c);
+      const k = `${contactCompanyGroupKey(c)}\x1f${c.review_status}`;
       if (!keyToContacts.has(k)) keyToContacts.set(k, []);
       keyToContacts.get(k).push(c);
     }
     const seen = new Set();
     const groups = [];
     for (const c of list) {
-      const k = contactCompanyGroupKey(c);
+      const k = `${contactCompanyGroupKey(c)}\x1f${c.review_status}`;
       if (seen.has(k)) continue;
       seen.add(k);
       groups.push(keyToContacts.get(k));
@@ -1709,24 +1801,30 @@ export default function AiBizOsHumanUI() {
       !contactHasBadEmailHealth(c) &&
       contactHasEmail(c),
   ).length;
-  const approvedDrafts = drafts.filter((d) => ["approved", "edited"].includes(d.review_status)).length;
+  const approvedDrafts = draftsVisibleInReview.filter((d) =>
+    ["approved", "edited"].includes(d.review_status),
+  ).length;
   const pendingContacts = contactsVisible.filter((c) => c.review_status === "pending").length;
 
-  const pending = contactsMatchingSearch.filter((c) => c.review_status === "pending");
-  const approvedList = useMemo(() => {
-    const raw = contactsMatchingSearch.filter((c) => ["approved", "edited"].includes(c.review_status));
-    const deliveryOrder = (c) => {
-      if (c.email_health === "dead_mailbox") return 2;
-      if (c.email_health === "bounced") return 1;
-      return 0;
+  const contactsByReviewTab = useMemo(() => {
+    const buckets = {
+      pending: [],
+      approved: [],
+      rejected: [],
+      bounced: [],
+      dead_mailbox: [],
+      no_email: [],
     };
-    return [...raw].sort((a, b) => deliveryOrder(a) - deliveryOrder(b) || a.id - b.id);
+    for (const c of contactsMatchingSearch) {
+      buckets[contactReviewTabBucket(c)].push(c);
+    }
+    return buckets;
   }, [contactsMatchingSearch]);
-  const rejectedList = contactsMatchingSearch.filter((c) => c.review_status === "rejected");
 
-  const pendingGroups = useMemo(() => groupContactsByCompany(pending), [pending]);
-  const approvedGroups = useMemo(() => groupContactsByCompany(approvedList), [approvedList]);
-  const rejectedGroups = useMemo(() => groupContactsByCompany(rejectedList), [rejectedList]);
+  const contactReviewTabGroups = useMemo(() => {
+    const list = contactsByReviewTab[contactReviewTab];
+    return groupContactsByCompanyAndReviewStatus(list);
+  }, [contactsByReviewTab, contactReviewTab]);
 
   const companiesListForPage = companiesPanel?.companies;
   const companiesPageCount = Math.max(
@@ -1739,47 +1837,32 @@ export default function AiBizOsHumanUI() {
     return list.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
   }, [companiesListForPage, companiesPage]);
 
-  const contactsPendingPageCount = Math.max(1, Math.ceil(pendingGroups.length / WORKSPACE_TABLE_PAGE_SIZE));
-  const contactsApprovedPageCount = Math.max(1, Math.ceil(approvedGroups.length / WORKSPACE_TABLE_PAGE_SIZE));
-  const contactsRejectedPageCount = Math.max(1, Math.ceil(rejectedGroups.length / WORKSPACE_TABLE_PAGE_SIZE));
+  const contactsReviewPageCount = Math.max(
+    1,
+    Math.ceil(contactReviewTabGroups.length / WORKSPACE_TABLE_PAGE_SIZE),
+  );
 
-  const pendingGroupsPage = useMemo(() => {
-    const start = (contactsPendingPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
-    return pendingGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
-  }, [pendingGroups, contactsPendingPage]);
-
-  const approvedGroupsPage = useMemo(() => {
-    const start = (contactsApprovedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
-    return approvedGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
-  }, [approvedGroups, contactsApprovedPage]);
-
-  const rejectedGroupsPage = useMemo(() => {
-    const start = (contactsRejectedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
-    return rejectedGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
-  }, [rejectedGroups, contactsRejectedPage]);
+  const contactReviewGroupsPage = useMemo(() => {
+    const start = (contactsReviewPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
+    return contactReviewTabGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
+  }, [contactReviewTabGroups, contactsReviewPage]);
 
   useEffect(() => {
     setCompaniesPage((p) => Math.min(Math.max(1, p), companiesPageCount));
   }, [companiesPageCount, companiesListForPage]);
 
   useEffect(() => {
-    setContactsPendingPage((p) => Math.min(Math.max(1, p), contactsPendingPageCount));
-  }, [contactsPendingPageCount, pendingGroups]);
-
-  useEffect(() => {
-    setContactsApprovedPage((p) => Math.min(Math.max(1, p), contactsApprovedPageCount));
-  }, [contactsApprovedPageCount, approvedGroups]);
-
-  useEffect(() => {
-    setContactsRejectedPage((p) => Math.min(Math.max(1, p), contactsRejectedPageCount));
-  }, [contactsRejectedPageCount, rejectedGroups]);
+    setContactsReviewPage((p) => Math.min(Math.max(1, p), contactsReviewPageCount));
+  }, [contactsReviewPageCount, contactReviewTabGroups]);
 
   useEffect(() => {
     setCompaniesPage(1);
-    setContactsPendingPage(1);
-    setContactsApprovedPage(1);
-    setContactsRejectedPage(1);
+    setContactsReviewPage(1);
   }, [selectedRun?.id, search]);
+
+  useEffect(() => {
+    setContactsReviewPage(1);
+  }, [contactReviewTab]);
 
   const draftsPending = filteredDrafts.filter((d) => d.review_status === "pending");
   const draftsApprovedList = filteredDrafts.filter((d) =>
@@ -1788,13 +1871,8 @@ export default function AiBizOsHumanUI() {
   const draftsRejectedList = filteredDrafts.filter((d) => d.review_status === "rejected");
 
   /** Hide empty review buckets when a narrow filter is active (e.g. Approved → no "Pending (0)"). */
-  const showDraftsPendingSection =
-    draftFilter === "all" || draftFilter === "pending" || draftsPending.length > 0;
-  const showDraftsApprovedSection =
-    draftFilter === "all" ||
-    draftFilter === "approved" ||
-    draftFilter === "edited" ||
-    draftsApprovedList.length > 0;
+  const showDraftsPendingSection = draftShowPendingReview && draftsPending.length > 0;
+  const showDraftsApprovedSection = draftShowApproved && draftsApprovedList.length > 0;
 
   const canContinue = approvedContactsReachable > 0;
 
@@ -1819,28 +1897,35 @@ export default function AiBizOsHumanUI() {
     return runSignatureHasMeaningfulContent(html);
   }, [selectedRun?.id, selectedRun?.sender_signature_html, workspace?.sender_signature_html]);
 
+  /** Shown in Review workspace (Contacts) above “N contacts left to review”, not in Run setup. */
+  const approveContactsContinueCta = useMemo(() => {
+    if (!selectedRun?.id) return null;
+    if (workspace?.display_phase !== "Preparing") return null;
+    if (selectedRun.status === "needs_review") {
+      return {
+        label: "Approve contacts to continue",
+        disabled: approvedContactsReachable === 0,
+        hint:
+          approvedContactsReachable === 0
+            ? "Approve or edit at least one reachable contact first (bounced / dead mailbox do not count)."
+            : null,
+        onClick: () => void continueRun(),
+      };
+    }
+    return {
+      label: "Approve contacts to continue",
+      disabled: true,
+      hint: "Run setup is in progress.",
+      onClick: null,
+    };
+  }, [selectedRun?.id, selectedRun?.status, workspace?.display_phase, approvedContactsReachable, continueRun]);
+
   const primaryCta = useMemo(() => {
     if (!selectedRun?.id) return null;
     const phase = workspace?.display_phase;
     if (phase === "Closed") return null;
     if (phase === "Preparing") {
-      if (selectedRun.status === "needs_review") {
-        return {
-          label: "Approve contacts to continue",
-          disabled: approvedContactsReachable === 0,
-          hint:
-            approvedContactsReachable === 0
-              ? "Approve or edit at least one reachable contact first (bounced / dead mailbox do not count)."
-              : null,
-          onClick: () => void continueRun(),
-        };
-      }
-      return {
-        label: "Approve contacts to continue",
-        disabled: true,
-        hint: "Run setup is in progress.",
-        onClick: null,
-      };
+      return null;
     }
     if (phase === "Ready") {
       return {
@@ -1868,13 +1953,7 @@ export default function AiBizOsHumanUI() {
       };
     }
     return null;
-  }, [
-    selectedRun,
-    workspace?.display_phase,
-    approvedContactsReachable,
-    outreachBatchProgress,
-    openNewRunDialog,
-  ]);
+  }, [selectedRun, workspace?.display_phase, outreachBatchProgress, openNewRunDialog]);
 
   const contactCardClass = (c) => {
     if (contactHasBadEmailHealth(c)) {
@@ -2125,22 +2204,65 @@ export default function AiBizOsHumanUI() {
     );
   };
 
+  /**
+   * True if any contact at this company (same normalized name, any website / card group)
+   * has outbound sent with tracking sent/replied — not bounce / dead mailbox / failed only.
+   */
+  const companyGroupHasActiveOutreachPending = (group) => {
+    const idsInCard = new Set(group.map((c) => c.id));
+    const nameKeys = new Set(
+      group.map((c) => contactCompanyNameOnlyKey(c)).filter((k) => k.length > 0),
+    );
+    let scopeIds = idsInCard;
+    if (nameKeys.size > 0) {
+      const byName = new Set();
+      for (const c of contacts) {
+        const nk = contactCompanyNameOnlyKey(c);
+        if (nk && nameKeys.has(nk)) byName.add(c.id);
+      }
+      scopeIds = byName;
+    }
+    return drafts.some(
+      (d) =>
+        d.contact_id != null &&
+        scopeIds.has(d.contact_id) &&
+        String(d.status) === "sent" &&
+        COMPANY_OUTREACH_PENDING_TRACKING.has(String(d.tracking_status || "")),
+    );
+  };
+
   const renderContactGroupCard = (group) => {
     const multi = group.length > 1;
     const cardClass = multi ? pickGroupContactCardClass(group) : contactCardClass(group[0]);
     const cardKey = multi ? `grp-${group.map((c) => c.id).join("-")}` : group[0].id;
+    const touched = companyGroupHasActiveOutreachPending(group);
     return (
       <Card key={cardKey} className={cardClass}>
         <CardContent className="p-5">
-          {multi ? (
-            <div className="mb-4 border-b border-border pb-3">
-              <div className="text-lg font-semibold">{group[0].company || "Unnamed company"}</div>
+          <div className="mb-4 border-b border-border pb-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-lg font-semibold">{group[0].company || "Unnamed company"}</span>
+              {touched ? (
+                <Badge
+                  variant="default"
+                  className="bg-green-600 font-normal text-white hover:bg-green-600 dark:bg-green-700 dark:text-white dark:hover:bg-green-700"
+                >
+                  Pending
+                </Badge>
+              ) : (
+                <Badge
+                  variant="outline"
+                  className="border-border bg-muted/40 font-normal text-muted-foreground"
+                >
+                  No touch
+                </Badge>
+              )}
             </div>
-          ) : null}
+          </div>
           {group.map((contact, idx) => (
             <div key={contact.id}>
               {idx > 0 ? <Separator className="my-4 bg-border/90" decorative /> : null}
-              {renderContactBlock(contact, { grouped: multi })}
+              {renderContactBlock(contact, { grouped: true })}
             </div>
           ))}
         </CardContent>
@@ -2157,6 +2279,7 @@ export default function AiBizOsHumanUI() {
       draft.review_notes === OUTBOUND_REVIEW_SEND_LATER &&
       ["approved", "edited"].includes(draft.review_status);
     const isRegeneratingOutbound = Boolean(regeneratingOutboundDraftIds[String(draft.id)]);
+    const isSendingOutbound = Boolean(sendingOutboundDraftIds[String(draft.id)]);
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
@@ -2272,8 +2395,16 @@ export default function AiBizOsHumanUI() {
                     </Button>
                   ) : null}
                   {canSendDraft(draft) ? (
-                    <Button size="sm" className="gap-1.5" onClick={() => void sendDraft(draft.id)}>
-                      {!gmailSendReady ? (
+                    <Button
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={isSendingOutbound}
+                      aria-busy={isSendingOutbound}
+                      onClick={() => void sendDraft(draft.id)}
+                    >
+                      {isSendingOutbound ? (
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                      ) : !gmailSendReady ? (
                         <CircleX
                           className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-500"
                           aria-hidden
@@ -2294,7 +2425,8 @@ export default function AiBizOsHumanUI() {
               </div>
             </div>
           </div>
-          {draft.error_message ? (
+          {draft.error_message &&
+          !["bounced", "dead_mailbox", "replied"].includes(String(draft.tracking_status || "")) ? (
             <div className="rounded-xl border-2 border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               {draft.error_message}
             </div>
@@ -2638,6 +2770,10 @@ export default function AiBizOsHumanUI() {
                         <span className="font-medium">{workspace.performance?.need_more_info ?? 0}</span>
                       </li>
                       <li>
+                        Dead mailboxes:{" "}
+                        <span className="font-medium">{workspace.performance?.dead_mailboxes ?? 0}</span>
+                      </li>
+                      <li>
                         Reminders (active):{" "}
                         <span className="font-medium">{workspace.performance?.reminders_active ?? 0}</span>
                       </li>
@@ -2846,10 +2982,14 @@ export default function AiBizOsHumanUI() {
                     <div className="space-y-4">
                       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                         <span className="inline-flex items-center gap-1.5">
-                          <Badge variant="default" className="font-normal">
+                          <Badge variant="default" className="shrink-0 whitespace-nowrap font-normal">
                             Contacts found
                           </Badge>
-                          <span>At least one matching person has a usable email in find-contacts output.</span>
+                          <span>
+                            At least one matching person has a usable email in find-contacts output. If{" "}
+                            <strong>all</strong> contacts for that company become bounced or dead mailbox, the row shows{" "}
+                            <strong>Not available</strong> instead.
+                          </span>
                         </span>
                         <span className="inline-flex items-center gap-1.5">
                           <Badge variant="secondary" className="font-normal">
@@ -2886,9 +3026,15 @@ export default function AiBizOsHumanUI() {
                             {companiesPageSlice.map((row) => {
                               const st = row.contact_status;
                               const unavailable = !!companyFindUnavailable[row.collect_index];
+                              const onlyBouncedOrDead =
+                                st === "found" && companyHasOnlyBouncedOrDeadContacts(contacts, row);
                               const badge =
-                                st === "found" ? (
-                                  <Badge variant="default" className="font-normal">
+                                onlyBouncedOrDead ? (
+                                  <Badge variant="destructive" className="font-normal">
+                                    Not available
+                                  </Badge>
+                                ) : st === "found" ? (
+                                  <Badge variant="default" className="shrink-0 whitespace-nowrap font-normal">
                                     Contacts found
                                   </Badge>
                                 ) : st === "no_email" ? (
@@ -3013,29 +3159,37 @@ export default function AiBizOsHumanUI() {
               <CardHeader>
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
-                    <CardTitle>Review workspace</CardTitle>
-                    <CardDescription>Switch between Contacts and Drafts using the bar above.</CardDescription>
+                    <CardTitle>
+                      {mainNav === "drafts" ? "Review email drafts" : "Review contacts"}
+                    </CardTitle>
+                    <CardDescription>
+                      {mainNav === "drafts"
+                        ? "A list of generated email drafts. To send a message, you must first approve it. You can send all approved messages at once."
+                        : "List of found contacts. To create a draft email, the contact must be approved."}
+                    </CardDescription>
                   </div>
                   <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center md:max-w-none md:justify-end">
                     <div className="flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5"
-                        title="Send the first sendable approved draft to yourself (To = From: GMAIL_SEND_AS_EMAIL when set, else primary Gmail). Does not update drafts or the database."
-                        onClick={() => void testSendFirstApproved()}
-                        disabled={!selectedRun || approvedDrafts === 0 || testSendBusy}
-                      >
-                        {testSendBusy ? (
-                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-                        ) : !gmailSendReady ? (
-                          <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
-                        ) : (
-                          <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
-                        )}
-                        Test
-                      </Button>
+                      {mainNav === "drafts" ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          title="Send the first sendable approved draft to yourself (To = From: GMAIL_SEND_AS_EMAIL when set, else primary Gmail). Does not update drafts or the database."
+                          onClick={() => void testSendFirstApproved()}
+                          disabled={!selectedRun || approvedDrafts === 0 || testSendBusy}
+                        >
+                          {testSendBusy ? (
+                            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                          ) : !gmailSendReady ? (
+                            <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
+                          ) : (
+                            <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
+                          )}
+                          Test
+                        </Button>
+                      ) : null}
                       <Button
                         type="button"
                         variant="outline"
@@ -3091,65 +3245,35 @@ export default function AiBizOsHumanUI() {
               <CardContent>
                 {mainNav === "contacts" ? (
                   <div className="space-y-6">
-                    <div className="text-sm text-muted-foreground">
-                      {pendingContacts} contacts left to review
-                    </div>
-
-                    {pendingContacts > 0 ? (
-                      <div className="space-y-3">
-                        <div className="text-sm font-medium">
-                          Pending ({pending.length})
-                        </div>
-                        <div className="grid gap-3">
-                          {pendingGroupsPage.map((g) => renderContactGroupCard(g))}
-                        </div>
-                        {pendingGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
-                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
-                            <span>
-                              {(contactsPendingPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
-                              {Math.min(
-                                contactsPendingPage * WORKSPACE_TABLE_PAGE_SIZE,
-                                pendingGroups.length,
-                              )}{" "}
-                              of {pendingGroups.length}
-                            </span>
-                            <div className="flex flex-wrap gap-2">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                disabled={contactsPendingPage <= 1}
-                                onClick={() => setContactsPendingPage((p) => Math.max(1, p - 1))}
-                              >
-                                Previous
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                disabled={contactsPendingPage >= contactsPendingPageCount}
-                                onClick={() =>
-                                  setContactsPendingPage((p) =>
-                                    Math.min(contactsPendingPageCount, p + 1),
-                                  )
-                                }
-                              >
-                                Next
-                              </Button>
-                            </div>
-                          </div>
-                        ) : pendingGroups.length > 0 ? (
-                          <p className="text-xs text-muted-foreground">
-                            {pendingGroups.length} group{pendingGroups.length === 1 ? "" : "s"} total.
-                          </p>
-                        ) : null}
-                        {pending.length === 0 ? (
-                          <div className="text-sm text-muted-foreground">
-                            No pending contacts match your search — clear search or check Approved / Rejected.
-                          </div>
+                    {approveContactsContinueCta ? (
+                      <div className="flex max-w-xl flex-col gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="w-fit whitespace-normal sm:whitespace-nowrap"
+                          disabled={
+                            approveContactsContinueCta.disabled || !approveContactsContinueCta.onClick
+                          }
+                          onClick={() => approveContactsContinueCta.onClick?.()}
+                        >
+                          {approveContactsContinueCta.label}
+                        </Button>
+                        {approveContactsContinueCta.hint ? (
+                          <span className="text-xs text-muted-foreground">
+                            {approveContactsContinueCta.hint}
+                          </span>
                         ) : null}
                       </div>
                     ) : null}
+                    <div className="text-sm text-muted-foreground">
+                      {pendingContacts} contacts left to review
+                      {approvedContactsReachable > 0 ? (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          · {approvedContactsReachable} approved (reachable)
+                        </span>
+                      ) : null}
+                    </div>
 
                     {pendingContacts === 0 && contactsVisible.length > 0 ? (
                       <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-10 text-center">
@@ -3182,79 +3306,148 @@ export default function AiBizOsHumanUI() {
                       </div>
                     ) : null}
 
-                    <div className="space-y-3">
-                      <div className="text-sm font-medium">Approved ({approvedContactsReachable})</div>
-                      <div className="grid gap-3">
-                        {approvedGroupsPage.map((g) => renderContactGroupCard(g))}
-                      </div>
-                      {approvedGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
-                          <span>
-                            {(contactsApprovedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
-                            {Math.min(
-                              contactsApprovedPage * WORKSPACE_TABLE_PAGE_SIZE,
-                              approvedGroups.length,
-                            )}{" "}
-                            of {approvedGroups.length}
-                          </span>
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={contactsApprovedPage <= 1}
-                              onClick={() => setContactsApprovedPage((p) => Math.max(1, p - 1))}
-                            >
-                              Previous
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={contactsApprovedPage >= contactsApprovedPageCount}
-                              onClick={() =>
-                                setContactsApprovedPage((p) =>
-                                  Math.min(contactsApprovedPageCount, p + 1),
-                                )
-                              }
-                            >
-                              Next
-                            </Button>
-                          </div>
+                    {contactsVisible.length > 0 ? (
+                      <div className="space-y-3">
+                        <div
+                          className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+                          role="tablist"
+                          aria-label="Contact review category"
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "pending"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "pending"
+                                ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
+                                : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("pending")}
+                          >
+                            Pending ({contactsByReviewTab.pending.length})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "approved"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "approved"
+                                ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
+                                : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("approved")}
+                          >
+                            Approved ({contactsByReviewTab.approved.length})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "rejected"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "rejected"
+                                ? "border-neutral-500 bg-neutral-600 text-white hover:bg-neutral-600 dark:border-neutral-400 dark:bg-neutral-600 dark:hover:bg-neutral-600"
+                                : "border-neutral-600/50 bg-neutral-600/15 text-neutral-900 hover:bg-neutral-600/25 dark:border-neutral-500/45 dark:bg-neutral-900/35 dark:text-neutral-100 dark:hover:bg-neutral-900/50",
+                            )}
+                            onClick={() => setContactReviewTab("rejected")}
+                          >
+                            Rejected ({contactsByReviewTab.rejected.length})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "bounced"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "bounced"
+                                ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
+                                : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("bounced")}
+                          >
+                            Bounced ({contactsByReviewTab.bounced.length})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "dead_mailbox"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "dead_mailbox"
+                                ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
+                                : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
+                            )}
+                            onClick={() => setContactReviewTab("dead_mailbox")}
+                          >
+                            Dead mailbox ({contactsByReviewTab.dead_mailbox.length})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "no_email"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "no_email"
+                                ? "border-zinc-500 bg-zinc-600 text-white hover:bg-zinc-600 dark:border-zinc-400 dark:bg-zinc-600 dark:hover:bg-zinc-600"
+                                : "border-zinc-600/50 bg-zinc-600/15 text-zinc-900 hover:bg-zinc-600/25 dark:border-zinc-500/45 dark:bg-zinc-950/40 dark:text-zinc-100 dark:hover:bg-zinc-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("no_email")}
+                          >
+                            No email ({contactsByReviewTab.no_email.length})
+                          </Button>
                         </div>
-                      ) : approvedGroups.length > 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          {approvedGroups.length} group{approvedGroups.length === 1 ? "" : "s"} total.
-                        </p>
-                      ) : null}
-                    </div>
 
-                    {rejectedList.length > 0 ? (
-                      <details className="group rounded-2xl border-2 border-border">
-                        <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
-                          <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
-                          Rejected ({rejectedList.length})
-                        </summary>
-                        <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
-                          {rejectedGroupsPage.map((g) => renderContactGroupCard(g))}
-                        </div>
-                        {rejectedGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
-                          <div className="flex flex-col gap-2 border-t border-border px-4 pb-4 pt-3 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
+                        {contactReviewTabGroups.length === 0 ? (
+                          <div className="text-sm text-muted-foreground">
+                            {contactReviewTab === "pending"
+                              ? "No pending contacts here — try another tab or clear search."
+                              : contactReviewTab === "approved"
+                                ? "No approved contacts in this filter — try Pending or delivery tabs."
+                                : contactReviewTab === "rejected"
+                                  ? "No rejected contacts here."
+                                  : contactReviewTab === "bounced"
+                                    ? "No bounced contacts — check other tabs or search."
+                                    : contactReviewTab === "dead_mailbox"
+                                      ? "No dead mailbox contacts."
+                                      : "No contacts without a usable email address here."}
+                          </div>
+                        ) : (
+                          <div className="grid gap-3">
+                            {contactReviewGroupsPage.map((g) => renderContactGroupCard(g))}
+                          </div>
+                        )}
+
+                        {contactReviewTabGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
                             <span>
-                              {(contactsRejectedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
+                              {(contactsReviewPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
                               {Math.min(
-                                contactsRejectedPage * WORKSPACE_TABLE_PAGE_SIZE,
-                                rejectedGroups.length,
+                                contactsReviewPage * WORKSPACE_TABLE_PAGE_SIZE,
+                                contactReviewTabGroups.length,
                               )}{" "}
-                              of {rejectedGroups.length}
+                              of {contactReviewTabGroups.length}
                             </span>
                             <div className="flex flex-wrap gap-2">
                               <Button
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                disabled={contactsRejectedPage <= 1}
-                                onClick={() => setContactsRejectedPage((p) => Math.max(1, p - 1))}
+                                disabled={contactsReviewPage <= 1}
+                                onClick={() => setContactsReviewPage((p) => Math.max(1, p - 1))}
                               >
                                 Previous
                               </Button>
@@ -3262,23 +3455,22 @@ export default function AiBizOsHumanUI() {
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                disabled={contactsRejectedPage >= contactsRejectedPageCount}
+                                disabled={contactsReviewPage >= contactsReviewPageCount}
                                 onClick={() =>
-                                  setContactsRejectedPage((p) =>
-                                    Math.min(contactsRejectedPageCount, p + 1),
-                                  )
+                                  setContactsReviewPage((p) => Math.min(contactsReviewPageCount, p + 1))
                                 }
                               >
                                 Next
                               </Button>
                             </div>
                           </div>
-                        ) : rejectedGroups.length > 0 ? (
-                          <p className="px-4 pb-4 text-xs text-muted-foreground">
-                            {rejectedGroups.length} group{rejectedGroups.length === 1 ? "" : "s"} total.
+                        ) : contactReviewTabGroups.length > 0 ? (
+                          <p className="text-xs text-muted-foreground">
+                            {contactReviewTabGroups.length} group
+                            {contactReviewTabGroups.length === 1 ? "" : "s"} total.
                           </p>
                         ) : null}
-                      </details>
+                      </div>
                     ) : null}
 
                     {contactsVisible.length === 0 ? (
@@ -3295,9 +3487,12 @@ export default function AiBizOsHumanUI() {
                           type="button"
                           className="gap-1.5"
                           onClick={() => void sendAllApproved()}
-                          disabled={!selectedRun || approvedDrafts === 0}
+                          disabled={!selectedRun || approvedDrafts === 0 || sendAllApprovedBusy}
+                          aria-busy={sendAllApprovedBusy}
                         >
-                          {!gmailSendReady ? (
+                          {sendAllApprovedBusy ? (
+                            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                          ) : !gmailSendReady ? (
                             <CircleX
                               className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
                               aria-hidden
@@ -3306,12 +3501,30 @@ export default function AiBizOsHumanUI() {
                           Send all approved
                         </Button>
                       </div>
-                      <NativeFilterSelect
-                        className="w-full sm:w-[220px]"
-                        value={draftFilter}
-                        onValueChange={setDraftFilter}
-                        options={DRAFT_FILTER_OPTS}
-                      />
+                      <div
+                        className="flex flex-wrap items-center gap-x-5 gap-y-2"
+                        role="group"
+                        aria-label="Show drafts by review status"
+                      >
+                        <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
+                            checked={draftShowApproved}
+                            onChange={(e) => setDraftShowApproved(e.target.checked)}
+                          />
+                          Approved
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
+                            checked={draftShowPendingReview}
+                            onChange={(e) => setDraftShowPendingReview(e.target.checked)}
+                          />
+                          Pending review
+                        </label>
+                      </div>
                     </div>
                     {drafts.length > 0 ? (
                       <>
@@ -3329,7 +3542,7 @@ export default function AiBizOsHumanUI() {
                           </div>
                         ) : null}
 
-                        {draftsRejectedList.length > 0 ? (
+                        {draftShowPendingReview && draftsRejectedList.length > 0 ? (
                           <details className="group rounded-2xl border-2 border-border">
                             <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
                               <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
@@ -3346,7 +3559,11 @@ export default function AiBizOsHumanUI() {
                     )}
 
                     {drafts.length > 0 && filteredDrafts.length === 0 ? (
-                      <div className="text-sm text-muted-foreground">No drafts match the current filter.</div>
+                      <div className="text-sm text-muted-foreground">
+                        {!draftShowApproved && !draftShowPendingReview
+                          ? "Turn on at least one option: Approved or Pending review."
+                          : "No drafts match the current search or selected options."}
+                      </div>
                     ) : null}
                   </div>
                 )}
@@ -3548,9 +3765,11 @@ export default function AiBizOsHumanUI() {
               <TrackingView
                 runId={selectedRun.id}
                 runSignatureHtml={selectedRun.sender_signature_html ?? ""}
+                contextJson={selectedRun.context_json ?? {}}
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
                 onRunWorkspaceRefresh={() => void loadRunDetails(selectedRun.id)}
+                cdnR2UploadReady={setupIntegration?.cdn_r2_upload_ready === true}
               />
             ) : null}
 
@@ -3718,7 +3937,10 @@ export default function AiBizOsHumanUI() {
             type="button"
             className="fixed inset-0 bg-black/50"
             aria-label="Close"
-            onClick={() => setEditDraft(null)}
+            disabled={editDraftSaving}
+            onClick={() => {
+              if (!editDraftSaving) setEditDraft(null);
+            }}
           />
           <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Edit email draft</h2>
@@ -3742,11 +3964,38 @@ export default function AiBizOsHumanUI() {
                 }
               />
             </div>
-            <div className="mt-6 flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setEditDraft(null)}>
-                Cancel
-              </Button>
-              <Button onClick={saveEditDraft}>Save</Button>
+            <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <label className="flex max-w-[min(100%,20rem)] cursor-pointer items-start gap-2.5 text-sm leading-snug text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
+                  checked={applyAssetsToAllPendingDrafts}
+                  disabled={editDraftSaving}
+                  onChange={(e) => setApplyAssetsToAllPendingDrafts(e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium text-foreground">Apply assets to all drafts</span>
+                  <span className="mt-0.5 block text-xs">
+                    Pending review only — same attachments as here after Save.
+                  </span>
+                </span>
+              </label>
+              <div className="flex shrink-0 justify-end gap-2">
+                <Button variant="outline" disabled={editDraftSaving} onClick={() => setEditDraft(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={editDraftSaving}
+                  aria-busy={editDraftSaving}
+                  onClick={() => void saveEditDraft()}
+                >
+                  {editDraftSaving ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  ) : null}
+                  Save
+                </Button>
+              </div>
             </div>
           </div>
         </div>

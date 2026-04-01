@@ -18,6 +18,11 @@ from app.repositories.email_thread_repo import (
     get_email_thread_by_draft_id,
     touch_email_thread,
 )
+from app.services.asset_attachment_service import (
+    finalize_sendable_attachments,
+    materialize_attachment,
+    resolve_sendable_attachments_for_asset_ids,
+)
 from app.services.email_provider import send_email_via_provider
 from app.services.gmail_oauth import (
     GmailOAuthError,
@@ -30,8 +35,29 @@ from app.services.outbound_email_body import (
     append_signature_html_after,
     normalize_draft_body_for_email_html,
 )
+from app.utils.attached_asset_ids import normalize_attached_asset_ids
 
 _log = logging.getLogger(__name__)
+
+
+def _outreach_mime_attachments_and_exclude_ids(
+    db: Session,
+    raw_asset_ids: object,
+) -> tuple[list[dict], frozenset[int]]:
+    """CDN/local sendable assets as MIME payloads; their ids should not repeat as link-only rows."""
+    ids = normalize_attached_asset_ids(raw_asset_ids)
+    if not ids:
+        return [], frozenset()
+    sendable, link_only, skipped = resolve_sendable_attachments_for_asset_ids(db, ids)
+    sendable = finalize_sendable_attachments(db, sendable, link_only, skipped)
+    exclude = frozenset(
+        int(m["asset_id"]) for m in sendable if m.get("asset_id") is not None
+    )
+    payloads: list[dict] = []
+    for meta in sendable:
+        data, fn, mt = materialize_attachment(meta)
+        payloads.append({"filename": fn, "content": data, "mime_type": mt})
+    return payloads, exclude
 
 
 def send_one_draft(db: Session, draft_id: int) -> dict:
@@ -56,30 +82,37 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
     base = normalize_draft_body_for_email_html(draft.body) if base_raw else ""
     sig_html = getattr(run, "sender_signature_html", None) if run else None
     has_sig = bool(str(sig_html or "").strip())
-    base = append_additional_assets_section_to_email_html(
-        base,
-        db,
-        draft.attached_asset_ids,
-        trailing_rule_if_no_signature_below=not has_sig,
-    )
-    body_out = append_signature_html_after(base, sig_html)
-
-    mark_email_draft_sending(db, draft)
-
-    create_email_event(
-        db=db,
-        run_id=draft.run_id,
-        draft_id=draft.id,
-        contact_id=draft.contact_id,
-        event_type="queued",
-        payload_json={},
-    )
 
     try:
+        attachment_payloads, mime_exclude_ids = _outreach_mime_attachments_and_exclude_ids(
+            db,
+            draft.attached_asset_ids,
+        )
+        base = append_additional_assets_section_to_email_html(
+            base,
+            db,
+            draft.attached_asset_ids,
+            trailing_rule_if_no_signature_below=not has_sig,
+            exclude_asset_ids=mime_exclude_ids,
+        )
+        body_out = append_signature_html_after(base, sig_html)
+
+        mark_email_draft_sending(db, draft)
+
+        create_email_event(
+            db=db,
+            run_id=draft.run_id,
+            draft_id=draft.id,
+            contact_id=draft.contact_id,
+            event_type="queued",
+            payload_json={},
+        )
+
         result = send_email_via_provider(
             to_email=draft.to_email.strip(),
             subject=draft.subject,
             body=body_out,
+            attachments=attachment_payloads if attachment_payloads else None,
         )
 
         mark_email_draft_sent(
@@ -125,6 +158,7 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
             subject=draft.subject,
             body=body_out,
             provider_message_id=result.get("provider_message_id"),
+            rfc_message_id=result.get("rfc_message_id"),
         )
 
         touch_email_thread(db, thread)
@@ -206,11 +240,16 @@ def mock_send_first_approved_draft_preview(db: Session, run_id: int) -> dict:
     base = normalize_draft_body_for_email_html(draft.body) if base_raw else ""
     sig_html = getattr(run, "sender_signature_html", None)
     has_sig = bool(str(sig_html or "").strip())
+    preview_attachment_payloads, preview_mime_exclude = _outreach_mime_attachments_and_exclude_ids(
+        db,
+        draft.attached_asset_ids,
+    )
     base = append_additional_assets_section_to_email_html(
         base,
         db,
         draft.attached_asset_ids,
         trailing_rule_if_no_signature_below=not has_sig,
+        exclude_asset_ids=preview_mime_exclude,
     )
     body_out = append_signature_html_after(base, sig_html)
     try:
@@ -229,6 +268,7 @@ def mock_send_first_approved_draft_preview(db: Session, run_id: int) -> dict:
         to_email=preview_to,
         subject=draft.subject or "",
         body=body_out,
+        attachments=preview_attachment_payloads if preview_attachment_payloads else None,
     )
     if (result.get("provider") or "").strip().lower() != "gmail":
         raise ValueError(

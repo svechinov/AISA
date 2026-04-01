@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import DOMPurify from "dompurify";
+import { FileAssetBadge } from "@/components/FileAssetBadge";
 import { isProbablyHtmlEmailBody } from "@/lib/emailDraftBody";
 
 function primaryAssetHref(asset) {
@@ -17,7 +18,7 @@ function assetLabelsForPreview(attachedAssetIds, assetLibrary) {
     const a = byId.get(id);
     const name = (a?.name || "").trim();
     const href = primaryAssetHref(a);
-    return { id, label: name || `Asset #${id}`, href };
+    return { id, label: name || `Asset #${id}`, href, asset: a };
   });
 }
 
@@ -33,15 +34,18 @@ function trailingPreviewBlock({ showSignaturePlaceholder, attachedAssetIds, asse
           <div className="border-t border-border/60" />
           <p className="m-0 font-semibold">Additional assets</p>
           <ul className="m-0 mb-0 list-disc space-y-0.5 pl-5">
-            {assetItems.map(({ id, label, href }) => (
-              <li key={id}>
-                {href ? (
-                  <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary underline break-all">
-                    {label}
-                  </a>
-                ) : (
-                  label
-                )}
+            {assetItems.map(({ id, label, href, asset }) => (
+              <li key={id} className="[&::marker]:text-foreground">
+                <span className="inline-flex flex-wrap items-center gap-2 align-middle">
+                  {href ? (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary underline break-all">
+                      {label}
+                    </a>
+                  ) : (
+                    <span>{label}</span>
+                  )}
+                  <FileAssetBadge asset={asset} />
+                </span>
               </li>
             ))}
           </ul>

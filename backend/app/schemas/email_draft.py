@@ -45,3 +45,5 @@ class EmailDraftEditUpdate(BaseModel):
     body: str | None = None
     review_notes: str | None = None
     attached_asset_ids: list[int] | None = None
+    #: When true, set the same attached_asset_ids on every pending-review draft in the run (after this edit).
+    apply_assets_to_pending_drafts: bool = False

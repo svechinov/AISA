@@ -4,12 +4,14 @@ from starlette.responses import Response
 
 from app.db import get_db
 from app.repositories.email_draft_repo import (
+    bulk_set_attached_assets_for_pending_drafts,
     delete_email_draft,
     get_email_draft,
     list_email_drafts_by_run,
     update_email_draft_fields,
     update_email_draft_review,
 )
+from app.utils.attached_asset_ids import normalize_attached_asset_ids
 from app.schemas.email_draft import (
     EmailDraftEditUpdate,
     EmailDraftRead,
@@ -64,7 +66,7 @@ def edit_email_draft_route(
     if not draft:
         raise HTTPException(status_code=404, detail="Email draft not found")
 
-    return update_email_draft_fields(
+    updated = update_email_draft_fields(
         db=db,
         draft=draft,
         subject=payload.subject,
@@ -72,6 +74,19 @@ def edit_email_draft_route(
         review_notes=payload.review_notes,
         attached_asset_ids=payload.attached_asset_ids,
     )
+    if payload.apply_assets_to_pending_drafts:
+        asset_src = (
+            payload.attached_asset_ids
+            if payload.attached_asset_ids is not None
+            else (updated.attached_asset_ids or [])
+        )
+        bulk_set_attached_assets_for_pending_drafts(
+            db,
+            updated.run_id,
+            normalize_attached_asset_ids(asset_src),
+        )
+        db.refresh(updated)
+    return updated
 
 
 @router.post("/{draft_id}/regenerate", response_model=EmailDraftRead)

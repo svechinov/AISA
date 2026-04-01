@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
 import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
 import {
@@ -22,6 +22,8 @@ import { Input } from "@/components/ui/input";
 import {
   AlertCircle,
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
   CircleAlert,
   Clock,
   Eye,
@@ -33,8 +35,12 @@ import {
   Pencil,
   Reply,
   Send,
+  Upload,
+  Loader2,
 } from "lucide-react";
 import DOMPurify from "dompurify";
+import { assetIsCdnUpload } from "@/lib/assetCdn";
+import { cn } from "@/lib/utils";
 
 /** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
 function threadMessageBodyLooksLikeHtml(s) {
@@ -48,24 +54,6 @@ const API_BASE =
     : import.meta.env.DEV
       ? "/api"
       : "http://127.0.0.1:8000";
-
-const EVENT_FILTER_OPTS = [
-  { value: "all", label: "All events" },
-  { value: "queued", label: "Queued" },
-  { value: "sent", label: "Sent" },
-  { value: "replied", label: "Replied" },
-  { value: "bounced", label: "Bounced" },
-  { value: "dead_mailbox", label: "Dead mailbox" },
-  { value: "failed", label: "Failed" },
-  { value: "reply_sent", label: "Reply sent" },
-];
-
-const THREAD_CLASSIFICATION_FILTER_OPTS = [
-  { value: "all", label: "All" },
-  { value: "interested", label: "Interested" },
-  { value: "need_more_info", label: "Need info" },
-  { value: "not_interested", label: "Not interested" },
-];
 
 const THREAD_CLASS_LABELS = {
   interested: "Interested",
@@ -103,10 +91,14 @@ function threadClassificationBadgeClass(label) {
 export default function TrackingView({
   runId,
   runSignatureHtml = "",
+  /** Run.context_json — persist UI flags under `_human_ui` */
+  contextJson = {},
   activeTab,
   onActiveTabChange,
   singleTabMode = false,
   onRunWorkspaceRefresh,
+  /** From GET /setup/status — R2 env complete for POST /assets/upload */
+  cdnR2UploadReady = false,
 }) {
   const showSignaturePlaceholder = Boolean((runSignatureHtml ?? "").trim());
   const [events, setEvents] = useState([]);
@@ -118,7 +110,8 @@ export default function TrackingView({
   const [runMessages, setRunMessages] = useState([]);
   const [threadModalId, setThreadModalId] = useState(null);
   const [threadRemindAtLocal, setThreadRemindAtLocal] = useState("");
-  const [threadClassFilter, setThreadClassFilter] = useState("all");
+  const [threadBucketTab, setThreadBucketTab] = useState("active");
+  const [eventBucketTab, setEventBucketTab] = useState("active");
   const [replyDrafts, setReplyDrafts] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [assets, setAssets] = useState([]);
@@ -126,6 +119,11 @@ export default function TrackingView({
   const [newAssetName, setNewAssetName] = useState("");
   const [newAssetType, setNewAssetType] = useState("deck");
   const [newAssetUrl, setNewAssetUrl] = useState("");
+  const [uploadAssetName, setUploadAssetName] = useState("");
+  const [uploadAssetType, setUploadAssetType] = useState("deck");
+  const [uploadPick, setUploadPick] = useState(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const uploadFileInputRef = useRef(null);
   /** packet assets edit session: draft list + library picker + title */
   const [packetEditState, setPacketEditState] = useState(null);
   const [packetToDelete, setPacketToDelete] = useState(null);
@@ -139,7 +137,6 @@ export default function TrackingView({
   /** When false, send-preview block is collapsed even if data is cached */
   const [replyPreviewExpanded, setReplyPreviewExpanded] = useState({});
   const [replyEditing, setReplyEditing] = useState(null);
-  const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [innerTab, setInnerTab] = useState("events");
@@ -147,6 +144,17 @@ export default function TrackingView({
   useEffect(() => {
     setInnerTab(activeTab || "events");
   }, [runId, activeTab]);
+
+  const eventChainCollapsedMap = useMemo(() => {
+    const raw = contextJson?._human_ui?.event_chain_collapsed;
+    const out = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw)) {
+        out[String(k)] = Boolean(v);
+      }
+    }
+    return out;
+  }, [runId, contextJson?._human_ui?.event_chain_collapsed]);
 
   const tabValue = activeTab || innerTab;
   const handleTabChange = (v) => {
@@ -228,7 +236,8 @@ export default function TrackingView({
       setReplySendPreviewByDraftId({});
       setReplyEditing(null);
       setThreadModalId(null);
-      setThreadClassFilter("all");
+      setThreadBucketTab("active");
+      setEventBucketTab("active");
       return;
     }
     void load();
@@ -276,13 +285,6 @@ export default function TrackingView({
     return <MailCheck className="h-4 w-4" />;
   };
 
-  const filteredEvents = useMemo(() => {
-    return events.filter((e) => {
-      if (filter === "all") return true;
-      return e.event_type === filter;
-    });
-  }, [events, filter]);
-
   const contactById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
 
   const draftById = useMemo(() => new Map(drafts.map((d) => [d.id, d])), [drafts]);
@@ -301,10 +303,56 @@ export default function TrackingView({
     return m;
   }, [reminders]);
 
+  const isThreadDeadMailboxRow = useCallback(
+    (t) => {
+      const contact = contactById.get(t.contact_id);
+      const linkedDraft = t.draft_id != null ? draftById.get(t.draft_id) : undefined;
+      const draftLifecycle = linkedDraft
+        ? linkedDraft.tracking_status ?? linkedDraft.status
+        : null;
+      return draftLifecycle === "dead_mailbox" || contact?.email_health === "dead_mailbox";
+    },
+    [contactById, draftById],
+  );
+
+  const isThreadBouncedRow = useCallback(
+    (t) => {
+      const contact = contactById.get(t.contact_id);
+      const linkedDraft = t.draft_id != null ? draftById.get(t.draft_id) : undefined;
+      const tracking = linkedDraft ? linkedDraft.tracking_status : null;
+      return tracking === "bounced" || contact?.email_health === "bounced";
+    },
+    [contactById, draftById],
+  );
+
+  /** For sort: 0 = normal, 1 = bounced (near bottom), 2 = dead mailbox (bottom). */
+  const threadListBottomTier = useCallback(
+    (t) => {
+      if (isThreadDeadMailboxRow(t)) return 2;
+      if (isThreadBouncedRow(t)) return 1;
+      return 0;
+    },
+    [isThreadDeadMailboxRow, isThreadBouncedRow],
+  );
+
   const filteredThreads = useMemo(() => {
-    if (threadClassFilter === "all") return threads;
-    return threads.filter((t) => t.classification === threadClassFilter);
-  }, [threads, threadClassFilter]);
+    if (threadBucketTab === "dead_mailbox") {
+      return threads.filter((t) => isThreadDeadMailboxRow(t));
+    }
+    if (threadBucketTab === "bounced") {
+      return threads.filter((t) => isThreadBouncedRow(t));
+    }
+    return threads.filter((t) => !isThreadBouncedRow(t) && !isThreadDeadMailboxRow(t));
+  }, [threads, threadBucketTab, isThreadDeadMailboxRow, isThreadBouncedRow]);
+
+  const threadBucketCounts = useMemo(
+    () => ({
+      active: threads.filter((t) => !isThreadBouncedRow(t) && !isThreadDeadMailboxRow(t)).length,
+      bounced: threads.filter((t) => isThreadBouncedRow(t)).length,
+      dead_mailbox: threads.filter((t) => isThreadDeadMailboxRow(t)).length,
+    }),
+    [threads, isThreadBouncedRow, isThreadDeadMailboxRow],
+  );
 
   /** Last message in thread is inbound → “ball in our court”, show badge and pin to top. */
   const threadNeedsInboundAttention = useMemo(() => {
@@ -325,6 +373,9 @@ export default function TrackingView({
   const sortedFilteredThreads = useMemo(() => {
     const list = [...filteredThreads];
     list.sort((a, b) => {
+      const aTier = threadListBottomTier(a);
+      const bTier = threadListBottomTier(b);
+      if (aTier !== bTier) return aTier - bTier;
       const aAtt = threadNeedsInboundAttention.get(a.id) ? 1 : 0;
       const bAtt = threadNeedsInboundAttention.get(b.id) ? 1 : 0;
       if (aAtt !== bAtt) return bAtt - aAtt;
@@ -337,7 +388,12 @@ export default function TrackingView({
       return b.id - a.id;
     });
     return list;
-  }, [filteredThreads, threadNeedsInboundAttention, activeThreadReminderByThreadId]);
+  }, [
+    filteredThreads,
+    threadListBottomTier,
+    threadNeedsInboundAttention,
+    activeThreadReminderByThreadId,
+  ]);
 
   const messageCountsByThreadId = useMemo(() => {
     const m = new Map();
@@ -363,7 +419,7 @@ export default function TrackingView({
 
   const groupedEvents = useMemo(() => {
     const map = new Map();
-    for (const event of filteredEvents) {
+    for (const event of events) {
       if (!map.has(event.draft_id)) map.set(event.draft_id, []);
       map.get(event.draft_id).push(event);
     }
@@ -377,7 +433,46 @@ export default function TrackingView({
       })
       .sort((a, b) => a.draftId - b.draftId);
     return entries;
-  }, [filteredEvents, drafts]);
+  }, [events, drafts]);
+
+  const eventGroupTabBucket = useCallback(
+    (group) => {
+      const { draft, events: draftEvents } = group;
+      const contact =
+        draft?.contact_id != null ? contactById.get(draft.contact_id) : undefined;
+      const draftLifecycle = draft ? draft.tracking_status ?? draft.status : null;
+      const last = draftEvents?.length ? draftEvents[draftEvents.length - 1] : null;
+      const isDead =
+        draftLifecycle === "dead_mailbox" ||
+        contact?.email_health === "dead_mailbox" ||
+        last?.event_type === "dead_mailbox";
+      const isBounced =
+        draft?.tracking_status === "bounced" ||
+        contact?.email_health === "bounced" ||
+        last?.event_type === "bounced";
+      if (isDead) return "dead_mailbox";
+      if (isBounced) return "bounced";
+      return "active";
+    },
+    [contactById],
+  );
+
+  const eventBucketCounts = useMemo(() => {
+    let active = 0;
+    let bounced = 0;
+    let dead_mailbox = 0;
+    for (const g of groupedEvents) {
+      const b = eventGroupTabBucket(g);
+      if (b === "dead_mailbox") dead_mailbox += 1;
+      else if (b === "bounced") bounced += 1;
+      else active += 1;
+    }
+    return { active, bounced, dead_mailbox };
+  }, [groupedEvents, eventGroupTabBucket]);
+
+  const filteredGroupedEvents = useMemo(() => {
+    return groupedEvents.filter((g) => eventGroupTabBucket(g) === eventBucketTab);
+  }, [groupedEvents, eventBucketTab, eventGroupTabBucket]);
 
   const deadContacts = useMemo(() => {
     return contacts.filter((c) => c.email_health === "dead_mailbox" || c.email_health === "bounced");
@@ -470,49 +565,24 @@ export default function TrackingView({
     }
   }
 
-  async function mockTracking(draftId, pathSuffix) {
-    try {
-      await fetch(`${API_BASE}/tracking/drafts/${draftId}/${pathSuffix}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ payload_json: {} }),
-      });
-      await load();
-    } catch {
-      setError("Mock tracking call failed.");
-    }
-  }
-
-  async function mockInboxReply(draft) {
-    if (!draft?.id) return;
+  async function persistEventChainCollapsed(draftId, collapsed) {
+    if (!runId || draftId == null) return;
+    const id = String(draftId);
     setError("");
-    const contact = contactById.get(draft.contact_id);
-    const fromEmail =
-      contact?.email?.trim() ||
-      `buyer@${(contact?.company || draft.company || "company")
-        .toLowerCase()
-        .replace(/\s+/g, "")}.example`;
-    const subject = draft.subject?.startsWith("Re:") ? draft.subject : `Re: ${draft.subject || ""}`.trim();
     try {
-      const res = await fetch(`${API_BASE}/inbox/mock-receive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          draft_id: draft.id,
-          from_email: fromEmail,
-          to_email: "inbox@ai-biz-os.local",
-          subject,
-          body: "Thanks, send me more information.",
-        }),
+      const res = await fetch(`${API_BASE}/runs/${runId}/human-ui`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ event_chain_collapsed: { [id]: collapsed } }),
       });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
-        setError(detail?.detail ? String(detail.detail) : `Inbox mock failed (${res.status})`);
+        setError(detail?.detail ? String(detail.detail) : `Save UI state failed (${res.status})`);
         return;
       }
-      await load();
+      onRunWorkspaceRefresh?.();
     } catch {
-      setError("Mock inbox reply failed — check network / backend.");
+      setError("Could not save events panel state — check network.");
     }
   }
 
@@ -662,6 +732,42 @@ export default function TrackingView({
       await load();
     } catch {
       setError("Create asset failed.");
+    }
+  }
+
+  async function submitUploadAsset() {
+    if (!(uploadAssetName || "").trim()) {
+      setError("Asset name is required.");
+      return;
+    }
+    if (!uploadPick) {
+      setError("Choose a file to upload.");
+      return;
+    }
+    setError("");
+    setUploadBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", uploadPick);
+      fd.append("name", uploadAssetName.trim());
+      fd.append("asset_type", uploadAssetType);
+      const res = await fetch(`${API_BASE}/assets/upload`, { method: "POST", body: fd });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        const msg = detail?.detail ? String(detail.detail) : `Upload failed (${res.status})`;
+        setError(msg);
+        return;
+      }
+      setUploadAssetName("");
+      setUploadPick(null);
+      if (uploadFileInputRef.current) {
+        uploadFileInputRef.current.value = "";
+      }
+      await load();
+    } catch {
+      setError("Upload failed.");
+    } finally {
+      setUploadBusy(false);
     }
   }
 
@@ -1160,118 +1266,184 @@ export default function TrackingView({
         <TabsContent value="events" className="mt-4">
           <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardHeader>
-              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                <div>
-                  <CardTitle>Events</CardTitle>
-                  <CardDescription>Email history is grouped by draft.</CardDescription>
-                </div>
-                <NativeFilterSelect
-                  className="w-full md:w-[240px]"
-                  value={filter}
-                  onValueChange={setFilter}
-                  options={EVENT_FILTER_OPTS}
-                />
-              </div>
+              <CardTitle>Events</CardTitle>
+              <CardDescription>
+                Email history is grouped by draft. Use the tabs to match delivery state (same idea as Threads).
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div
+                className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+                role="tablist"
+                aria-label="Event delivery category"
+              >
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  role="tab"
+                  aria-selected={eventBucketTab === "active"}
+                  className={cn(
+                    "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                    eventBucketTab === "active"
+                      ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
+                      : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
+                  )}
+                  onClick={() => setEventBucketTab("active")}
+                >
+                  Active ({eventBucketCounts.active})
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  role="tab"
+                  aria-selected={eventBucketTab === "bounced"}
+                  className={cn(
+                    "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                    eventBucketTab === "bounced"
+                      ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
+                      : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
+                  )}
+                  onClick={() => setEventBucketTab("bounced")}
+                >
+                  Bounced ({eventBucketCounts.bounced})
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  role="tab"
+                  aria-selected={eventBucketTab === "dead_mailbox"}
+                  className={cn(
+                    "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                    eventBucketTab === "dead_mailbox"
+                      ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
+                      : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
+                  )}
+                  onClick={() => setEventBucketTab("dead_mailbox")}
+                >
+                  Dead mailbox ({eventBucketCounts.dead_mailbox})
+                </Button>
+              </div>
               <div className="space-y-4">
-                {groupedEvents.map(({ draftId, draft, events: draftEvents }) => {
+                {filteredGroupedEvents.map(({ draftId, draft, events: draftEvents }) => {
                   const chainEndsDeadMailbox =
                     draftEvents.length > 0 &&
                     draftEvents[draftEvents.length - 1].event_type === "dead_mailbox";
+                  const chainEndsBounced =
+                    draftEvents.length > 0 &&
+                    draftEvents[draftEvents.length - 1].event_type === "bounced";
+                  const chainCollapsed = eventChainCollapsedMap[String(draftId)] === true;
                   return (
-                  <div
-                    key={draftId}
-                    className={
-                      chainEndsDeadMailbox
-                        ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
-                        : "rounded-2xl border-2 border-border bg-muted/25 p-4"
-                    }
-                  >
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-base font-semibold leading-tight">
-                            {draft?.company || `Draft #${draftId}`}
-                          </div>
-                          {isReplacementDraft(draft) ? (
-                            <Badge
-                              variant="default"
-                              className="bg-violet-600 font-normal hover:bg-violet-600"
+                    <div
+                      key={draftId}
+                      className={
+                        chainEndsDeadMailbox
+                          ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
+                          : chainEndsBounced
+                            ? "rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-4 dark:border-amber-600/40 dark:bg-amber-950/25"
+                            : "rounded-2xl border-2 border-border bg-muted/25 p-4"
+                      }
+                    >
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 shrink-0"
+                              aria-expanded={!chainCollapsed}
+                              aria-label={
+                                chainCollapsed ? "Expand events for this draft" : "Collapse events for this draft"
+                              }
+                              title={chainCollapsed ? "Expand events" : "Collapse events"}
+                              onClick={() => void persistEventChainCollapsed(draftId, !chainCollapsed)}
                             >
-                              Replacement draft
-                            </Badge>
+                              {chainCollapsed ? (
+                                <ChevronDown className="h-4 w-4" aria-hidden />
+                              ) : (
+                                <ChevronUp className="h-4 w-4" aria-hidden />
+                              )}
+                            </Button>
+                            <div className="text-base font-semibold leading-tight">
+                              {draft?.company || `Draft #${draftId}`}
+                            </div>
+                            {isReplacementDraft(draft) ? (
+                              <Badge
+                                variant="default"
+                                className="bg-violet-600 font-normal hover:bg-violet-600"
+                              >
+                                Replacement draft
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <div className="mt-1 text-sm text-muted-foreground">
+                            {draft?.to_email || "No recipient"}
+                          </div>
+                          <div className="mt-1 text-sm">{draft?.subject || "No subject"}</div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {canShowSend(draft) ? (
+                            <Button type="button" size="sm" onClick={() => void sendSingleDraft(draftId)}>
+                              Send
+                            </Button>
                           ) : null}
                         </div>
-                        <div className="mt-1 text-sm text-muted-foreground">{draft?.to_email || "No recipient"}</div>
-                        <div className="mt-1 text-sm">{draft?.subject || "No subject"}</div>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {canShowSend(draft) ? (
-                          <Button type="button" size="sm" onClick={() => void sendSingleDraft(draftId)}>
-                            Send
-                          </Button>
-                        ) : null}
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={draft?.status !== "sent"}
-                          title={
-                            draft?.status !== "sent"
-                              ? "Send the email first — a thread will appear"
-                              : "Mock reply via inbox (inbound message)"
-                          }
-                          onClick={() => void mockInboxReply(draft)}
+                      {chainCollapsed ? null : (
+                        <div
+                          className={`mt-4 space-y-3 border-t pt-4 ${
+                            chainEndsDeadMailbox
+                              ? "border-red-700/30"
+                              : chainEndsBounced
+                                ? "border-amber-600/35 dark:border-amber-600/30"
+                                : "border-border/50"
+                          }`}
                         >
-                          Mock reply (inbox)
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void mockTracking(draftId, "mock-bounce")}
-                        >
-                          Mock bounce
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void mockTracking(draftId, "mock-dead-mailbox")}
-                        >
-                          Mock dead mailbox
-                        </Button>
-                      </div>
-                    </div>
-                    <div
-                      className={`mt-4 space-y-3 border-t pt-4 ${chainEndsDeadMailbox ? "border-red-700/30" : "border-border/50"}`}
-                    >
-                      {draftEvents.map((event, index) => (
-                        <div key={event.id}>
-                          <div
-                            className={`flex items-center justify-between gap-3 rounded-2xl border-2 p-3 ${chainEndsDeadMailbox ? "border-red-700/35 bg-red-950/15 dark:border-red-700/30 dark:bg-red-950/25" : "border-border bg-muted/40"}`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className={`rounded-xl p-2 ${eventTone(event.event_type)}`}>
-                                {eventIcon(event.event_type)}
+                          {draftEvents.map((event, index) => (
+                            <div key={event.id}>
+                              <div
+                                className={`flex items-center justify-between gap-3 rounded-2xl border-2 p-3 ${
+                                  chainEndsDeadMailbox
+                                    ? "border-red-700/35 bg-red-950/15 dark:border-red-700/30 dark:bg-red-950/25"
+                                    : chainEndsBounced
+                                      ? "border-amber-600/40 bg-amber-950/20 dark:border-amber-600/35 dark:bg-amber-950/30"
+                                      : "border-border bg-muted/40"
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className={`rounded-xl p-2 ${eventTone(event.event_type)}`}>
+                                    {eventIcon(event.event_type)}
+                                  </div>
+                                  <div>
+                                    <div className="font-medium capitalize">
+                                      {event.event_type.replaceAll("_", " ")}
+                                    </div>
+                                    <div className="text-xs text-muted-foreground">Event #{event.id}</div>
+                                  </div>
+                                </div>
+                                <Badge variant="secondary">{new Date(event.created_at).toLocaleString()}</Badge>
                               </div>
-                              <div>
-                                <div className="font-medium capitalize">{event.event_type.replaceAll("_", " ")}</div>
-                                <div className="text-xs text-muted-foreground">Event #{event.id}</div>
-                              </div>
+                              {index < draftEvents.length - 1 ? <Separator className="my-2" /> : null}
                             </div>
-                            <Badge variant="secondary">{new Date(event.created_at).toLocaleString()}</Badge>
-                          </div>
-                          {index < draftEvents.length - 1 ? <Separator className="my-2" /> : null}
+                          ))}
                         </div>
-                      ))}
+                      )}
                     </div>
-                  </div>
                   );
                 })}
                 {!groupedEvents.length ? (
                   <div className="text-sm text-muted-foreground">No events yet.</div>
+                ) : filteredGroupedEvents.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    {eventBucketTab === "active"
+                      ? "No active event groups — check Bounced or Dead mailbox."
+                      : eventBucketTab === "bounced"
+                        ? "No bounced groups in this run."
+                        : "No dead mailbox groups in this run."}
+                  </div>
                 ) : null}
               </div>
             </CardContent>
@@ -1281,24 +1453,67 @@ export default function TrackingView({
         <TabsContent value="threads" className="mt-4">
           <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardHeader>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <CardTitle>Threads</CardTitle>
-                  <CardDescription>
-                    Threads appear after you send a draft.                     Open a thread for messages, generating a reply, or a reminder.{" "}
-                    <strong>Inbound</strong> and <strong>Remind later</strong> badges (after inbound, before dead mailbox)
-                    pin threads toward the top.
-                  </CardDescription>
-                </div>
-                <NativeFilterSelect
-                  className="w-full sm:w-[220px]"
-                  value={threadClassFilter}
-                  onValueChange={setThreadClassFilter}
-                  options={THREAD_CLASSIFICATION_FILTER_OPTS}
-                />
-              </div>
+              <CardTitle>Threads</CardTitle>
+              <CardDescription>
+                Threads appear after you send a draft. Use the tabs to switch between active correspondence,
+                bounces, and dead mailboxes.
+              </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
+            <div
+              className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+              role="tablist"
+              aria-label="Thread delivery category"
+            >
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                role="tab"
+                aria-selected={threadBucketTab === "active"}
+                className={cn(
+                  "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                  threadBucketTab === "active"
+                    ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
+                    : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
+                )}
+                onClick={() => setThreadBucketTab("active")}
+              >
+                Active ({threadBucketCounts.active})
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                role="tab"
+                aria-selected={threadBucketTab === "bounced"}
+                className={cn(
+                  "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                  threadBucketTab === "bounced"
+                    ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
+                    : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
+                )}
+                onClick={() => setThreadBucketTab("bounced")}
+              >
+                Bounced ({threadBucketCounts.bounced})
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                role="tab"
+                aria-selected={threadBucketTab === "dead_mailbox"}
+                className={cn(
+                  "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                  threadBucketTab === "dead_mailbox"
+                    ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
+                    : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
+                )}
+                onClick={() => setThreadBucketTab("dead_mailbox")}
+              >
+                Dead mailbox ({threadBucketCounts.dead_mailbox})
+              </Button>
+            </div>
             {sortedFilteredThreads.map((t) => {
               const contact = contactById.get(t.contact_id);
               const counts = messageCountsByThreadId.get(t.id) || { in: 0, out: 0 };
@@ -1309,7 +1524,11 @@ export default function TrackingView({
                 : null;
               const isThreadDeadMailbox =
                 draftLifecycle === "dead_mailbox" || contact?.email_health === "dead_mailbox";
+              const isThreadBounced =
+                linkedDraft?.tracking_status === "bounced" || contact?.email_health === "bounced";
               const needsInboundAttention = Boolean(threadNeedsInboundAttention.get(t.id));
+              const showInboundBadge =
+                needsInboundAttention && !isThreadBounced && !isThreadDeadMailbox;
               const threadRemind = activeThreadReminderByThreadId.get(t.id);
               return (
                 <div
@@ -1317,7 +1536,9 @@ export default function TrackingView({
                   className={
                     isThreadDeadMailbox
                       ? "flex flex-col gap-3 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
-                      : "flex flex-col gap-3 rounded-2xl border-2 border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+                      : isThreadBounced
+                        ? "flex flex-col gap-3 rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-5 dark:border-amber-600/40 dark:bg-amber-950/25 sm:flex-row sm:items-center sm:justify-between"
+                        : "flex flex-col gap-3 rounded-2xl border-2 border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
                   }
                 >
                     <div>
@@ -1327,9 +1548,24 @@ export default function TrackingView({
                             className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
                             aria-hidden
                           />
+                        ) : isThreadBounced ? (
+                          <MailWarning
+                            className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400"
+                            aria-hidden
+                          />
                         ) : null}
                         <div className="font-medium">{contact?.company || `Contact #${t.contact_id}`}</div>
-                        {needsInboundAttention ? (
+                        {isThreadBounced && !isThreadDeadMailbox ? (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-amber-600/55 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/35 dark:text-amber-100"
+                            title="Outbound delivery failed (bounce)"
+                          >
+                            <MailWarning className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+                            Bounced
+                          </Badge>
+                        ) : null}
+                        {showInboundBadge ? (
                           <Badge
                             variant="outline"
                             className="gap-1 border-green-600/50 bg-green-600/15 font-normal text-green-800 dark:border-green-600/45 dark:bg-green-950/45 dark:text-green-300"
@@ -1364,11 +1600,7 @@ export default function TrackingView({
                           >
                             {THREAD_CLASS_LABELS[label] || label}
                           </Badge>
-                        ) : (
-                          <Badge variant="outline" className="font-normal text-muted-foreground">
-                            —
-                          </Badge>
-                        )}
+                        ) : null}
                       </div>
                       <div className="mt-1 text-sm text-muted-foreground">
                         {contact?.name || "—"} · {t.subject || "No subject"}
@@ -1393,7 +1625,13 @@ export default function TrackingView({
               <div className="text-sm text-muted-foreground">No threads yet — send at least one draft.</div>
             ) : null}
             {threads.length > 0 && !filteredThreads.length ? (
-              <div className="text-sm text-muted-foreground">No threads match the selected classification.</div>
+              <div className="text-sm text-muted-foreground">
+                {threadBucketTab === "active"
+                  ? "No threads in Active — check Bounced or Dead mailbox."
+                  : threadBucketTab === "bounced"
+                    ? "No bounced threads in this run."
+                    : "No dead mailbox threads in this run."}
+              </div>
             ) : null}
             </CardContent>
           </Card>
@@ -1753,32 +1991,120 @@ export default function TrackingView({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-            <div className="rounded-2xl border-2 border-border bg-muted/25 p-4">
-              <div className="mb-3 text-sm font-medium">Add asset</div>
-              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-              <div className="min-w-[140px] flex-1 space-y-1">
-                <div className="text-xs text-muted-foreground">Name</div>
-                <Input value={newAssetName} onChange={(e) => setNewAssetName(e.target.value)} placeholder="Pitch deck Q1" />
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-2xl border-2 border-border bg-muted/25 p-4">
+                <div className="mb-3 text-sm font-medium">Add link</div>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  Register a public URL (deck on Google Drive, Notion, etc.).
+                </p>
+                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                  <div className="min-w-[140px] flex-1 space-y-1">
+                    <div className="text-xs text-muted-foreground">Name</div>
+                    <Input
+                      value={newAssetName}
+                      onChange={(e) => setNewAssetName(e.target.value)}
+                      placeholder="Pitch deck Q1"
+                    />
+                  </div>
+                  <div className="min-w-[140px] space-y-1">
+                    <div className="text-xs text-muted-foreground">Type</div>
+                    <NativeFilterSelect
+                      value={newAssetType}
+                      onValueChange={setNewAssetType}
+                      options={ASSET_LIBRARY_TYPE_OPTS}
+                    />
+                  </div>
+                  <div className="min-w-[180px] flex-1 basis-full space-y-1">
+                    <div className="text-xs text-muted-foreground">URL</div>
+                    <Input
+                      value={newAssetUrl}
+                      onChange={(e) => setNewAssetUrl(e.target.value)}
+                      placeholder="https://..."
+                    />
+                  </div>
+                  <Button type="button" onClick={() => void submitNewAsset()}>
+                    Add link
+                  </Button>
+                </div>
               </div>
-              <div className="min-w-[140px] space-y-1">
-                <div className="text-xs text-muted-foreground">Type</div>
-                <NativeFilterSelect
-                  value={newAssetType}
-                  onValueChange={setNewAssetType}
-                  options={ASSET_LIBRARY_TYPE_OPTS}
-                />
-              </div>
-              <div className="min-w-[180px] flex-1 space-y-1">
-                <div className="text-xs text-muted-foreground">URL</div>
-                <Input
-                  value={newAssetUrl}
-                  onChange={(e) => setNewAssetUrl(e.target.value)}
-                  placeholder="https://..."
-                />
-              </div>
-              <Button type="button" onClick={() => void submitNewAsset()}>
-                Add asset
-              </Button>
+
+              <div className="rounded-2xl border-2 border-border bg-muted/25 p-4">
+                <div className="mb-3 text-sm font-medium">Add file</div>
+                {cdnR2UploadReady ? (
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    Files go to your Cloudflare R2 bucket; the asset link uses your public base URL from the server
+                    config.
+                  </p>
+                ) : (
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    Upload to project CDN (Cloudflare R2). Requires{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">CDN_ACCOUNT_ID</code>,{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">CDN_R2_BUCKET</code>,{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">CDN_R2_ACCESS_KEY_ID</code>, secret (
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">CDN_R2_SECRET_ACCESS_KEY</code> or{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">CDN_API_KEY</code>), and{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">CDN_R2_PUBLIC_BASE_URL</code> in{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">backend/.env</code>.
+                    <span className="mt-1 block font-medium text-amber-600 dark:text-amber-500">
+                      Upload is disabled until R2 is configured (refresh the page after editing .env).
+                    </span>
+                  </p>
+                )}
+                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                  <div className="min-w-[140px] flex-1 space-y-1">
+                    <div className="text-xs text-muted-foreground">Name</div>
+                    <Input
+                      value={uploadAssetName}
+                      onChange={(e) => setUploadAssetName(e.target.value)}
+                      placeholder="Q1 deck.pdf"
+                    />
+                  </div>
+                  <div className="min-w-[140px] space-y-1">
+                    <div className="text-xs text-muted-foreground">Type</div>
+                    <NativeFilterSelect
+                      value={uploadAssetType}
+                      onValueChange={setUploadAssetType}
+                      options={ASSET_LIBRARY_TYPE_OPTS}
+                    />
+                  </div>
+                  <div className="min-w-[200px] flex-1 basis-full space-y-1">
+                    <div className="text-xs text-muted-foreground">File</div>
+                    <input
+                      ref={uploadFileInputRef}
+                      type="file"
+                      disabled={!cdnR2UploadReady}
+                      className={cn(
+                        "flex h-10 w-full cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm",
+                        "ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium",
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20",
+                        "disabled:cursor-not-allowed disabled:opacity-50",
+                      )}
+                      onChange={(e) => setUploadPick(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    disabled={!cdnR2UploadReady || uploadBusy}
+                    title={
+                      !cdnR2UploadReady
+                        ? "Set R2 variables in backend/.env (see text above), then reload."
+                        : undefined
+                    }
+                    onClick={() => void submitUploadAsset()}
+                  >
+                    {uploadBusy ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                        Uploading…
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="mr-2 h-4 w-4" aria-hidden />
+                        Upload
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
             </div>
           <div className="grid gap-3">
@@ -1787,6 +2113,14 @@ export default function TrackingView({
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="outline">{a.asset_type}</Badge>
                     <Badge variant="secondary">{a.status}</Badge>
+                    {assetIsCdnUpload(a) ? (
+                      <Badge
+                        className="border-transparent bg-green-600 text-white hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-600"
+                        title="Uploaded via CDN (R2 / Cloudflare Images)"
+                      >
+                        file
+                      </Badge>
+                    ) : null}
                   </div>
                   <div className="mt-2 font-medium">{a.name}</div>
                   {a.description ? (

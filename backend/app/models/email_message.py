@@ -23,5 +23,7 @@ class EmailMessage(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
 
     provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    # RFC5322 Message-ID (no angle brackets), for bounce In-Reply-To / References matching.
+    rfc_message_id: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

@@ -108,13 +108,18 @@ def append_additional_assets_section_to_email_html(
     raw_asset_ids: object,
     *,
     trailing_rule_if_no_signature_below: bool = True,
+    exclude_asset_ids: set[int] | frozenset[int] | None = None,
 ) -> str:
     """
     After main body, before signature: horizontal rule, bold «Additional assets», list.
     When a signature follows, omit the trailing <hr> (signature block has border-top).
     When nothing follows the list, add a closing rule if trailing_rule_if_no_signature_below.
+    exclude_asset_ids: listed only as MIME attachments elsewhere — omit from this link list.
     """
     ids = normalize_attached_asset_ids(raw_asset_ids)
+    if exclude_asset_ids:
+        ex = exclude_asset_ids
+        ids = [i for i in ids if i not in ex]
     if not ids:
         return body_html or ""
     items: list[str] = []

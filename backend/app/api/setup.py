@@ -23,6 +23,7 @@ from app.services.env_bootstrap import (
     upsert_env_file,
     upsert_env_files_everywhere,
 )
+from app.services.cdn_upload_service import r2_upload_ready
 from app.services.gmail_oauth import (
     GmailOAuthError,
     google_client_configured,
@@ -49,6 +50,10 @@ class SetupStatus(BaseModel):
     cdn_provider: str = Field(
         "",
         description="CDN_PROVIDER id when set, e.g. cloudflare (empty if unset).",
+    )
+    cdn_r2_upload_ready: bool = Field(
+        False,
+        description="True when Cloudflare R2 env is complete for POST /assets/upload (PDF etc.).",
     )
     gmail_client_configured: bool = Field(
         False,
@@ -167,6 +172,7 @@ def setup_status(response: Response) -> SetupStatus:
         hints=hints,
         llm_providers_ready=llm_providers_ready_from_environ(),
         cdn_provider=cdn_provider_id_from_environ(),
+        cdn_r2_upload_ready=r2_upload_ready(),
         gmail_client_configured=gc,
         gmail_refresh_token_set=gr,
         gmail_send_ready=gc and gr,

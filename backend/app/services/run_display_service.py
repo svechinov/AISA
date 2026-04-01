@@ -216,6 +216,7 @@ def get_run_performance_rows(db: Session, run_id: int) -> dict:
         "active_threads": active_threads,
         "interested": summary["threads_interested"],
         "need_more_info": summary["threads_need_info"],
+        "dead_mailboxes": summary["events_dead_mailbox"],
         "packets_sent": summary["asset_packets_sent"],
         "reminders_active": reminders_active,
         "reminders_due": reminders_due,

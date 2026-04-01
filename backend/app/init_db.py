@@ -10,6 +10,7 @@ from app.models.template import Template
 from app.models.email_draft import EmailDraft
 from app.models.email_event import EmailEvent  # noqa: F401 — register email_events with Base.metadata
 from app.models.email_message import EmailMessage  # noqa: F401 — register email_messages
+from app.models.gmail_processed_message import GmailProcessedMessage  # noqa: F401
 from app.models.email_thread import EmailThread  # noqa: F401 — register email_threads
 from app.models.reply_draft import ReplyDraft  # noqa: F401 — register reply_drafts
 from app.models.research_task import ResearchTask  # noqa: F401 — register research_tasks with Base.metadata
@@ -239,6 +240,66 @@ def _ensure_asset_packets_reply_draft_id_unique() -> None:
         )
 
 
+def _ensure_email_messages_rfc_message_id_column() -> None:
+    insp = inspect(engine)
+    if "email_messages" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("email_messages")}
+    if "rfc_message_id" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE email_messages ADD COLUMN rfc_message_id VARCHAR(500)"))
+    with engine.begin() as conn:
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_email_messages_rfc_message_id ON email_messages (rfc_message_id)"),
+        )
+
+
+def _ensure_gmail_processed_messages_table() -> None:
+    """Idempotency for bounce / Gmail notification processing."""
+    insp = inspect(engine)
+    if "gmail_processed_messages" in insp.get_table_names():
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "sqlite":
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE gmail_processed_messages (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        provider_message_id VARCHAR(255) NOT NULL,
+                        kind VARCHAR(32) NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        CONSTRAINT uq_gmail_processed_provider_id UNIQUE (provider_message_id)
+                    )
+                    """
+                ),
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_gmail_processed_kind "
+                    "ON gmail_processed_messages (kind)",
+                ),
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE gmail_processed_messages (
+                        id SERIAL PRIMARY KEY,
+                        provider_message_id VARCHAR(255) NOT NULL UNIQUE,
+                        kind VARCHAR(32) NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+                    )
+                    """
+                ),
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_gmail_processed_kind ON gmail_processed_messages (kind)"),
+            )
+
+
 def _ensure_email_threads_classification_columns() -> None:
     insp = inspect(engine)
     if "email_threads" not in insp.get_table_names():
@@ -263,6 +324,8 @@ def ensure_schema() -> None:
     _ensure_contacts_gmail_history_columns()
     _ensure_projects_is_archived_column()
     _ensure_email_threads_classification_columns()
+    _ensure_email_messages_rfc_message_id_column()
+    _ensure_gmail_processed_messages_table()
     _ensure_assets_extended_columns()
     _ensure_drafts_attached_asset_ids_columns()
     _ensure_asset_packets_reply_draft_id_unique()
