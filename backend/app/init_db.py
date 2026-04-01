@@ -20,6 +20,26 @@ from app.models.asset_packet import AssetPacket  # noqa: F401 — register asset
 from app.models.email_attachment import EmailAttachment  # noqa: F401 — register email_attachments
 
 
+def _ensure_contacts_gmail_history_columns() -> None:
+    insp = inspect(engine)
+    if "contacts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("contacts")}
+    with engine.begin() as conn:
+        if "gmail_history_status" not in columns:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN gmail_history_status VARCHAR(32)"))
+        if "gmail_history_checked_at" not in columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE contacts ADD COLUMN gmail_history_checked_at DATETIME"))
+            else:
+                conn.execute(text("ALTER TABLE contacts ADD COLUMN gmail_history_checked_at TIMESTAMP"))
+        if "gmail_inbox_imported_at" not in columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE contacts ADD COLUMN gmail_inbox_imported_at DATETIME"))
+            else:
+                conn.execute(text("ALTER TABLE contacts ADD COLUMN gmail_inbox_imported_at TIMESTAMP"))
+
+
 def _ensure_contacts_email_health_columns() -> None:
     insp = inspect(engine)
     if "contacts" not in insp.get_table_names():
@@ -240,6 +260,7 @@ def ensure_schema() -> None:
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
     _ensure_contacts_email_health_columns()
+    _ensure_contacts_gmail_history_columns()
     _ensure_projects_is_archived_column()
     _ensure_email_threads_classification_columns()
     _ensure_assets_extended_columns()

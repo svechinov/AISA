@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.contact_analyzer import router as contact_analyzer_router
 from app.api.contacts import router as contacts_router
 from app.api.email_drafts import router as email_drafts_router
 from app.api.email_events import router as email_events_router
@@ -71,6 +72,7 @@ app.include_router(inbox_router)
 app.include_router(tracking_router)
 app.include_router(research_tasks_router)
 app.include_router(runs_router)
+app.include_router(contact_analyzer_router)
 app.include_router(steps_router)
 
 

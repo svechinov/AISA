@@ -34,6 +34,12 @@ import {
   Reply,
   Send,
 } from "lucide-react";
+import DOMPurify from "dompurify";
+
+/** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
+function threadMessageBodyLooksLikeHtml(s) {
+  return /<\s*[a-zA-Z!/]/.test(String(s ?? "").trim());
+}
 
 const ENV_API = import.meta.env.VITE_API_BASE?.trim();
 const API_BASE =
@@ -2455,7 +2461,19 @@ export default function TrackingView({
                     <div className="mt-1 text-xs text-muted-foreground">
                       {m.from_email || "—"} → {m.to_email || "—"}
                     </div>
-                    <p className="mt-2 whitespace-pre-wrap leading-relaxed">{m.body}</p>
+                    {threadMessageBodyLooksLikeHtml(m.body) ? (
+                      <div
+                        className="email-thread-body mt-2 max-h-[28rem] overflow-y-auto break-words text-sm leading-relaxed [&_a]:break-all [&_a]:underline [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-muted-foreground/40 [&_blockquote]:pl-3 [&_p]:my-1.5 [&_p]:first:mt-0 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
+                        dangerouslySetInnerHTML={{
+                          __html: DOMPurify.sanitize(m.body, {
+                            FORBID_TAGS: ["img"],
+                            ADD_ATTR: ["target", "rel", "style"],
+                          }),
+                        }}
+                      />
+                    ) : (
+                      <p className="mt-2 whitespace-pre-wrap leading-relaxed">{m.body}</p>
+                    )}
                   </div>
                 ))}
               {!runMessages.some((m) => m.thread_id === threadModalId) ? (

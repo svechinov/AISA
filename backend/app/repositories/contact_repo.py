@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
+from app.utils.contact_identity import contact_identity_key_from_row
 
 
 def create_contact(
@@ -64,14 +65,34 @@ def list_contacts_by_run(db: Session, run_id: int) -> list[Contact]:
         .all()
     }
 
-    no_email: list[Contact] = []
+    no_email_groups: dict[str, list[Contact]] = {}
+    no_email_fallback: list[Contact] = []
     by_email: dict[str, list[Contact]] = {}
     for c in rows:
         em = (c.email or "").strip().lower()
         if not em or "@" not in em:
-            no_email.append(c)
+            ik = contact_identity_key_from_row(
+                name=c.name,
+                company=c.company,
+                website=c.website,
+            )
+            if ik:
+                no_email_groups.setdefault(ik, []).append(c)
+            else:
+                no_email_fallback.append(c)
             continue
         by_email.setdefault(em, []).append(c)
+
+    identities_with_email: set[str] = set()
+    for group in by_email.values():
+        for c in group:
+            ik = contact_identity_key_from_row(
+                name=c.name,
+                company=c.company,
+                website=c.website,
+            )
+            if ik:
+                identities_with_email.add(ik)
 
     def pick_canonical(group: list[Contact]) -> Contact:
         if len(group) == 1:
@@ -87,7 +108,11 @@ def list_contacts_by_run(db: Session, run_id: int) -> list[Contact]:
                 best, best_r = c, cr
         return best
 
-    out: list[Contact] = list(no_email)
+    out: list[Contact] = list(no_email_fallback)
+    for ik, group in no_email_groups.items():
+        if ik in identities_with_email:
+            continue
+        out.append(pick_canonical(group))
     for group in by_email.values():
         out.append(pick_canonical(group))
     out.sort(key=lambda c: c.id)
@@ -316,3 +341,36 @@ def update_contact_fields(
     db.commit()
     db.refresh(contact)
     return contact
+
+
+def list_contacts_raw_by_run(db: Session, run_id: int) -> list[Contact]:
+    """All contact rows for the run (no collapse by email — used for Contact analyzer)."""
+    return (
+        db.query(Contact).filter(Contact.run_id == run_id).order_by(Contact.id.asc()).all()
+    )
+
+
+def apply_gmail_history_to_contacts(
+    db: Session,
+    contacts: list[Contact],
+    *,
+    status: str,
+    checked_at: datetime,
+) -> None:
+    for c in contacts:
+        c.gmail_history_status = status
+        c.gmail_history_checked_at = checked_at
+        db.add(c)
+    db.commit()
+
+
+def apply_gmail_inbox_imported_at(
+    db: Session,
+    contacts: list[Contact],
+    *,
+    imported_at: datetime,
+) -> None:
+    for c in contacts:
+        c.gmail_inbox_imported_at = imported_at
+        db.add(c)
+    db.commit()

@@ -416,6 +416,15 @@ def gmail_send_message(
     return r.json()
 
 
+def gmail_has_to_or_from_correspondence(access_token: str, email: str, *, max_results: int = 1) -> bool:
+    """True if the mailbox has at least one message to or from this address."""
+    em = (email or "").strip()
+    if not em or "@" not in em:
+        return False
+    q = f"(to:{em} OR from:{em})"
+    return bool(gmail_search_message_ids(access_token, q, max_results=max_results))
+
+
 def gmail_search_message_ids(access_token: str, query: str, *, max_results: int = 5) -> list[str]:
     q = urllib.parse.urlencode({"q": query, "maxResults": str(max_results)})
     with httpx.Client(timeout=30.0) as client:
@@ -427,6 +436,58 @@ def gmail_search_message_ids(access_token: str, query: str, *, max_results: int 
     data = r.json()
     msgs = data.get("messages") or []
     return [str(m["id"]) for m in msgs if isinstance(m, dict) and m.get("id")]
+
+
+def gmail_list_message_refs_paginated(
+    access_token: str,
+    query: str,
+    *,
+    max_per_page: int = 100,
+) -> list[dict[str, str]]:
+    """
+    All message ids matching query (paginated). Each item: {"id", "threadId"} (threadId may be missing).
+    """
+    out: list[dict[str, str]] = []
+    page_token: str | None = None
+    with httpx.Client(timeout=60.0) as client:
+        while True:
+            params: dict[str, str] = {"q": query, "maxResults": str(min(max_per_page, 500))}
+            if page_token:
+                params["pageToken"] = page_token
+            qstr = urllib.parse.urlencode(params)
+            r = client.get(
+                f"{GMAIL_API}/users/me/messages?{qstr}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            _raise_unless_gmail_http_ok(r, fallback="gmail list messages failed")
+            data = r.json()
+            for m in data.get("messages") or []:
+                if not isinstance(m, dict) or not m.get("id"):
+                    continue
+                out.append(
+                    {
+                        "id": str(m["id"]),
+                        "threadId": str(m["threadId"]) if m.get("threadId") else "",
+                    },
+                )
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+    return out
+
+
+def gmail_get_message_full(access_token: str, message_id: str) -> dict[str, Any]:
+    with httpx.Client(timeout=60.0) as client:
+        r = client.get(
+            f"{GMAIL_API}/users/me/messages/{message_id}",
+            params={"format": "full"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    _raise_unless_gmail_http_ok(r, fallback="gmail get message failed")
+    try:
+        return r.json()
+    except json.JSONDecodeError as e:
+        raise GmailOAuthError("Gmail message response was not JSON") from e
 
 
 def verify_gmail_roundtrip_with_code(code: str, redirect_uri: str) -> None:

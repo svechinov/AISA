@@ -3,6 +3,16 @@ from sqlalchemy.orm import Session
 from app.models.email_message import EmailMessage
 
 
+def get_email_message_by_provider_id(db: Session, provider_message_id: str) -> EmailMessage | None:
+    if not provider_message_id:
+        return None
+    return (
+        db.query(EmailMessage)
+        .filter(EmailMessage.provider_message_id == provider_message_id)
+        .first()
+    )
+
+
 def create_email_message(
     db: Session,
     thread_id: int,

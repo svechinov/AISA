@@ -8,7 +8,7 @@ class RunCompanyRow(BaseModel):
     collect_index: int
     name: str
     website: str
-    contact_status: Literal["found", "none", "pending"]
+    contact_status: Literal["found", "none", "pending", "no_email"]
 
 
 class RunCompaniesRead(BaseModel):

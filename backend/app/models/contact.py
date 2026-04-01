@@ -28,4 +28,10 @@ class Contact(Base):
     email_health: Mapped[str] = mapped_column(String(50), nullable=False, default="unknown")
     last_contact_event_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Gmail inbox history check (Contact analyzer); NULL = not verified yet.
+    gmail_history_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    gmail_history_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Last successful «Import 6 months» from Gmail (inbox+sent) into email_threads/messages.
+    gmail_inbox_imported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

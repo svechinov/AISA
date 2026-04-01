@@ -63,6 +63,12 @@ def review_contact_route(
     if payload.review_status not in {"approved", "rejected"}:
         raise HTTPException(status_code=400, detail="review_status must be approved or rejected")
 
+    if payload.review_status == "approved" and not (contact.email or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot approve a contact with no email — add an address via Edit first.",
+        )
+
     updated = update_contact_review(
         db=db,
         contact=contact,

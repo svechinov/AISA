@@ -20,6 +20,9 @@ class ContactRead(BaseModel):
     reviewed_at: datetime | None
     email_health: str
     last_contact_event_at: datetime | None
+    gmail_history_status: str | None = None
+    gmail_history_checked_at: datetime | None = None
+    gmail_inbox_imported_at: datetime | None = None
     created_at: datetime
 
     class Config:

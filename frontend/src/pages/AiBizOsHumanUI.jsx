@@ -28,6 +28,8 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   Archive,
   ArchiveRestore,
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
   ChevronRight,
   CircleAlert,
   CircleCheck,
@@ -247,6 +249,16 @@ const API_TIMEOUT_MS = 25000;
 const RESTART_RUN_TIMEOUT_MS = 600000;
 /** Single-company find retry calls the LLM again; allow longer than default API timeout. */
 const COMPANY_RETRY_FIND_TIMEOUT_MS = 120000;
+/** Contact analyzer: many Gmail searches in one request — allow long run (default 25s would abort mid-flight). */
+const CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS = 600000;
+/** Single-address Gmail search can be slow. */
+const CONTACT_ANALYZER_VERIFY_ONE_TIMEOUT_MS = 120000;
+/** Import inbox+sent (6 months) may fetch many messages; allow long run. */
+const CONTACT_ANALYZER_IMPORT_INBOX_TIMEOUT_MS = 600000;
+/** Rows per page in Contact analyzer table. */
+const CONTACT_ANALYZER_PAGE_SIZE = 50;
+/** Same page size for Companies table and Contacts group lists. */
+const WORKSPACE_TABLE_PAGE_SIZE = CONTACT_ANALYZER_PAGE_SIZE;
 
 function combineAbortSignals(a, b) {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
@@ -417,6 +429,7 @@ async function api(path, { method = "GET", body, headers: hdr = {}, signal, time
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: combined,
+      cache: "no-store",
     });
   } catch (e) {
     throw new Error(formatApiError(e));
@@ -433,6 +446,42 @@ async function api(path, { method = "GET", body, headers: hdr = {}, signal, time
 
 function projectPk(p) {
   return p?.project_id ?? p?.id;
+}
+
+/** Align with backend `app.utils.contact_identity` (name + company + website only). */
+function contactIdentityKeyFromContactRow(c) {
+  if (!c || typeof c !== "object") return null;
+  const normWs = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const stripSite = (url) => {
+    let u = normWs(url);
+    u = u.replace(/^https?:\/\//, "").replace(/^www\./, "");
+    return u.replace(/\/+$/, "");
+  };
+  const name = normWs(c.name);
+  const company = normWs(c.company);
+  const site = stripSite(c.website);
+  if (!name && !company && !site) return null;
+  return `${name}\x1f${company}\x1f${site}`;
+}
+
+/** Hide redundant Invalid/No-email rows when the same person already has a row with an email. */
+function filterShadowNoEmailContacts(contactsList) {
+  if (!Array.isArray(contactsList) || contactsList.length === 0) return contactsList;
+  const identitiesWithEmail = new Set();
+  for (const c of contactsList) {
+    const em = String(c.email || "").trim().toLowerCase();
+    if (em && em.includes("@")) {
+      const ik = contactIdentityKeyFromContactRow(c);
+      if (ik) identitiesWithEmail.add(ik);
+    }
+  }
+  return contactsList.filter((c) => {
+    const em = String(c.email || "").trim().toLowerCase();
+    if (em && em.includes("@")) return true;
+    const ik = contactIdentityKeyFromContactRow(c);
+    if (ik && identitiesWithEmail.has(ik)) return false;
+    return true;
+  });
 }
 
 function NewProjectFooter({ projectName, onCreated }) {
@@ -469,6 +518,7 @@ const MAIN_NAV = [
   { value: "packets", label: "Packets" },
   { value: "dead", label: "Dead mailboxes" },
   { value: "queue", label: "Re-search queue" },
+  { value: "contact-analyzer", label: "Contact analyzer" },
 ];
 
 function mainNavToTrackingTab(nav) {
@@ -551,6 +601,11 @@ export default function AiBizOsHumanUI() {
   const [companiesLoading, setCompaniesLoading] = useState(false);
   /** Per-row: POST /companies/retry-find in flight (several retries can run in parallel). */
   const [companyRetryLoading, setCompanyRetryLoading] = useState(() => ({}));
+  const [companyRetryAllLoading, setCompanyRetryAllLoading] = useState(false);
+  const [companiesPage, setCompaniesPage] = useState(1);
+  const [contactsPendingPage, setContactsPendingPage] = useState(1);
+  const [contactsApprovedPage, setContactsApprovedPage] = useState(1);
+  const [contactsRejectedPage, setContactsRejectedPage] = useState(1);
   const [continueCompanyFindLoading, setContinueCompanyFindLoading] = useState(false);
   /**
    * After retry: still no matching contact and LLM added no new rows → red "Not available", no Retry.
@@ -567,8 +622,59 @@ export default function AiBizOsHumanUI() {
   const [gmailSetupBusy, setGmailSetupBusy] = useState(false);
   const [gmailSetupErr, setGmailSetupErr] = useState("");
   const [testSendBusy, setTestSendBusy] = useState(false);
+  const [analyzerRows, setAnalyzerRows] = useState([]);
+  const [analyzerLoading, setAnalyzerLoading] = useState(false);
+  const [analyzerRowBusy, setAnalyzerRowBusy] = useState(() => ({}));
+  const [analyzerBulkBusy, setAnalyzerBulkBusy] = useState(false);
+  const [analyzerBulkNote, setAnalyzerBulkNote] = useState("");
+  const [analyzerPage, setAnalyzerPage] = useState(1);
+  /** false = Not verified → No history → History detected (matches API); true = reversed */
+  const [analyzerGmailHistorySortDesc, setAnalyzerGmailHistorySortDesc] = useState(false);
 
   const gmailSendReady = setupIntegration?.gmail_send_ready === true;
+
+  const contactsVisible = useMemo(() => filterShadowNoEmailContacts(contacts), [contacts]);
+
+  const contactAnalyzerNavVisible = Boolean(
+    gmailSendReady && selectedRun && Array.isArray(contactsVisible) && contactsVisible.length > 0,
+  );
+
+  const visibleMainNavItems = useMemo(
+    () =>
+      MAIN_NAV.filter(
+        (item) => item.value !== "contact-analyzer" || contactAnalyzerNavVisible,
+      ),
+    [contactAnalyzerNavVisible],
+  );
+
+  const analyzerRowsSorted = useMemo(() => {
+    const rows = analyzerRows.slice();
+    const badgeRank = (st) => {
+      if (st == null) return 0;
+      if (st === "no_history") return 1;
+      if (st === "history_detected") return 2;
+      return 3;
+    };
+    rows.sort((a, b) => {
+      const ra = badgeRank(a.gmail_history_status);
+      const rb = badgeRank(b.gmail_history_status);
+      const primary = analyzerGmailHistorySortDesc ? rb - ra : ra - rb;
+      if (primary !== 0) return primary;
+      return String(a.email_normalized).localeCompare(String(b.email_normalized));
+    });
+    return rows;
+  }, [analyzerRows, analyzerGmailHistorySortDesc]);
+
+  const analyzerPageCount = Math.max(1, Math.ceil(analyzerRowsSorted.length / CONTACT_ANALYZER_PAGE_SIZE));
+
+  const analyzerRowsPage = useMemo(() => {
+    const start = (analyzerPage - 1) * CONTACT_ANALYZER_PAGE_SIZE;
+    return analyzerRowsSorted.slice(start, start + CONTACT_ANALYZER_PAGE_SIZE);
+  }, [analyzerRowsSorted, analyzerPage]);
+
+  useEffect(() => {
+    setAnalyzerPage((p) => Math.min(Math.max(1, p), analyzerPageCount));
+  }, [analyzerPageCount, analyzerRowsSorted.length]);
 
   const gmailSetupHintsFromApi = useMemo(() => {
     const raw = setupIntegration?.hints;
@@ -659,7 +765,10 @@ export default function AiBizOsHumanUI() {
       const data = await api(`/runs/${runId}/companies`);
       setCompaniesPanel(data);
       const rowAfter = data.companies?.find((c) => c.collect_index === collectIndex);
-      if (rowAfter?.contact_status === "none" && merged === 0) {
+      if (
+        (rowAfter?.contact_status === "none" || rowAfter?.contact_status === "no_email") &&
+        merged === 0
+      ) {
         setCompanyFindUnavailable((prev) => ({ ...prev, [collectIndex]: true }));
       }
       if (rowAfter?.contact_status === "found") {
@@ -682,8 +791,75 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const loadRunDetails = async (runId) => {
+  /** Sequential POST /companies/retry-find for «Not found» or «no email» rows (excludes Not available). */
+  const retryAllCompanyFindNotFound = async (runId) => {
     if (!runId) return;
+    setError("");
+    setCompanyRetryAllLoading(true);
+    let unavailableAcc = { ...companyFindUnavailable };
+    try {
+      for (let safety = 0; safety < 500; safety++) {
+        const data = await api(`/runs/${runId}/companies`);
+        setCompaniesPanel(data);
+        const row = data.companies?.find(
+          (c) =>
+            (c.contact_status === "none" || c.contact_status === "no_email") &&
+            !unavailableAcc[c.collect_index],
+        );
+        if (!row) break;
+
+        const collectIndex = row.collect_index;
+        setCompanyRetryLoading((prev) => ({ ...prev, [collectIndex]: true }));
+        try {
+          const result = await api(`/runs/${runId}/companies/retry-find`, {
+            method: "POST",
+            body: { collect_index: collectIndex },
+            timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
+          });
+          const merged =
+            typeof result?.new_contacts_merged === "number"
+              ? result.new_contacts_merged
+              : typeof result?.newContactsMerged === "number"
+                ? result.newContactsMerged
+                : 0;
+          const dataAfter = await api(`/runs/${runId}/companies`);
+          setCompaniesPanel(dataAfter);
+          const rowAfter = dataAfter.companies?.find((c) => c.collect_index === collectIndex);
+          if (
+            (rowAfter?.contact_status === "none" || rowAfter?.contact_status === "no_email") &&
+            merged === 0
+          ) {
+            unavailableAcc = { ...unavailableAcc, [collectIndex]: true };
+            setCompanyFindUnavailable(unavailableAcc);
+          }
+          if (rowAfter?.contact_status === "found") {
+            setCompanyFindUnavailable((prev) => {
+              if (!prev[collectIndex]) return prev;
+              const next = { ...prev };
+              delete next[collectIndex];
+              unavailableAcc = next;
+              return next;
+            });
+          }
+        } catch (e) {
+          setUiError(setError, e);
+          break;
+        } finally {
+          setCompanyRetryLoading((prev) => {
+            const next = { ...prev };
+            delete next[collectIndex];
+            return next;
+          });
+        }
+      }
+      await loadRunDetails(runId);
+    } finally {
+      setCompanyRetryAllLoading(false);
+    }
+  };
+
+  const loadRunDetails = async (runId) => {
+    if (!runId) return null;
     try {
       const [run, stepsData, contactsData, draftsData, ws, assetsData, packetsData] = await Promise.all([
         api(`/runs/${runId}`),
@@ -701,10 +877,31 @@ export default function AiBizOsHumanUI() {
       setWorkspace(ws);
       setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
       setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
+      return ws;
     } catch (e) {
       setUiError(setError, e);
+      return null;
     }
   };
+
+  const loadContactAnalyzer = useCallback(async () => {
+    const rid = selectedRun?.id;
+    if (!rid) {
+      setAnalyzerRows([]);
+      return;
+    }
+    setAnalyzerBulkNote("");
+    setAnalyzerLoading(true);
+    try {
+      const data = await api(`/runs/${rid}/contact-analyzer`);
+      setAnalyzerRows(Array.isArray(data?.rows) ? data.rows : []);
+    } catch (e) {
+      setUiError(setError, e);
+      setAnalyzerRows([]);
+    } finally {
+      setAnalyzerLoading(false);
+    }
+  }, [selectedRun?.id]);
 
   useEffect(() => {
     if (!editingContact?.id) return;
@@ -725,6 +922,17 @@ export default function AiBizOsHumanUI() {
   useEffect(() => {
     if (mainNav === "drafts") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
+
+  useEffect(() => {
+    if (mainNav === "contact-analyzer" && selectedRun?.id) void loadContactAnalyzer();
+  }, [mainNav, selectedRun?.id, loadContactAnalyzer]);
+
+  useEffect(() => {
+    if (mainNav !== "contact-analyzer") return;
+    if (!gmailSendReady || contactsVisible.length === 0 || !selectedRun) {
+      setMainNav("runs");
+    }
+  }, [mainNav, gmailSendReady, contactsVisible.length, selectedRun]);
 
   useEffect(() => {
     try {
@@ -1014,7 +1222,24 @@ export default function AiBizOsHumanUI() {
       const pid = projectPk(selectedProject);
       await api(`/runs/${runId}/restart`, { method: "POST", timeoutMs: RESTART_RUN_TIMEOUT_MS });
       setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
-      await loadRunDetails(runId);
+      const ws = await loadRunDetails(runId);
+      if (ws) {
+        setRunsList((prev) =>
+          prev.map((r) =>
+            r.id !== runId
+              ? r
+              : {
+                  ...r,
+                  display_phase: ws.display_phase,
+                  companies_count: ws.setup_summary?.companies_collected ?? r.companies_count,
+                  contacts_count: ws.setup_summary?.contacts_found ?? r.contacts_count,
+                  emails_sent: ws.performance?.emails_sent ?? r.emails_sent,
+                  replies: ws.performance?.replies ?? r.replies,
+                  active_threads: ws.performance?.active_threads ?? r.active_threads,
+                },
+          ),
+        );
+      }
       void loadSetupIntegration();
     } catch (e) {
       setUiError(setError, e);
@@ -1176,6 +1401,91 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  const verifyContactAnalyzerOne = async (emailNormalized) => {
+    if (!selectedRun?.id) return;
+    const runId = selectedRun.id;
+    setAnalyzerBulkNote("");
+    setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: true }));
+    try {
+      setError("");
+      await api(`/runs/${runId}/contact-analyzer/verify`, {
+        method: "POST",
+        body: { email_normalized: emailNormalized },
+        timeoutMs: CONTACT_ANALYZER_VERIFY_ONE_TIMEOUT_MS,
+      });
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      try {
+        await loadContactAnalyzer();
+        await loadRunDetails(runId);
+      } catch {
+        /* refresh failed — user can reopen the tab */
+      }
+      setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: false }));
+    }
+  };
+
+  const importContactAnalyzerInbox = async (emailNormalized) => {
+    if (!selectedRun?.id) return;
+    const runId = selectedRun.id;
+    setAnalyzerBulkNote("");
+    setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: true }));
+    try {
+      setError("");
+      await api(`/runs/${runId}/contact-analyzer/import-inbox`, {
+        method: "POST",
+        body: { email_normalized: emailNormalized },
+        timeoutMs: CONTACT_ANALYZER_IMPORT_INBOX_TIMEOUT_MS,
+      });
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      try {
+        await loadContactAnalyzer();
+        await loadRunDetails(runId);
+      } catch {
+        /* ignore */
+      }
+      setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: false }));
+    }
+  };
+
+  const verifyContactAnalyzerAll = async () => {
+    if (!selectedRun?.id) return;
+    const runId = selectedRun.id;
+    setAnalyzerBulkBusy(true);
+    setAnalyzerBulkNote("");
+    let bulkNote = "";
+    try {
+      setError("");
+      const res = await api(`/runs/${runId}/contact-analyzer/verify-all`, {
+        method: "POST",
+        timeoutMs: CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS,
+      });
+      const n = res?.verified ?? 0;
+      const fails = Array.isArray(res?.failures) ? res.failures : [];
+      if (fails.length) {
+        bulkNote = `Verified ${n}. Issues: ${fails.map((f) => `${f.email}: ${f.error}`).join("; ")}`;
+      } else {
+        bulkNote = n > 0 ? `Verified ${n} address(es).` : "Nothing left to verify.";
+      }
+    } catch (e) {
+      setUiError(setError, e);
+      bulkNote =
+        "Request failed or timed out — refreshing the list. If verification finished on the server, statuses will appear below.";
+    } finally {
+      try {
+        await loadContactAnalyzer();
+        await loadRunDetails(runId);
+      } catch {
+        /* ignore */
+      }
+      setAnalyzerBulkNote(bulkNote);
+      setAnalyzerBulkBusy(false);
+    }
+  };
+
   const connectGmailOAuth = async () => {
     setGmailSetupBusy(true);
     setGmailSetupErr("");
@@ -1316,13 +1626,13 @@ export default function AiBizOsHumanUI() {
   };
 
   const contactsMatchingSearch = useMemo(() => {
-    return contacts.filter((c) => {
+    return contactsVisible.filter((c) => {
       const q = search.trim().toLowerCase();
       return (
         !q || [c.company, c.name, c.role, c.email].some((v) => (v || "").toLowerCase().includes(q))
       );
     });
-  }, [contacts, search]);
+  }, [contactsVisible, search]);
 
   const filteredDrafts = useMemo(() => {
     return drafts.filter((d) => {
@@ -1337,6 +1647,8 @@ export default function AiBizOsHumanUI() {
 
   const contactHasBadEmailHealth = (c) =>
     c.email_health === "dead_mailbox" || c.email_health === "bounced";
+
+  const contactHasEmail = (c) => Boolean((c?.email || "").trim());
 
   /** Stable key to group review cards by company (no backend merge). */
   const contactCompanyGroupKey = (c) => {
@@ -1391,11 +1703,14 @@ export default function AiBizOsHumanUI() {
     return m;
   }, [drafts]);
 
-  const approvedContactsReachable = contacts.filter(
-    (c) => ["approved", "edited"].includes(c.review_status) && !contactHasBadEmailHealth(c),
+  const approvedContactsReachable = contactsVisible.filter(
+    (c) =>
+      ["approved", "edited"].includes(c.review_status) &&
+      !contactHasBadEmailHealth(c) &&
+      contactHasEmail(c),
   ).length;
   const approvedDrafts = drafts.filter((d) => ["approved", "edited"].includes(d.review_status)).length;
-  const pendingContacts = contacts.filter((c) => c.review_status === "pending").length;
+  const pendingContacts = contactsVisible.filter((c) => c.review_status === "pending").length;
 
   const pending = contactsMatchingSearch.filter((c) => c.review_status === "pending");
   const approvedList = useMemo(() => {
@@ -1412,6 +1727,59 @@ export default function AiBizOsHumanUI() {
   const pendingGroups = useMemo(() => groupContactsByCompany(pending), [pending]);
   const approvedGroups = useMemo(() => groupContactsByCompany(approvedList), [approvedList]);
   const rejectedGroups = useMemo(() => groupContactsByCompany(rejectedList), [rejectedList]);
+
+  const companiesListForPage = companiesPanel?.companies;
+  const companiesPageCount = Math.max(
+    1,
+    Math.ceil((companiesListForPage?.length ?? 0) / WORKSPACE_TABLE_PAGE_SIZE),
+  );
+  const companiesPageSlice = useMemo(() => {
+    const list = companiesListForPage ?? [];
+    const start = (companiesPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
+    return list.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
+  }, [companiesListForPage, companiesPage]);
+
+  const contactsPendingPageCount = Math.max(1, Math.ceil(pendingGroups.length / WORKSPACE_TABLE_PAGE_SIZE));
+  const contactsApprovedPageCount = Math.max(1, Math.ceil(approvedGroups.length / WORKSPACE_TABLE_PAGE_SIZE));
+  const contactsRejectedPageCount = Math.max(1, Math.ceil(rejectedGroups.length / WORKSPACE_TABLE_PAGE_SIZE));
+
+  const pendingGroupsPage = useMemo(() => {
+    const start = (contactsPendingPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
+    return pendingGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
+  }, [pendingGroups, contactsPendingPage]);
+
+  const approvedGroupsPage = useMemo(() => {
+    const start = (contactsApprovedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
+    return approvedGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
+  }, [approvedGroups, contactsApprovedPage]);
+
+  const rejectedGroupsPage = useMemo(() => {
+    const start = (contactsRejectedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
+    return rejectedGroups.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
+  }, [rejectedGroups, contactsRejectedPage]);
+
+  useEffect(() => {
+    setCompaniesPage((p) => Math.min(Math.max(1, p), companiesPageCount));
+  }, [companiesPageCount, companiesListForPage]);
+
+  useEffect(() => {
+    setContactsPendingPage((p) => Math.min(Math.max(1, p), contactsPendingPageCount));
+  }, [contactsPendingPageCount, pendingGroups]);
+
+  useEffect(() => {
+    setContactsApprovedPage((p) => Math.min(Math.max(1, p), contactsApprovedPageCount));
+  }, [contactsApprovedPageCount, approvedGroups]);
+
+  useEffect(() => {
+    setContactsRejectedPage((p) => Math.min(Math.max(1, p), contactsRejectedPageCount));
+  }, [contactsRejectedPageCount, rejectedGroups]);
+
+  useEffect(() => {
+    setCompaniesPage(1);
+    setContactsPendingPage(1);
+    setContactsApprovedPage(1);
+    setContactsRejectedPage(1);
+  }, [selectedRun?.id, search]);
 
   const draftsPending = filteredDrafts.filter((d) => d.review_status === "pending");
   const draftsApprovedList = filteredDrafts.filter((d) =>
@@ -1567,6 +1935,7 @@ export default function AiBizOsHumanUI() {
     const isReplacement = contact.source_json?.source === "replacement_search";
     const badEmailHealth = contactHasBadEmailHealth(contact);
     const isDeadMailbox = contact.email_health === "dead_mailbox";
+    const hasEmail = contactHasEmail(contact);
     return (
       <div>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -1629,9 +1998,11 @@ export default function AiBizOsHumanUI() {
             ) : null}
             {isPending ? (
               <>
-                <Button size="sm" onClick={() => approveContact(contact.id)}>
-                  Approve
-                </Button>
+                {hasEmail ? (
+                  <Button size="sm" onClick={() => approveContact(contact.id)}>
+                    Approve
+                  </Button>
+                ) : null}
                 {!isDeadMailbox ? (
                   <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
                     Reject
@@ -1644,7 +2015,7 @@ export default function AiBizOsHumanUI() {
                 Reject
               </Button>
             ) : null}
-            {isRejected ? (
+            {isRejected && hasEmail ? (
               <Button size="sm" onClick={() => approveContact(contact.id)}>
                 Approve
               </Button>
@@ -2205,17 +2576,23 @@ export default function AiBizOsHumanUI() {
                           <span className="font-semibold text-foreground">
                             {workspace.setup_summary?.contacts_found ?? "—"}
                           </span>
-                          {typeof workspace.setup_summary?.contacts_found_distinct_companies === "number" ? (
-                            <>
-                              {" "}
-                              [{workspace.setup_summary.contacts_found_distinct_companies} companies]
-                            </>
-                          ) : null}
                         </li>
                         <li>
                           Contacts validated:{" "}
                           <span className="font-medium text-foreground">
                             {workspace.setup_summary?.contacts_validated ?? "—"}
+                          </span>
+                          {typeof workspace.setup_summary?.contacts_validated_distinct_companies === "number" ? (
+                            <>
+                              {" "}
+                              [{workspace.setup_summary.contacts_validated_distinct_companies} companies]
+                            </>
+                          ) : null}
+                        </li>
+                        <li>
+                          Contacts with no email:{" "}
+                          <span className="font-medium text-foreground">
+                            {workspace.setup_summary?.contacts_with_no_email ?? "—"}
                           </span>
                         </li>
                         <li>
@@ -2291,7 +2668,7 @@ export default function AiBizOsHumanUI() {
             ) : null}
 
             <div className="flex flex-wrap gap-1 rounded-2xl border-2 border-border bg-muted/20 p-1">
-              {MAIN_NAV.map((item) => (
+              {visibleMainNavItems.map((item) => (
                 <Button
                   key={item.value}
                   type="button"
@@ -2383,8 +2760,8 @@ export default function AiBizOsHumanUI() {
                     <div className="min-w-0 space-y-1.5">
                       <CardTitle>Companies</CardTitle>
                       <CardDescription>
-                        List from the collect step. Status compares each company to the find-contacts step: whether any
-                        matching contact row exists, search finished with none, or search is still in progress.
+                        List from the collect step. Status reflects find-contacts: match with at least one email,
+                        matches but no emails (Not available), no match (Not found), or search still in progress.
                       </CardDescription>
                       {companiesPanel?.collect_step_status != null || companiesPanel?.find_step_status != null ? (
                         <p className="text-xs text-muted-foreground">
@@ -2400,28 +2777,59 @@ export default function AiBizOsHumanUI() {
                         </p>
                       ) : null}
                     </div>
-                    {companiesPanel?.companies?.some((c) => c.contact_status === "pending") &&
-                    selectedRun &&
-                    !selectedRun.closed_at &&
-                    pendingRestart == null ? (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="shrink-0 self-start sm:mt-0.5"
-                        disabled={companiesLoading || continueCompanyFindLoading}
-                        onClick={() => void continueCompanyFindAllPending(selectedRun.id)}
-                      >
-                        {continueCompanyFindLoading ? (
-                          <>
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                            Searching…
-                          </>
-                        ) : (
-                          "Continue searching"
-                        )}
-                      </Button>
-                    ) : null}
+                    <div className="flex shrink-0 flex-col gap-2 self-start sm:mt-0.5 sm:items-end">
+                      {companiesPanel?.companies?.some((c) => c.contact_status === "pending") &&
+                      selectedRun &&
+                      !selectedRun.closed_at &&
+                      pendingRestart == null ? (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          disabled={companiesLoading || continueCompanyFindLoading}
+                          onClick={() => void continueCompanyFindAllPending(selectedRun.id)}
+                        >
+                          {continueCompanyFindLoading ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                              Searching…
+                            </>
+                          ) : (
+                            "Continue searching"
+                          )}
+                        </Button>
+                      ) : null}
+                      {companiesPanel?.companies?.some(
+                        (c) =>
+                          (c.contact_status === "none" || c.contact_status === "no_email") &&
+                          !companyFindUnavailable[c.collect_index],
+                      ) &&
+                      selectedRun &&
+                      !selectedRun.closed_at &&
+                      pendingRestart == null ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={
+                            companiesLoading ||
+                            continueCompanyFindLoading ||
+                            companyRetryAllLoading ||
+                            Object.keys(companyRetryLoading).length > 0
+                          }
+                          onClick={() => void retryAllCompanyFindNotFound(selectedRun.id)}
+                        >
+                          {companyRetryAllLoading ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                              Retrying all…
+                            </>
+                          ) : (
+                            "Retry all"
+                          )}
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -2441,7 +2849,7 @@ export default function AiBizOsHumanUI() {
                           <Badge variant="default" className="font-normal">
                             Contacts found
                           </Badge>
-                          <span>At least one person in find-contacts output matches this company.</span>
+                          <span>At least one matching person has a usable email in find-contacts output.</span>
                         </span>
                         <span className="inline-flex items-center gap-1.5">
                           <Badge variant="secondary" className="font-normal">
@@ -2454,8 +2862,8 @@ export default function AiBizOsHumanUI() {
                             Not available
                           </Badge>
                           <span>
-                            Retry returned no new contacts and there is still no matching row — further retries are
-                            hidden.
+                            Find returned people without emails, or retry added nothing — further retries are hidden
+                            for that row.
                           </span>
                         </span>
                         <span className="inline-flex items-center gap-1.5">
@@ -2475,13 +2883,17 @@ export default function AiBizOsHumanUI() {
                             </tr>
                           </thead>
                           <tbody>
-                            {companiesPanel.companies.map((row) => {
+                            {companiesPageSlice.map((row) => {
                               const st = row.contact_status;
                               const unavailable = !!companyFindUnavailable[row.collect_index];
                               const badge =
                                 st === "found" ? (
                                   <Badge variant="default" className="font-normal">
                                     Contacts found
+                                  </Badge>
+                                ) : st === "no_email" ? (
+                                  <Badge variant="destructive" className="font-normal">
+                                    Not available
                                   </Badge>
                                 ) : st === "none" && unavailable ? (
                                   <Badge variant="destructive" className="font-normal">
@@ -2501,7 +2913,7 @@ export default function AiBizOsHumanUI() {
                                 );
                               const retryingRow = !!companyRetryLoading[row.collect_index];
                               const canRetryCompanyFind =
-                                st === "none" &&
+                                (st === "none" || st === "no_email") &&
                                 !unavailable &&
                                 selectedRun &&
                                 !selectedRun.closed_at &&
@@ -2556,6 +2968,40 @@ export default function AiBizOsHumanUI() {
                           </tbody>
                         </table>
                       </div>
+                      {companiesListForPage && companiesListForPage.length > WORKSPACE_TABLE_PAGE_SIZE ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
+                          <span>
+                            {(companiesPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
+                            {Math.min(companiesPage * WORKSPACE_TABLE_PAGE_SIZE, companiesListForPage.length)} of{" "}
+                            {companiesListForPage.length}
+                          </span>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={companiesPage <= 1}
+                              onClick={() => setCompaniesPage((p) => Math.max(1, p - 1))}
+                            >
+                              Previous
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={companiesPage >= companiesPageCount}
+                              onClick={() => setCompaniesPage((p) => Math.min(companiesPageCount, p + 1))}
+                            >
+                              Next
+                            </Button>
+                          </div>
+                        </div>
+                      ) : companiesListForPage && companiesListForPage.length > 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          {companiesListForPage.length}{" "}
+                          {companiesListForPage.length === 1 ? "company" : "companies"} total.
+                        </p>
+                      ) : null}
                     </div>
                   )}
                 </CardContent>
@@ -2655,8 +3101,48 @@ export default function AiBizOsHumanUI() {
                           Pending ({pending.length})
                         </div>
                         <div className="grid gap-3">
-                          {pendingGroups.map((g) => renderContactGroupCard(g))}
+                          {pendingGroupsPage.map((g) => renderContactGroupCard(g))}
                         </div>
+                        {pendingGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
+                            <span>
+                              {(contactsPendingPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
+                              {Math.min(
+                                contactsPendingPage * WORKSPACE_TABLE_PAGE_SIZE,
+                                pendingGroups.length,
+                              )}{" "}
+                              of {pendingGroups.length}
+                            </span>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={contactsPendingPage <= 1}
+                                onClick={() => setContactsPendingPage((p) => Math.max(1, p - 1))}
+                              >
+                                Previous
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={contactsPendingPage >= contactsPendingPageCount}
+                                onClick={() =>
+                                  setContactsPendingPage((p) =>
+                                    Math.min(contactsPendingPageCount, p + 1),
+                                  )
+                                }
+                              >
+                                Next
+                              </Button>
+                            </div>
+                          </div>
+                        ) : pendingGroups.length > 0 ? (
+                          <p className="text-xs text-muted-foreground">
+                            {pendingGroups.length} group{pendingGroups.length === 1 ? "" : "s"} total.
+                          </p>
+                        ) : null}
                         {pending.length === 0 ? (
                           <div className="text-sm text-muted-foreground">
                             No pending contacts match your search — clear search or check Approved / Rejected.
@@ -2665,7 +3151,7 @@ export default function AiBizOsHumanUI() {
                       </div>
                     ) : null}
 
-                    {pendingContacts === 0 && contacts.length > 0 ? (
+                    {pendingContacts === 0 && contactsVisible.length > 0 ? (
                       <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-10 text-center">
                         <div className="text-lg font-medium">All contacts reviewed 🎉</div>
                         {selectedRun?.status === "needs_review" ? (
@@ -2699,8 +3185,48 @@ export default function AiBizOsHumanUI() {
                     <div className="space-y-3">
                       <div className="text-sm font-medium">Approved ({approvedContactsReachable})</div>
                       <div className="grid gap-3">
-                        {approvedGroups.map((g) => renderContactGroupCard(g))}
+                        {approvedGroupsPage.map((g) => renderContactGroupCard(g))}
                       </div>
+                      {approvedGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
+                          <span>
+                            {(contactsApprovedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
+                            {Math.min(
+                              contactsApprovedPage * WORKSPACE_TABLE_PAGE_SIZE,
+                              approvedGroups.length,
+                            )}{" "}
+                            of {approvedGroups.length}
+                          </span>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={contactsApprovedPage <= 1}
+                              onClick={() => setContactsApprovedPage((p) => Math.max(1, p - 1))}
+                            >
+                              Previous
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={contactsApprovedPage >= contactsApprovedPageCount}
+                              onClick={() =>
+                                setContactsApprovedPage((p) =>
+                                  Math.min(contactsApprovedPageCount, p + 1),
+                                )
+                              }
+                            >
+                              Next
+                            </Button>
+                          </div>
+                        </div>
+                      ) : approvedGroups.length > 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          {approvedGroups.length} group{approvedGroups.length === 1 ? "" : "s"} total.
+                        </p>
+                      ) : null}
                     </div>
 
                     {rejectedList.length > 0 ? (
@@ -2710,12 +3236,52 @@ export default function AiBizOsHumanUI() {
                           Rejected ({rejectedList.length})
                         </summary>
                         <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
-                          {rejectedGroups.map((g) => renderContactGroupCard(g))}
+                          {rejectedGroupsPage.map((g) => renderContactGroupCard(g))}
                         </div>
+                        {rejectedGroups.length > WORKSPACE_TABLE_PAGE_SIZE ? (
+                          <div className="flex flex-col gap-2 border-t border-border px-4 pb-4 pt-3 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
+                            <span>
+                              {(contactsRejectedPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
+                              {Math.min(
+                                contactsRejectedPage * WORKSPACE_TABLE_PAGE_SIZE,
+                                rejectedGroups.length,
+                              )}{" "}
+                              of {rejectedGroups.length}
+                            </span>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={contactsRejectedPage <= 1}
+                                onClick={() => setContactsRejectedPage((p) => Math.max(1, p - 1))}
+                              >
+                                Previous
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={contactsRejectedPage >= contactsRejectedPageCount}
+                                onClick={() =>
+                                  setContactsRejectedPage((p) =>
+                                    Math.min(contactsRejectedPageCount, p + 1),
+                                  )
+                                }
+                              >
+                                Next
+                              </Button>
+                            </div>
+                          </div>
+                        ) : rejectedGroups.length > 0 ? (
+                          <p className="px-4 pb-4 text-xs text-muted-foreground">
+                            {rejectedGroups.length} group{rejectedGroups.length === 1 ? "" : "s"} total.
+                          </p>
+                        ) : null}
                       </details>
                     ) : null}
 
-                    {contacts.length === 0 ? (
+                    {contactsVisible.length === 0 ? (
                       <div className="text-center text-sm text-muted-foreground">
                         No contacts for this run yet.
                       </div>
@@ -2788,7 +3354,197 @@ export default function AiBizOsHumanUI() {
             </Card>
             ) : null}
 
-            {!["runs", "contacts", "drafts", "companies"].includes(mainNav) && selectedRun?.id ? (
+            {mainNav === "contact-analyzer" && selectedRun?.id ? (
+              <Card className="rounded-2xl border-2 border-border shadow-none">
+                <CardHeader>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <CardTitle>Contact analyzer</CardTitle>
+                      <CardDescription>
+                        One row per unique email in this run. <strong>Verify</strong> runs a single Gmail search (to/from
+                        that address); results are stored and Gmail is not queried again for the same address.
+                      </CardDescription>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          !gmailSendReady ||
+                          analyzerBulkBusy ||
+                          analyzerLoading ||
+                          analyzerRows.filter((r) => r.gmail_history_status == null).length === 0
+                        }
+                        onClick={() => void verifyContactAnalyzerAll()}
+                      >
+                        {analyzerBulkBusy ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                            Verifying…
+                          </>
+                        ) : (
+                          "Verify all"
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {!gmailSendReady ? (
+                    <p className="text-sm text-muted-foreground">
+                      Connect Gmail first — this tool checks your connected mailbox.
+                    </p>
+                  ) : analyzerLoading ? (
+                    <p className="text-sm text-muted-foreground">Loading…</p>
+                  ) : analyzerRows.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No contacts with an email in this run.</p>
+                  ) : (
+                    <>
+                      {analyzerBulkNote ? (
+                        <p className="text-sm text-muted-foreground">{analyzerBulkNote}</p>
+                      ) : null}
+                      <div className="overflow-x-auto rounded-xl border-2 border-border">
+                        <table className="w-full min-w-[520px] text-left text-sm">
+                          <thead className="border-b border-border bg-muted/40 text-xs font-semibold text-muted-foreground">
+                            <tr>
+                              <th className="px-3 py-2">Email</th>
+                              <th
+                                className="px-3 py-2"
+                                aria-sort={analyzerGmailHistorySortDesc ? "descending" : "ascending"}
+                              >
+                                <button
+                                  type="button"
+                                  className="inline-flex max-w-full items-center gap-1 rounded-md text-left font-semibold text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  title={
+                                    analyzerGmailHistorySortDesc
+                                      ? "Gmail history: History detected first — click to sort the other way"
+                                      : "Gmail history: Not verified first — click to reverse order"
+                                  }
+                                  onClick={() => {
+                                    setAnalyzerGmailHistorySortDesc((d) => !d);
+                                    setAnalyzerPage(1);
+                                  }}
+                                >
+                                  Gmail history
+                                  {analyzerGmailHistorySortDesc ? (
+                                    <ArrowDownWideNarrow className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden />
+                                  ) : (
+                                    <ArrowUpNarrowWide className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden />
+                                  )}
+                                </button>
+                              </th>
+                              <th className="px-3 py-2 w-[120px]" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {analyzerRowsPage.map((row) => {
+                              const norm = row.email_normalized;
+                              const st = row.gmail_history_status;
+                              const pending = st == null;
+                              return (
+                                <tr key={norm} className="border-b border-border/80">
+                                  <td className="px-3 py-2 align-middle">
+                                    <span className="break-all font-medium">{row.email}</span>
+                                  </td>
+                                  <td className="px-3 py-2 align-middle">
+                                    {pending ? (
+                                      <Badge variant="secondary" className="font-normal">
+                                        Not verified
+                                      </Badge>
+                                    ) : st === "no_history" ? (
+                                      <Badge variant="outline" className="font-normal">
+                                        No history
+                                      </Badge>
+                                    ) : (
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <Badge className="bg-emerald-600 font-normal hover:bg-emerald-600">
+                                          History detected
+                                        </Badge>
+                                        {!row.gmail_inbox_imported_at ? (
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            className="h-7 gap-1 rounded-full border-border px-2.5 text-xs font-normal"
+                                            disabled={Boolean(analyzerRowBusy[norm]) || analyzerBulkBusy}
+                                            onClick={() => void importContactAnalyzerInbox(norm)}
+                                          >
+                                            {analyzerRowBusy[norm] ? (
+                                              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                                            ) : (
+                                              <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                                            )}
+                                            Import 6 months
+                                          </Button>
+                                        ) : null}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2 align-middle text-right">
+                                    {pending ? (
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        disabled={Boolean(analyzerRowBusy[norm]) || analyzerBulkBusy}
+                                        onClick={() => void verifyContactAnalyzerOne(norm)}
+                                      >
+                                        {analyzerRowBusy[norm] ? (
+                                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                        ) : (
+                                          "Verify"
+                                        )}
+                                      </Button>
+                                    ) : (
+                                      <span className="text-xs text-muted-foreground">—</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {analyzerRows.length > CONTACT_ANALYZER_PAGE_SIZE ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
+                          <span>
+                            {(analyzerPage - 1) * CONTACT_ANALYZER_PAGE_SIZE + 1}–
+                            {Math.min(analyzerPage * CONTACT_ANALYZER_PAGE_SIZE, analyzerRows.length)} of{" "}
+                            {analyzerRows.length}
+                          </span>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={analyzerPage <= 1}
+                              onClick={() => setAnalyzerPage((p) => Math.max(1, p - 1))}
+                            >
+                              Previous
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={analyzerPage >= analyzerPageCount}
+                              onClick={() => setAnalyzerPage((p) => Math.min(analyzerPageCount, p + 1))}
+                            >
+                              Next
+                            </Button>
+                          </div>
+                        </div>
+                      ) : analyzerRows.length > 0 ? (
+                        <p className="text-xs text-muted-foreground">{analyzerRows.length} address(es) total.</p>
+                      ) : null}
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {!["runs", "contacts", "drafts", "companies", "contact-analyzer"].includes(mainNav) &&
+            selectedRun?.id ? (
               <TrackingView
                 runId={selectedRun.id}
                 runSignatureHtml={selectedRun.sender_signature_html ?? ""}
@@ -2798,7 +3554,8 @@ export default function AiBizOsHumanUI() {
               />
             ) : null}
 
-            {!["runs", "contacts", "drafts", "companies"].includes(mainNav) && !selectedRun?.id ? (
+            {!["runs", "contacts", "drafts", "companies", "contact-analyzer"].includes(mainNav) &&
+            !selectedRun?.id ? (
               <div className="rounded-2xl border-2 border-dashed border-border p-8 text-center text-sm text-muted-foreground">
                 Select a run to view this section.
               </div>

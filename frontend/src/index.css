@@ -125,3 +125,14 @@
 .email-draft-html-preview h3 {
   font-size: 1rem;
 }
+
+/* Tracking: sanitized thread message HTML — ignore sender colors; images stripped in DOMPurify */
+.email-thread-body {
+  color: hsl(var(--foreground));
+}
+.email-thread-body * {
+  color: inherit !important;
+}
+.email-thread-body a {
+  color: hsl(var(--primary)) !important;
+}

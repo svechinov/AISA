@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run
 from app.services.llm_gateway import generate_json
+from app.utils.contact_identity import contact_identity_key_from_dict
 from app.services.prompt_builder import build_prompt
 from app.services.run_context_service import build_find_contacts_task
 from app.services.rules_service import get_effective_rules_from_run
@@ -37,14 +38,39 @@ def find_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict
 
 def validate_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:
     contacts = step_input.get("contacts", [])
+    if not isinstance(contacts, list):
+        contacts = []
+
+    # Same natural person (name + company + website) may appear with and without email in one LLM batch.
+    # Do not emit invalid "no email" rows when that identity already has at least one email (order-independent).
+    identities_with_email: set[str] = set()
+    for contact in contacts:
+        if not isinstance(contact, dict):
+            continue
+        email = (contact.get("email") or "").strip().lower()
+        if email and "@" in email:
+            ik = contact_identity_key_from_dict(contact)
+            if ik:
+                identities_with_email.add(ik)
+
     valid_contacts = []
     invalid_contacts = []
     seen_emails: set[str] = set()
+    seen_no_email_identity: set[str] = set()
 
     for contact in contacts:
+        if not isinstance(contact, dict):
+            continue
         email = (contact.get("email") or "").strip().lower()
 
         if not email or "@" not in email:
+            ik = contact_identity_key_from_dict(contact)
+            if ik and ik in identities_with_email:
+                continue
+            if ik and ik in seen_no_email_identity:
+                continue
+            if ik:
+                seen_no_email_identity.add(ik)
             contact["status"] = "invalid"
             invalid_contacts.append(contact)
             continue

@@ -61,15 +61,12 @@ def _canonical_company_key_from_contact_row(c: dict) -> str | None:
     return f"{co}\x1f{w}"
 
 
-def _live_distinct_companies_in_find_contacts(db: Session, run_id: int) -> int:
-    st = get_step_by_run_and_name(db, run_id, "find_contacts")
-    if not st:
-        return 0
-    contacts = (st.output_json or {}).get("contacts")
-    if not isinstance(contacts, list):
-        return 0
-    keys = {k for c in contacts if (k := _canonical_company_key_from_contact_row(c)) is not None}
-    return len(keys)
+def _canonical_company_key_from_orm_contact(c) -> str | None:
+    co = _norm(c.company or "")
+    w = _strip_url(c.website or "")
+    if not co and not w:
+        return None
+    return f"{co}\x1f{w}"
 
 
 def _live_valid_contact_count(db: Session, run_id: int) -> int:
@@ -80,15 +77,66 @@ def _live_valid_contact_count(db: Session, run_id: int) -> int:
     return len(v) if isinstance(v, list) else 0
 
 
-def _live_validated_total_count(db: Session, run_id: int) -> int:
+def _contact_row_has_email(row: dict) -> bool:
+    return isinstance(row, dict) and bool(str(row.get("email") or "").strip())
+
+
+def _live_validated_step_count_with_email(db: Session, run_id: int) -> int | None:
+    """validate_contacts JSON lists — only rows with a non-empty email (no-email ≠ validated for summary)."""
     st = get_step_by_run_and_name(db, run_id, "validate_contacts")
-    if st and isinstance(st.output_json, dict):
-        v = st.output_json.get("valid_contacts")
-        i = st.output_json.get("invalid_contacts")
-        if isinstance(v, list) and isinstance(i, list):
-            return len(v) + len(i)
-    summary = get_run_summary(db, run_id)
-    return summary["valid_contacts"] + summary["invalid_contacts"]
+    if not st or not isinstance(st.output_json, dict):
+        return None
+    v = st.output_json.get("valid_contacts")
+    i = st.output_json.get("invalid_contacts")
+    if not isinstance(v, list) or not isinstance(i, list):
+        return None
+    return (
+        sum(1 for x in v if _contact_row_has_email(x))
+        + sum(1 for x in i if _contact_row_has_email(x))
+    )
+
+
+def _count_db_contacts_valid_or_invalid_with_email(db: Session, run_id: int) -> int:
+    contacts = list_contacts_by_run(db, run_id)
+    return sum(
+        1
+        for c in contacts
+        if c.status in ("valid", "invalid") and (c.email or "").strip()
+    )
+
+
+def _count_db_contacts_no_email(db: Session, run_id: int) -> int:
+    contacts = list_contacts_by_run(db, run_id)
+    return sum(1 for c in contacts if not (c.email or "").strip())
+
+
+def _live_distinct_companies_validated_with_email_step(db: Session, run_id: int) -> int | None:
+    """Distinct companies among valid+invalid rows in validate output that have an email."""
+    st = get_step_by_run_and_name(db, run_id, "validate_contacts")
+    if not st or not isinstance(st.output_json, dict):
+        return None
+    v = st.output_json.get("valid_contacts")
+    i = st.output_json.get("invalid_contacts")
+    if not isinstance(v, list) or not isinstance(i, list):
+        return None
+    keys: set[str] = set()
+    for row in (*v, *i):
+        if not isinstance(row, dict) or not _contact_row_has_email(row):
+            continue
+        if k := _canonical_company_key_from_contact_row(row):
+            keys.add(k)
+    return len(keys)
+
+
+def _count_db_distinct_companies_validated_with_email(db: Session, run_id: int) -> int:
+    contacts = list_contacts_by_run(db, run_id)
+    keys: set[str] = set()
+    for c in contacts:
+        if c.status not in ("valid", "invalid") or not (c.email or "").strip():
+            continue
+        if k := _canonical_company_key_from_orm_contact(c):
+            keys.add(k)
+    return len(keys)
 
 
 def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int, int]:
@@ -108,16 +156,19 @@ def get_run_setup_summary(db: Session, run_id: int) -> dict:
     n_co = _live_company_count(db, run_id)
     n_fi = _live_contact_count(db, run_id)
     contacts_found = max(n_fi, summary["contacts_found"])
-    contacts_validated = max(
-        _live_validated_total_count(db, run_id),
-        summary["valid_contacts"] + summary["invalid_contacts"],
-    )
-    contacts_found_distinct_companies = _live_distinct_companies_in_find_contacts(db, run_id)
+    step_validated_with_email = _live_validated_step_count_with_email(db, run_id)
+    db_validated_with_email = _count_db_contacts_valid_or_invalid_with_email(db, run_id)
+    contacts_validated = max(step_validated_with_email or 0, db_validated_with_email)
+    step_v_dc = _live_distinct_companies_validated_with_email_step(db, run_id)
+    db_v_dc = _count_db_distinct_companies_validated_with_email(db, run_id)
+    contacts_validated_distinct_companies = max(step_v_dc or 0, db_v_dc)
+    contacts_with_no_email = _count_db_contacts_no_email(db, run_id)
     return {
         "companies_collected": n_co,
         "contacts_found": contacts_found,
-        "contacts_found_distinct_companies": contacts_found_distinct_companies,
         "contacts_validated": contacts_validated,
+        "contacts_validated_distinct_companies": contacts_validated_distinct_companies,
+        "contacts_with_no_email": contacts_with_no_email,
         "contacts_approved": _count_contacts_approved_reachable(db, run_id),
     }
 

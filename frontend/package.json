@@ -1,7 +1,7 @@
 {
   "name": "ai-biz-os-frontend",
   "private": true,
-  "version": "2.3.0",
+  "version": "2.3.1",
   "type": "module",
   "scripts": {
     "dev": "bash scripts/detach-dev.sh",

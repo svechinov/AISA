@@ -1,3 +1,5 @@
+import logging
+
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -22,11 +24,14 @@ from app.services.gmail_oauth import (
     refresh_access_token,
     resolve_outbound_from_mime,
 )
+from app.services.contact_gmail_history_service import mark_history_detected_after_outbound_send
 from app.services.outbound_email_body import (
     append_additional_assets_section_to_email_html,
     append_signature_html_after,
     normalize_draft_body_for_email_html,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def send_one_draft(db: Session, draft_id: int) -> dict:
@@ -123,6 +128,15 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
         )
 
         touch_email_thread(db, thread)
+
+        if (result.get("provider") or "").strip().lower() == "gmail":
+            try:
+                mark_history_detected_after_outbound_send(db, draft.run_id, draft.to_email)
+            except Exception:
+                _log.exception(
+                    "post-send: mark_history_detected_after_outbound_send (draft_id=%s)",
+                    draft.id,
+                )
 
         return {
             "draft_id": draft.id,

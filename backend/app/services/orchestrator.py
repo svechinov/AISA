@@ -11,6 +11,7 @@ from app.repositories.step_repo import (
     update_step_progress,
 )
 from app.services.contact_persistence_service import persist_validated_contacts
+from app.utils.contact_identity import contact_identity_key_from_dict
 from app.services.email_draft_persistence_service import persist_generated_emails
 from app.services.run_context_service import build_collect_companies_input_for_round
 from app.services.workflow_registry import WORKFLOWS
@@ -66,12 +67,23 @@ def _contact_email_norm(c: dict) -> str:
 
 
 def _merge_contacts(existing: list[dict], new_items: list) -> list[dict]:
-    """Append new contacts; skip when normalized email already present (ignore company spelling drift)."""
+    """Append new contacts; dedupe by email, or by name+company+website when email is missing."""
     seen_emails: set[str] = set()
+    seen_no_email_id: set[str] = set()
+    identities_with_email: set[str] = set()
     for c in existing:
+        if not isinstance(c, dict):
+            continue
         em = _contact_email_norm(c)
         if em and "@" in em:
             seen_emails.add(em)
+            ik = contact_identity_key_from_dict(c)
+            if ik:
+                identities_with_email.add(ik)
+            continue
+        ik = contact_identity_key_from_dict(c)
+        if ik:
+            seen_no_email_id.add(ik)
     out = list(existing)
     for c in new_items:
         if not isinstance(c, dict):
@@ -81,8 +93,43 @@ def _merge_contacts(existing: list[dict], new_items: list) -> list[dict]:
             if em in seen_emails:
                 continue
             seen_emails.add(em)
+            ik = contact_identity_key_from_dict(c)
+            if ik:
+                identities_with_email.add(ik)
+            out.append(c)
+            continue
+        ik = contact_identity_key_from_dict(c)
+        if ik and ik in identities_with_email:
+            continue
+        if ik and ik in seen_no_email_id:
+            continue
+        if ik:
+            seen_no_email_id.add(ik)
         out.append(c)
-    return out
+
+    # Drop accumulated no-email rows once the same person (name+company+website) has an email.
+    iw: set[str] = set()
+    for c in out:
+        if not isinstance(c, dict):
+            continue
+        em = _contact_email_norm(c)
+        if em and "@" in em:
+            ik = contact_identity_key_from_dict(c)
+            if ik:
+                iw.add(ik)
+    cleaned: list[dict] = []
+    for c in out:
+        if not isinstance(c, dict):
+            continue
+        em = _contact_email_norm(c)
+        if em and "@" in em:
+            cleaned.append(c)
+            continue
+        ik = contact_identity_key_from_dict(c)
+        if ik and ik in iw:
+            continue
+        cleaned.append(c)
+    return cleaned
 
 
 def _dicts_from_step_output(step, key: str) -> list[dict]:

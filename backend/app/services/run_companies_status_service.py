@@ -40,17 +40,23 @@ def _contact_matches_company(contact: dict, company_keys: set[str]) -> bool:
     return bool(_entity_keys(contact) & company_keys)
 
 
+def _contact_has_usable_email(contact: dict) -> bool:
+    em = str(contact.get("email") or "").strip()
+    return bool(em and "@" in em)
+
+
 class CompanyStatusRow(TypedDict):
     collect_index: int
     name: str
     website: str
-    contact_status: Literal["found", "none", "pending"]
+    contact_status: Literal["found", "none", "pending", "no_email"]
 
 
 def get_run_companies_with_status(db: Session, run_id: int) -> dict:
     """
     contact_status:
-    - found: at least one contact in find_contacts output matches this company
+    - found: at least one matching contact has a usable email
+    - no_email: find completed; matching contacts exist but none have an email (UI: «Not available»)
     - none: find_contacts step completed and no matching contact
     - pending: find not finished yet (or not started), so we may still search
     """
@@ -74,11 +80,17 @@ def get_run_companies_with_status(db: Session, run_id: int) -> dict:
         name = str(co.get("name") or "").strip() or f"Company {i + 1}"
         website = str(co.get("website") or "").strip()
         ckeys = _entity_keys(co)
-        has_contact = any(
-            isinstance(ct, dict) and _contact_matches_company(ct, ckeys) for ct in raw_contacts
-        )
-        if has_contact:
-            status: Literal["found", "none", "pending"] = "found"
+        matching = [
+            ct
+            for ct in raw_contacts
+            if isinstance(ct, dict) and _contact_matches_company(ct, ckeys)
+        ]
+        has_match = bool(matching)
+        has_email = any(_contact_has_usable_email(ct) for ct in matching)
+        if has_email:
+            status: Literal["found", "none", "pending", "no_email"] = "found"
+        elif has_match and find_completed:
+            status = "no_email"
         elif find_completed:
             status = "none"
         else:
