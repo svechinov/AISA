@@ -70,6 +70,14 @@ const API_BASE =
       ? "/api"
       : "http://127.0.0.1:8000";
 
+/** Background refresh while Tracking is mounted — gentler than 3s to avoid piling up with Human UI polls. */
+const TRACKING_POLL_MS_ACTIVE = 10_000;
+const TRACKING_POLL_MS_DEFAULT = 15_000;
+
+function trackingPollIntervalMs(displayPhase) {
+  return displayPhase === "Active" ? TRACKING_POLL_MS_ACTIVE : TRACKING_POLL_MS_DEFAULT;
+}
+
 const THREAD_CLASS_LABELS = {
   interested: "Interested",
   not_interested: "Not interested",
@@ -253,6 +261,8 @@ export default function TrackingView({
   onActiveTabChange,
   singleTabMode = false,
   onRunWorkspaceRefresh,
+  /** From workspace / run card: Preparing | Ready | Active | Closed — tighter poll only when Active. */
+  workspaceDisplayPhase,
   /** From GET /setup/status — R2 env complete for POST /assets/upload */
   cdnR2UploadReady = false,
 }) {
@@ -439,9 +449,13 @@ export default function TrackingView({
       return;
     }
     void load();
-    const i = setInterval(() => void load(), 3000);
+    const pollMs = trackingPollIntervalMs(workspaceDisplayPhase);
+    const i = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void load();
+    }, pollMs);
     return () => clearInterval(i);
-  }, [runId, load]);
+  }, [runId, load, workspaceDisplayPhase]);
 
   useEffect(() => {
     if (threadModalId == null) {

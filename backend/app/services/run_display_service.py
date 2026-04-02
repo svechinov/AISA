@@ -289,6 +289,135 @@ def get_run_display_phase(db: Session, run) -> str:
     return "Preparing"
 
 
+def setup_state_message_from_phase(phase: str) -> str:
+    if phase == "Ready":
+        return "This run is ready for outreach"
+    if phase in ("Active", "Closed"):
+        return "Run setup is complete"
+    return "Run setup is in progress"
+
+
+def get_run_display_phase_lite(db: Session, run) -> str:
+    """Same labels as get_run_display_phase; uses COUNT queries only (no full run summary)."""
+    if run.closed_at is not None:
+        return "Closed"
+    if run.status == "drafts_ready":
+        return "Ready"
+    rid = run.id
+    n_draft_sent = (
+        db.query(func.count())
+        .select_from(EmailDraft)
+        .filter(EmailDraft.run_id == rid, EmailDraft.status == "sent")
+        .scalar()
+        or 0
+    )
+    if int(n_draft_sent) > 0:
+        return "Active"
+    n_ev_sent = (
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == rid, EmailEvent.event_type == "sent")
+        .scalar()
+        or 0
+    )
+    if int(n_ev_sent) > 0:
+        return "Active"
+    return "Preparing"
+
+
+def get_run_performance_lite(db: Session, run_id: int) -> dict:
+    """Same keys as get_run_performance_rows; COUNT-based (no get_run_summary)."""
+    drafts_sent = int(
+        db.query(func.count())
+        .select_from(EmailDraft)
+        .filter(EmailDraft.run_id == run_id, EmailDraft.status == "sent")
+        .scalar()
+        or 0
+    )
+    events_replied = int(
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "replied")
+        .scalar()
+        or 0
+    )
+    threads_interested = int(
+        db.query(func.count())
+        .select_from(EmailThread)
+        .filter(EmailThread.run_id == run_id, EmailThread.classification == "interested")
+        .scalar()
+        or 0
+    )
+    threads_need_info = int(
+        db.query(func.count())
+        .select_from(EmailThread)
+        .filter(EmailThread.run_id == run_id, EmailThread.classification == "need_more_info")
+        .scalar()
+        or 0
+    )
+    ev_bounced = int(
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "bounced")
+        .scalar()
+        or 0
+    )
+    ev_dead = int(
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "dead_mailbox")
+        .scalar()
+        or 0
+    )
+    active_threads = _active_threads_count_for_performance(db, run_id)
+    return {
+        "emails_sent": drafts_sent,
+        "emails_sent_24h": count_emails_sent_in_last_hours(db, run_id, hours=24),
+        "replies": events_replied,
+        "active_threads": active_threads,
+        "interested": threads_interested,
+        "need_more_info": threads_need_info,
+        "dead_mailboxes": ev_dead,
+        "bounced": ev_bounced,
+    }
+
+
+def get_conversations_lite(db: Session, run_id: int) -> dict:
+    """Same keys as get_conversations_snapshot; avoids get_run_summary."""
+    active_threads = _active_threads_count_for_performance(db, run_id)
+    replies_received = int(
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "replied")
+        .scalar()
+        or 0
+    )
+    reply_drafts = int(
+        db.query(func.count()).select_from(ReplyDraft).filter(ReplyDraft.run_id == run_id).scalar() or 0
+    )
+    reminders = list_reminders_by_run(db, run_id)
+    now = datetime.utcnow()
+    reminders_due, reminders_active = _reminder_due_and_active_counts(reminders, now)
+    return {
+        "active_threads": active_threads,
+        "replies_received": replies_received,
+        "reply_drafts": reply_drafts,
+        "reminders_active": reminders_active,
+        "reminders_due": reminders_due,
+    }
+
+
+def build_run_workspace_lite(db: Session, run) -> dict:
+    phase = get_run_display_phase_lite(db, run)
+    rid = run.id
+    return {
+        "display_phase": phase,
+        "setup_state_message": setup_state_message_from_phase(phase),
+        "performance": get_run_performance_lite(db, rid),
+        "conversations": get_conversations_lite(db, rid),
+    }
+
+
 def get_conversations_snapshot(db: Session, run_id: int) -> dict:
     summary = get_run_summary(db, run_id)
     active_threads = _active_threads_count_for_performance(db, run_id)

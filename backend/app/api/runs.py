@@ -30,6 +30,7 @@ from app.schemas.run import (
     RunRead,
     RunSignaturePatch,
     RunStart,
+    RunWorkspaceLiteRead,
     RunWorkspaceRead,
 )
 from app.services.orchestrator import continue_workflow_after_review, run_workflow
@@ -43,6 +44,7 @@ from app.services.retry_company_find_service import (
 )
 from app.services.run_companies_status_service import get_run_companies_with_status
 from app.services.run_display_service import (
+    build_run_workspace_lite,
     enrich_run_for_card,
     get_conversations_snapshot,
     get_run_display_phase,
@@ -81,6 +83,15 @@ def run_workspace_route(run_id: int, db: Session = Depends(get_db)):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return _workspace(db, run)
+
+
+@router.get("/{run_id}/workspace-lite", response_model=RunWorkspaceLiteRead)
+def run_workspace_lite_route(run_id: int, db: Session = Depends(get_db)):
+    """Lighter dashboard refresh: phase + counters only (no setup steps / setup summary block)."""
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return RunWorkspaceLiteRead(**build_run_workspace_lite(db, run))
 
 
 @router.get("/{run_id}/companies", response_model=RunCompaniesRead)

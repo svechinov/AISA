@@ -2,7 +2,7 @@
 
 Документ для следующей итерации разработки. Репозиторий: `ai-biz-os/` (backend + frontend + `infra/`).
 
-**Обновление:** март 2026 · актуальная версия фронтенда — **`frontend/package.json` v2.5.3** (смотрите файл при handoff; в тексте ниже для истории сохранены §12–13 под 2.1.4 / 2.4.0). Продуктовая линия «не только VOD» (§1–6) без изменений по смыслу. **Расширенный технический handoff для ИИ и команды:** **§14** (структура, дерево процессов, потоки данных, ускорение). История UI: **§12** → **§13**.
+**Обновление:** март 2026 · актуальная версия фронтенда — **`frontend/package.json` v2.6.0** (релиз: workspace-lite + индексы БД, см. §14.7.1; в тексте ниже для истории сохранены §12–13 под 2.1.4 / 2.4.0). Продуктовая линия «не только VOD» (§1–6) без изменений по смыслу. **Расширенный технический handoff для ИИ и команды:** **§14** (структура, дерево процессов, потоки данных, ускорение). История UI: **§12** → **§13**.
 
 **Заявленная цель владельца продукта:** система не должна восприниматься и работать как узкоспециализированный инструмент поиска VOD-площадок. Нужна **вертикально-независимая** логика аутриха: разные отрасли (страхование, фестивали, производство игрушек и т.д.) — **разные формулировки задач, роли контактов, шаблоны писем**, без жёсткой привязки к «видеоплатформам» в коде и UX.
 
@@ -401,6 +401,12 @@ git show v2.4.0 --stat
 - [ ] **Threads / Events:** вкладки и счётчики согласованы с фильтрами списка; Events без старого dropdown.
 - [ ] Прокси фронта **`VITE_API_PROXY_TARGET`** совпадает с портом живого backend.
 
+### 13.8 Релиз **2.6.0** (март 2026) — ускорение Human UI
+
+- **Backend:** `GET /runs/{id}/workspace-lite`, составные индексы в **`init_db._ensure_run_scoped_performance_indexes()`** (применяются при старте backend).
+- **Frontend:** поллинг merge’ит lite в полный workspace; в фазе Preparing остаётся полный `/workspace`; на lite-пути нет **`/sending/global-performance`**.
+- Подробности и перечень индексов: **§14.7.1**. Тег релиза: **`v2.6.0`**.
+
 ---
 
 ---
@@ -496,12 +502,14 @@ ai-biz-os/
             │     GET /steps/run/:id
             │     GET /contacts/run/:id
             │     GET /email-drafts/run/:id
-            │     GET /runs/:id/workspace   ← агрегат display/setup/performance/conversations
+            │     GET /runs/:id/workspace    ← полный агрегат (смена run, явный refresh, фон после PATCH)
+            │        или GET /runs/:id/workspace-lite  ← облегчённый (poll в фазах Ready/Active/Closed)
             │     GET /assets               ← глобальная библиотека (не scoped на run)
             │     GET /asset-packets/run/:id
-            │     затем GET /sending/global-performance
+            │     затем GET /sending/global-performance (не вызывается на пути workspace-lite)
             ├─ Периодический poll loadRunDetails (интервал зависит от workspace.display_phase):
             │     Active ~8s, Ready ~20s, Preparing ~45s, иначе ~60s; пауза если вкладка hidden
+            │     Preparing → полный /workspace (актуальные setup_summary/setup_steps); иначе → /workspace-lite + merge в state
             └─ Навигация в TrackingView
                  └─ load() по интервалу 3s (пока компонент смонтирован)
 [Backend: uvicorn / Docker]
@@ -539,7 +547,7 @@ ai-biz-os/
 | Смена проекта | `GET /runs/project/:projectId`, затем `loadRunDetails` для выбранного run |
 | Любое «освежить run» | полный бандл как в §14.3 |
 | Список карточек run | `enrich_run_for_card` на каждый run: несколько запросов/агрегаций на run (см. `run_display_service.py`) |
-| Workspace strip в шапке | данные приходят из `GET /runs/:id/workspace`: внутри `_workspace` вызываются `get_run_display_phase`, `get_run_setup_summary`, `setup_steps_for_run`, `get_run_performance_rows`, `get_conversations_snapshot` — каждая тянет данные из БД |
+| Workspace strip в шапке | **`GET /runs/:id/workspace`** (полный): `get_run_display_phase`, `get_run_setup_summary`, `setup_steps_for_run`, `get_run_performance_rows`, `get_conversations_snapshot`. **`GET /runs/:id/workspace-lite`**: `build_run_workspace_lite` — фаза, message, performance и conversations без **`get_run_summary`** и без **`setup_steps_for_run`**; клиент мерджит lite в предыдущий полный объект (`mergeWorkspaceLiteInto`), чтобы setup-карточка не обнулялась |
 | Tracking | отдельные эндпоинты (threads, events, reply drafts, …) по реализации `TrackingView.load()` |
 | Gmail | фон: `sync_gmail_all_open_runs`; ручной: `gmail_sync` router |
 
@@ -565,9 +573,9 @@ ai-biz-os/
 
 - Свести **N запросов в 1–2**: один «run dashboard」 read-model (материализованное представление или кэш по `run_id`, инвалидируемый при изменении контактов/драфтов/событий).
 - Облегчить **`GET /runs/project/{id}`**: один запрос с JOIN/подзапросами или batch `get_run_summary` для списка id вместо `enrich_run_for_card` per row.
-- Разделить **`/workspace`** на лёгкий (фаза + короткий summary) и тяжёлый (по кнопке Refresh / реже).
+- Разделить **`/workspace`** на лёгкий и тяжёлый — **см. §14.7.1 (п.4, внедрено):** `workspace-lite` + полный путь на Preparing и после действий пользователя.
 - **`/assets`:** пагинация, фильтр по проекту/run если продуктово допустимо; или ETag/`If-None-Match`.
-- Индексы на **foreign keys** и частые фильтры: `run_id` на contacts, drafts, events, threads, steps; `status`, `sent_at`; проверить планы для `get_run_summary`.
+- Индексы на **foreign keys** и частые фильтры — **см. §14.7.1 (п.5, внедрено):** составные индексы под типовые `run_id + статус/тип` и `project_id + id` для списка run.
 - Пул соединений SQLAlchemy и **не держать** долгие транзакции на время Gmail HTTP.
 - Вынести **Gmail sync** в отдельный worker-процесс/Celery (если появится), чтобы не делить event loop и пул с API.
 
@@ -583,6 +591,35 @@ ai-biz-os/
 - Postgres на том же хосте, что API, в dev; в prod — ближе к приложению, SSD.
 - Connection pooling (PgBouncer) при множествах воркеров uvicorn.
 
+### 14.7.1 Внедрено: пункты 4–5 плана ускорения (март 2026)
+
+**П.4 — разделение workspace (lite / full).**
+
+| Слой | Детали |
+|------|--------|
+| API | `GET /runs/{run_id}/workspace-lite` → схема **`RunWorkspaceLiteRead`** (`schemas/run.py`): `display_phase`, `setup_state_message`, `performance`, `conversations` — без полного merge **`RunRead`** и без **`get_run_summary`** / **`setup_steps_for_run`** в этом ответе. |
+| Сервис | `run_display_service.py`: **`build_run_workspace_lite`**, **`get_run_display_phase_lite`**, **`get_run_performance_lite`**, **`get_conversations_lite`**, вспомогательные COUNT-запросы и **`setup_state_message_from_phase`**. |
+| Frontend | `AiBizOsHumanUI.jsx`: **`mergeWorkspaceLiteInto`**, опция **`loadRunDetails(..., { workspace: "lite" \| "full" })`**; полный bundle по умолчанию (**`refreshRunDetailsInBackground`**, смена run и т.д.). |
+| Poll | Интервалы без изменений по смыслу §14.3. **Preparing** — каждый тик **полный** `/workspace` (свежие **setup_summary** / **setup_steps**). **Ready / Active / Closed** — **`/workspace-lite`**; **`GET /sending/global-performance`** на этом пути не вызывается. |
+
+**П.5 — составные индексы под run-scoped запросы.**
+
+При старте приложения **`init_db.ensure_schema()`** вызывает **`_ensure_run_scoped_performance_indexes()`** (файл **`backend/app/init_db.py`**). Индексы создаются идемпотентно (`CREATE INDEX IF NOT EXISTS`), только если таблица уже есть:
+
+| Имя | Таблица | Колонки |
+|-----|---------|---------|
+| `ix_email_drafts_run_status_sent_at` | `email_drafts` | `(run_id, status, sent_at)` |
+| `ix_email_drafts_run_review_status` | `email_drafts` | `(run_id, review_status)` |
+| `ix_reply_drafts_run_status_sent_at` | `reply_drafts` | `(run_id, status, sent_at)` |
+| `ix_email_events_run_event_type` | `email_events` | `(run_id, event_type)` |
+| `ix_email_threads_run_classification` | `email_threads` | `(run_id, classification)` |
+| `ix_steps_run_step_name` | `steps` | `(run_id, step_name)` |
+| `ix_contacts_run_review_status` | `contacts` | `(run_id, review_status)` |
+| `ix_contacts_run_status` | `contacts` | `(run_id, status)` |
+| `ix_runs_project_id_id` | `runs` | `(project_id, id)` |
+
+Одиночные индексы на FK из моделей SQLAlchemy остаются; перечисленные индексы усиливают фильтры в **`run_display_service`**, репозиториях шагов/контактов/драфтов и выборку run по проекту.
+
 ### 14.8 Связь с продуктовыми разделами выше
 
 - Нейтрализация VOD и сценарии — по-прежнему **§1–6, §10–11**.
@@ -591,4 +628,4 @@ ai-biz-os/
 
 ---
 
-*Версия документа: март 2026 — добавлен **§14**; §12–13 сохраняют исторические номера релизов; актуальный фронт см. **`frontend/package.json`**. Синхронизируйте **`HANDOFF CURSOR.md`** при изменении схемы БД и потоков §14.*
+*Версия документа: март 2026 — **§14.7.1**: workspace-lite (п.4) и составные индексы (п.5); §12–13 сохраняют исторические номера релизов; актуальный фронт см. **`frontend/package.json`**. Синхронизируйте **`HANDOFF CURSOR.md`** при изменении схемы БД и потоков §14.*

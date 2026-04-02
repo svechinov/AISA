@@ -314,6 +314,32 @@ def _ensure_email_threads_classification_columns() -> None:
             conn.execute(text("ALTER TABLE email_threads ADD COLUMN classification_reason VARCHAR(500)"))
 
 
+def _ensure_run_scoped_performance_indexes() -> None:
+    """Composite indexes for frequent run-scoped filters (workspace lite, display counts, list runs).
+
+    Single-column FK indexes from models help point lookups; these cover multi-column predicates
+    from run_display_service, step_repo, contact/draft repos, and list_runs_by_project ordering.
+    """
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    specs: list[tuple[str, str, str]] = [
+        ("email_drafts", "ix_email_drafts_run_status_sent_at", "(run_id, status, sent_at)"),
+        ("email_drafts", "ix_email_drafts_run_review_status", "(run_id, review_status)"),
+        ("reply_drafts", "ix_reply_drafts_run_status_sent_at", "(run_id, status, sent_at)"),
+        ("email_events", "ix_email_events_run_event_type", "(run_id, event_type)"),
+        ("email_threads", "ix_email_threads_run_classification", "(run_id, classification)"),
+        ("steps", "ix_steps_run_step_name", "(run_id, step_name)"),
+        ("contacts", "ix_contacts_run_review_status", "(run_id, review_status)"),
+        ("contacts", "ix_contacts_run_status", "(run_id, status)"),
+        ("runs", "ix_runs_project_id_id", "(project_id, id)"),
+    ]
+    with engine.begin() as conn:
+        for table, ix_name, columns in specs:
+            if table not in tables:
+                continue
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {ix_name} ON {table} {columns}"))
+
+
 def ensure_schema() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_runs_metadata_columns()
@@ -329,6 +355,7 @@ def ensure_schema() -> None:
     _ensure_assets_extended_columns()
     _ensure_drafts_attached_asset_ids_columns()
     _ensure_asset_packets_reply_draft_id_unique()
+    _ensure_run_scoped_performance_indexes()
 
 
 def init_db():

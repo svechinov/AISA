@@ -466,6 +466,29 @@ function formatSetupIntegrationInformer(si) {
   return { llmPart, cdnPart };
 }
 
+/** Merge GET /runs/:id/workspace-lite into existing full workspace (poll path). */
+function mergeWorkspaceLiteInto(prevWorkspace, lite) {
+  if (!lite || typeof lite !== "object") return prevWorkspace;
+  if (!prevWorkspace || typeof prevWorkspace !== "object") return prevWorkspace;
+  return {
+    ...prevWorkspace,
+    display_phase: lite.display_phase ?? prevWorkspace.display_phase,
+    setup_state_message: lite.setup_state_message ?? prevWorkspace.setup_state_message,
+    performance: {
+      ...(prevWorkspace.performance && typeof prevWorkspace.performance === "object"
+        ? prevWorkspace.performance
+        : {}),
+      ...(lite.performance && typeof lite.performance === "object" ? lite.performance : {}),
+    },
+    conversations: {
+      ...(prevWorkspace.conversations && typeof prevWorkspace.conversations === "object"
+        ? prevWorkspace.conversations
+        : {}),
+      ...(lite.conversations && typeof lite.conversations === "object" ? lite.conversations : {}),
+    },
+  };
+}
+
 /** Job title for header + edit form: column `role`, else common keys in source_json (LLM / legacy). */
 function contactRoleFromPayload(contact) {
   if (!contact) return "";
@@ -976,7 +999,7 @@ export default function AiBizOsHumanUI() {
       const data = await api(`/runs/${runId}/companies`);
       setCompaniesPanel(data);
       setCompanyFindUnavailable({});
-      await loadRunDetails(runId);
+      refreshRunDetailsInBackground(runId);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1017,7 +1040,7 @@ export default function AiBizOsHumanUI() {
           return next;
         });
       }
-      await loadRunDetails(runId);
+      refreshRunDetailsInBackground(runId);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1090,7 +1113,7 @@ export default function AiBizOsHumanUI() {
           });
         }
       }
-      await loadRunDetails(runId);
+      refreshRunDetailsInBackground(runId);
     } finally {
       setCompanyRetryAllLoading(false);
     }
@@ -1099,6 +1122,7 @@ export default function AiBizOsHumanUI() {
   const loadRunDetails = async (runId, runRowHint, options = {}) => {
     if (!runId) return null;
     const requestTimeoutMs = options?.requestTimeoutMs ?? API_TIMEOUT_MS;
+    const workspaceLite = options?.workspace === "lite";
     // Background polls call this with the same run — do not clear hydration or Contacts/Drafts
     // flash back to snapshot placeholders until the request finishes.
     setRunDetailsHydratedId((prev) => (prev === runId ? prev : null));
@@ -1111,13 +1135,13 @@ export default function AiBizOsHumanUI() {
       setWorkspace(snapshotMergeWorkspaceFromRunCards(snapshotReadRunCards(runId), rowGuess));
     }
     try {
-      const [run, stepsData, contactsData, draftsData, ws, assetsData, packetsData] = await Promise.all([
+      const wsPath = workspaceLite ? `/runs/${runId}/workspace-lite` : `/runs/${runId}/workspace`;
+      const [run, stepsData, contactsData, draftsData, ws, packetsData] = await Promise.all([
         api(`/runs/${runId}`, { timeoutMs: requestTimeoutMs }),
         api(`/steps/run/${runId}`, { timeoutMs: requestTimeoutMs }),
         api(`/contacts/run/${runId}`, { timeoutMs: requestTimeoutMs }),
         api(`/email-drafts/run/${runId}`, { timeoutMs: requestTimeoutMs }),
-        api(`/runs/${runId}/workspace`, { timeoutMs: requestTimeoutMs }),
-        api(`/assets`, { timeoutMs: requestTimeoutMs }),
+        api(wsPath, { timeoutMs: requestTimeoutMs }),
         api(`/asset-packets/run/${runId}`, { timeoutMs: requestTimeoutMs }),
       ]);
       setSelectedRun(run);
@@ -1125,8 +1149,16 @@ export default function AiBizOsHumanUI() {
       setSteps(stepsData);
       setContacts(contactsData);
       setDrafts(draftsData);
-      setWorkspace(ws);
-      if (ws) snapshotWriteRunCards(runId, ws);
+      if (workspaceLite) {
+        setWorkspace((prev) => {
+          const merged = mergeWorkspaceLiteInto(prev, ws);
+          if (merged) snapshotWriteRunCards(runId, merged);
+          return merged;
+        });
+      } else {
+        setWorkspace(ws);
+        if (ws) snapshotWriteRunCards(runId, ws);
+      }
       try {
         const cp = (Array.isArray(contactsData) ? contactsData : [])
           .slice(0, MAX_CONTACTS_PANEL_LITE)
@@ -1140,17 +1172,18 @@ export default function AiBizOsHumanUI() {
         /* panel lite is best-effort */
       }
       setRunDetailsHydratedId(runId);
-      setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
       setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
-      try {
-        const tp = await api("/sending/global-performance", { timeoutMs: requestTimeoutMs });
-        setTotalPerformance({
-          emails_sent: Number(tp?.emails_sent) || 0,
-          emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
-        });
-      } catch (e) {
-        const msg = detailFromApiErrorMessage(e?.message || e);
-        console.warn("[Total performance] GET /sending/global-performance failed:", msg);
+      if (!workspaceLite) {
+        try {
+          const tp = await api("/sending/global-performance", { timeoutMs: requestTimeoutMs });
+          setTotalPerformance({
+            emails_sent: Number(tp?.emails_sent) || 0,
+            emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+          });
+        } catch (e) {
+          const msg = detailFromApiErrorMessage(e?.message || e);
+          console.warn("[Total performance] GET /sending/global-performance failed:", msg);
+        }
       }
       return ws;
     } catch (e) {
@@ -1159,6 +1192,24 @@ export default function AiBizOsHumanUI() {
       return null;
     }
   };
+
+  /** Full run bundle without blocking the UI (used after small PATCHes; same long timeouts as setup saves). */
+  const refreshRunDetailsInBackground = (runId) => {
+    if (!runId) return;
+    void loadRunDetails(runId, undefined, {
+      requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+    }).catch((e) => setUiError(setError, e));
+  };
+
+  /** Global asset library: not part of loadRunDetails — fetch when opening draft editor (and similar). */
+  const loadAssetsLibrary = useCallback(async () => {
+    try {
+      const assetsData = await api(`/assets`);
+      setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
+    } catch {
+      /* keep previous list if request fails */
+    }
+  }, []);
 
   const loadContactAnalyzer = useCallback(async () => {
     const rid = selectedRun?.id;
@@ -1225,6 +1276,12 @@ export default function AiBizOsHumanUI() {
   useEffect(() => {
     if (mainNav === "drafts") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
+
+  /** One-shot when entering Drafts (not on loadRunDetails poll) so preview labels resolve asset names. */
+  useEffect(() => {
+    if (mainNav !== "drafts" || !selectedRun?.id) return;
+    void loadAssetsLibrary();
+  }, [mainNav, selectedRun?.id, loadAssetsLibrary]);
 
   useEffect(() => {
     if (mainNav === "assets") void loadSetupIntegration();
@@ -1381,7 +1438,12 @@ export default function AiBizOsHumanUI() {
       phase === "Active" ? 8000 : phase === "Ready" ? 20000 : phase === "Preparing" ? 45000 : 60000;
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      void loadRunDetails(id);
+      // Preparing: full workspace keeps setup_summary / setup_steps in sync with the pipeline; other phases: cheap lite.
+      const useLite = phase != null && phase !== "Preparing";
+      void loadRunDetails(id, undefined, {
+        workspace: useLite ? "lite" : "full",
+        requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+      });
     }, ms);
     return () => clearInterval(interval);
   }, [selectedRun?.id, workspace?.display_phase]);
@@ -1569,7 +1631,7 @@ export default function AiBizOsHumanUI() {
     try {
       setNewRunUpdateInFlight(true);
       setError("");
-      await api(`/runs/${newRunBaseline.runId}/outreach`, {
+      const updatedRun = await api(`/runs/${newRunBaseline.runId}/outreach`, {
         method: "PATCH",
         body: {
           notes: newRunForm.notes.trim() || undefined,
@@ -1580,7 +1642,10 @@ export default function AiBizOsHumanUI() {
       setNewRunOpen(false);
       const pid = projectPk(selectedProject);
       setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
-      await loadRunDetails(newRunBaseline.runId);
+      setSelectedRun((prev) =>
+        prev && prev.id === updatedRun.id ? { ...prev, ...updatedRun } : prev,
+      );
+      refreshRunDetailsInBackground(newRunBaseline.runId);
       setNewRunForm({
         name: "",
         notes: "",
@@ -1609,7 +1674,7 @@ export default function AiBizOsHumanUI() {
         segment: seeded.segment.trim(),
         outreach_brief: seeded.outreach_brief.trim(),
       });
-      await loadRunDetails(run.id);
+      refreshRunDetailsInBackground(run.id);
       setNewRunOpen(true);
     } catch (e) {
       setUiError(setError, e);
@@ -1724,7 +1789,8 @@ export default function AiBizOsHumanUI() {
     try {
       setError("");
       const run = await api(`/runs/${selectedRun.id}/continue`, { method: "POST" });
-      await loadRunDetails(run.id);
+      setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
+      refreshRunDetailsInBackground(run.id);
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1733,31 +1799,27 @@ export default function AiBizOsHumanUI() {
   const approveContact = async (contactId) => {
     try {
       setError("");
-      const current = contacts.find((c) => c.id === contactId);
-      if (current?.review_status === "pending") {
-        setContacts((prev) =>
-          prev.map((c) => (c.id === contactId ? { ...c, review_status: "approved" } : c)),
-        );
-      }
-      await api(`/contacts/${contactId}/review`, {
+      const updated = await api(`/contacts/${contactId}/review`, {
         method: "PATCH",
         body: { review_status: "approved" },
       });
-      if (selectedRun) await loadRunDetails(selectedRun.id);
+      setContacts((prev) => prev.map((c) => (c.id === contactId ? { ...c, ...updated } : c)));
+      if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
-      if (selectedRun) await loadRunDetails(selectedRun.id);
+      if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
     }
   };
 
   const reviewContact = async (id, review_status) => {
     try {
       setError("");
-      await api(`/contacts/${id}/review`, {
+      const updated = await api(`/contacts/${id}/review`, {
         method: "PATCH",
         body: { review_status },
       });
-      await loadRunDetails(selectedRun.id);
+      setContacts((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1768,8 +1830,13 @@ export default function AiBizOsHumanUI() {
     setCreateDraftContactId(contactId);
     try {
       setError("");
-      await api(`/contacts/${contactId}/create-draft`, { method: "POST" });
-      await loadRunDetails(selectedRun.id);
+      const draft = await api(`/contacts/${contactId}/create-draft`, { method: "POST" });
+      setDrafts((prev) => {
+        const idx = prev.findIndex((d) => d.id === draft.id);
+        if (idx >= 0) return prev.map((d, i) => (i === idx ? { ...d, ...draft } : d));
+        return [...prev, draft];
+      });
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1790,11 +1857,12 @@ export default function AiBizOsHumanUI() {
       setError("");
       const body = { review_status };
       if (review_notes !== undefined) body.review_notes = review_notes;
-      await api(`/email-drafts/${id}/review`, {
+      const updated = await api(`/email-drafts/${id}/review`, {
         method: "PATCH",
         body,
       });
-      await loadRunDetails(selectedRun.id);
+      setDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, ...updated } : d)));
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1812,8 +1880,9 @@ export default function AiBizOsHumanUI() {
     setRegeneratingOutboundDraftIds((p) => ({ ...p, [idKey]: true }));
     try {
       setError("");
-      await api(`/email-drafts/${draftId}/regenerate`, { method: "POST" });
-      await loadRunDetails(selectedRun.id);
+      const updated = await api(`/email-drafts/${draftId}/regenerate`, { method: "POST" });
+      setDrafts((prev) => prev.map((d) => (d.id === draftId ? { ...d, ...updated } : d)));
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1831,7 +1900,8 @@ export default function AiBizOsHumanUI() {
       setError("");
       await api(`/email-drafts/${draftId}`, { method: "DELETE" });
       if (editDraft?.id === draftId) setEditDraft(null);
-      await loadRunDetails(selectedRun.id);
+      setDrafts((prev) => prev.filter((d) => d.id !== draftId));
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1848,7 +1918,7 @@ export default function AiBizOsHumanUI() {
     try {
       setError("");
       await api(`/sending/drafts/${draftId}/send`, { method: "POST" });
-      await loadRunDetails(selectedRun.id);
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -1871,7 +1941,7 @@ export default function AiBizOsHumanUI() {
     try {
       setError("");
       await api(`/sending/runs/${selectedRun.id}/send`, { method: "POST" });
-      await loadRunDetails(selectedRun.id);
+      refreshRunDetailsInBackground(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -1916,7 +1986,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       try {
         await loadContactAnalyzer();
-        await loadRunDetails(runId);
+        refreshRunDetailsInBackground(runId);
       } catch {
         /* refresh failed — user can reopen the tab */
       }
@@ -1941,7 +2011,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       try {
         await loadContactAnalyzer();
-        await loadRunDetails(runId);
+        refreshRunDetailsInBackground(runId);
       } catch {
         /* ignore */
       }
@@ -1975,7 +2045,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       try {
         await loadContactAnalyzer();
-        await loadRunDetails(runId);
+        refreshRunDetailsInBackground(runId);
       } catch {
         /* ignore */
       }
@@ -2052,15 +2122,12 @@ export default function AiBizOsHumanUI() {
     });
     void (async () => {
       try {
-        const [assetsData, packetsData] = await Promise.all([
-          api(`/assets`),
-          api(`/asset-packets/run/${selectedRun.id}`),
-        ]);
-        setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
+        const packetsData = await api(`/asset-packets/run/${selectedRun.id}`);
         setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
       } catch {
-        /* keep previous library if request fails */
+        /* keep previous packets if request fails */
       }
+      await loadAssetsLibrary();
     })();
   };
 
@@ -2068,18 +2135,20 @@ export default function AiBizOsHumanUI() {
     if (!editDraft || !selectedRun || editDraftSaving) return;
     const runId = selectedRun.id;
     const draftId = editDraft.id;
+    const applyAll = applyAssetsToAllPendingDrafts;
     setEditDraftSaving(true);
+    let updatedDraft = null;
     try {
       setError("");
-      await api(`/email-drafts/${draftId}/edit`, {
+      updatedDraft = await api(`/email-drafts/${draftId}/edit`, {
         method: "PATCH",
         body: {
           subject: draftForm.subject,
           body: draftForm.body,
           attached_asset_ids: draftForm.attached_asset_ids,
-          apply_assets_to_pending_drafts: applyAssetsToAllPendingDrafts,
+          apply_assets_to_pending_drafts: applyAll,
         },
-        timeoutMs: applyAssetsToAllPendingDrafts ? 120000 : 60000,
+        timeoutMs: applyAll ? 120000 : 60000,
       });
     } catch (e) {
       setUiError(setError, e);
@@ -2088,7 +2157,10 @@ export default function AiBizOsHumanUI() {
       setEditDraftSaving(false);
     }
     setEditDraft(null);
-    void loadRunDetails(runId).catch((e) => setUiError(setError, e));
+    if (updatedDraft && !applyAll) {
+      setDrafts((prev) => prev.map((d) => (d.id === draftId ? { ...d, ...updatedDraft } : d)));
+    }
+    refreshRunDetailsInBackground(runId);
   };
 
   const openSignatureSetup = () => {
@@ -2126,7 +2198,7 @@ export default function AiBizOsHumanUI() {
       setRunSetupPrefsRev((x) => x + 1);
       setSelectedRun((prev) => (prev && prev.id === rid ? { ...prev, ...updated } : prev));
       setPromptSetupOpen(false);
-      void loadRunDetails(rid, undefined, { requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS });
+      refreshRunDetailsInBackground(rid);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -2151,7 +2223,7 @@ export default function AiBizOsHumanUI() {
       setRunSetupPrefsRev((x) => x + 1);
       setSelectedRun((prev) => (prev && prev.id === rid ? { ...prev, ...updated } : prev));
       setSignatureSetupOpen(false);
-      void loadRunDetails(rid, undefined, { requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS });
+      refreshRunDetailsInBackground(rid);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -2766,12 +2838,13 @@ export default function AiBizOsHumanUI() {
                     if (contact.status !== "valid") {
                       body.email = emailVal || null;
                     }
-                    await api(`/contacts/${contact.id}/edit`, {
+                    const updated = await api(`/contacts/${contact.id}/edit`, {
                       method: "PATCH",
                       body,
                     });
                     setEditingContact(null);
-                    if (selectedRun) await loadRunDetails(selectedRun.id);
+                    setContacts((prev) => prev.map((c) => (c.id === contact.id ? { ...c, ...updated } : c)));
+                    if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
                   } catch (e) {
                     setUiError(setError, e);
                   }
@@ -3623,8 +3696,8 @@ export default function AiBizOsHumanUI() {
                               size="sm"
                               variant="outline"
                               disabled={r.display_phase === "Closed"}
-                              onClick={async () => {
-                                await loadRunDetails(r.id);
+                              onClick={() => {
+                                refreshRunDetailsInBackground(r.id);
                                 setCloseRunOpen(true);
                               }}
                             >
@@ -4775,7 +4848,8 @@ export default function AiBizOsHumanUI() {
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
                 onActiveTabChange={(tab) => setMainNav(trackingTabToMainNav(tab))}
-                onRunWorkspaceRefresh={() => void loadRunDetails(selectedRun.id)}
+                onRunWorkspaceRefresh={() => refreshRunDetailsInBackground(selectedRun.id)}
+                workspaceDisplayPhase={workspace?.display_phase ?? selectedRun?.display_phase}
                 cdnR2UploadReady={setupIntegration?.cdn_r2_upload_ready === true}
               />
             ) : null}

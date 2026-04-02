@@ -128,3 +128,12 @@ class RunWorkspaceRead(RunRead):
     setup_state_message: str
     performance: dict[str, Any]
     conversations: dict[str, Any]
+
+
+class RunWorkspaceLiteRead(BaseModel):
+    """Cheap refresh for dashboard poll: phase, messages, performance + conversation counters only (no setup breakdown)."""
+
+    display_phase: str
+    setup_state_message: str
+    performance: dict[str, Any]
+    conversations: dict[str, Any]
