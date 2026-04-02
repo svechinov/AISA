@@ -76,6 +76,20 @@ class RunPromptSetupPatch(BaseModel):
     prompt_setup_text: str = ""
 
 
+class RunPromptSetupPatchResult(BaseModel):
+    """Minimal PATCH response — avoids serializing full Run (large context_json / master_prompt)."""
+
+    id: int
+    prompt_setup_saved: bool
+
+
+class RunSignaturePatchResult(BaseModel):
+    """Minimal PATCH response — avoids serializing full Run row."""
+
+    id: int
+    sender_signature_configured: bool
+
+
 class RunHumanUiPatch(BaseModel):
     """Human dashboard-only UI state; stored under context_json._human_ui (ignored by LLM brief)."""
 
@@ -135,10 +149,11 @@ class RunWorkspaceRead(RunRead):
 
 
 class RunWorkspaceLiteRead(BaseModel):
-    """Cheap refresh for dashboard poll: phase, messages, performance + conversation counters only (no setup breakdown)."""
+    """Cheap refresh for dashboard poll: phase, setup counts, performance + conversation counters (no full run row / contacts / drafts)."""
 
     display_phase: str
     setup_state_message: str
+    setup_summary: dict[str, Any]
     performance: dict[str, Any]
     conversations: dict[str, Any]
     hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)

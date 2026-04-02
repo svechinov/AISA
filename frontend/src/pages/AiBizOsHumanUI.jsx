@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -396,6 +396,8 @@ const COMPANY_RETRY_FIND_TIMEOUT_MS = 120000;
 const RUN_SETUP_PATCH_TIMEOUT_MS = 120000;
 /** Run-details bundle is many parallel GETs; allow the same headroom when refreshing after setup saves. */
 const LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS = 120000;
+/** Background poll / metrics-only refresh: workspace-lite + global performance (no contact/draft lists). */
+const POLL_METRICS_TIMEOUT_MS = 30000;
 /** Contact analyzer: many Gmail searches in one request — allow long run (default 25s would abort mid-flight). */
 const CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS = 600000;
 /** Single-address Gmail search can be slow. */
@@ -467,27 +469,37 @@ function formatSetupIntegrationInformer(si) {
   return { llmPart, cdnPart };
 }
 
-/** Merge GET /runs/:id/workspace-lite into existing full workspace (poll path). */
+/** Merge GET /runs/:id/workspace-lite into existing full workspace (metrics-only refresh path). */
 function mergeWorkspaceLiteInto(prevWorkspace, lite) {
   if (!lite || typeof lite !== "object") return prevWorkspace;
-  if (!prevWorkspace || typeof prevWorkspace !== "object") return prevWorkspace;
+  const base =
+    prevWorkspace && typeof prevWorkspace === "object"
+      ? prevWorkspace
+      : {
+          display_phase: lite.display_phase ?? "Preparing",
+          setup_state_message: lite.setup_state_message ?? "",
+          setup_summary: {},
+          setup_steps: [],
+          performance: {},
+          conversations: {},
+          hourly_sends_24h: Array.isArray(lite.hourly_sends_24h) ? lite.hourly_sends_24h : [],
+        };
   const next = {
-    ...prevWorkspace,
-    display_phase: lite.display_phase ?? prevWorkspace.display_phase,
-    setup_state_message: lite.setup_state_message ?? prevWorkspace.setup_state_message,
+    ...base,
+    display_phase: lite.display_phase ?? base.display_phase,
+    setup_state_message: lite.setup_state_message ?? base.setup_state_message,
     performance: {
-      ...(prevWorkspace.performance && typeof prevWorkspace.performance === "object"
-        ? prevWorkspace.performance
-        : {}),
+      ...(base.performance && typeof base.performance === "object" ? base.performance : {}),
       ...(lite.performance && typeof lite.performance === "object" ? lite.performance : {}),
     },
     conversations: {
-      ...(prevWorkspace.conversations && typeof prevWorkspace.conversations === "object"
-        ? prevWorkspace.conversations
-        : {}),
+      ...(base.conversations && typeof base.conversations === "object" ? base.conversations : {}),
       ...(lite.conversations && typeof lite.conversations === "object" ? lite.conversations : {}),
     },
   };
+  if (lite.setup_summary && typeof lite.setup_summary === "object") {
+    next.setup_summary = lite.setup_summary;
+  }
   if (Array.isArray(lite.hourly_sends_24h)) {
     next.hourly_sends_24h = lite.hourly_sends_24h;
   }
@@ -797,6 +809,10 @@ export default function AiBizOsHumanUI() {
   const [workspace, setWorkspace] = useState(null);
   /** When === selectedRun.id, Review contacts / Drafts sub-tab counts use live data; else localStorage snapshot. */
   const [runDetailsHydratedId, setRunDetailsHydratedId] = useState(null);
+  /** GET /contacts/run/:id applied for this run (Review + contact-analyzer). */
+  const [contactsListReadyRunId, setContactsListReadyRunId] = useState(null);
+  /** GET /email-drafts/run/:id applied for this run (Review Drafts). */
+  const [draftsListReadyRunId, setDraftsListReadyRunId] = useState(null);
   /** Bumps when Prompt/Signature setup localStorage prefs change so icons re-read snapshots without waiting on run object. */
   const [runSetupPrefsRev, setRunSetupPrefsRev] = useState(0);
   /** All runs / all projects — from GET /sending/global-performance. */
@@ -827,6 +843,9 @@ export default function AiBizOsHumanUI() {
   const [contactEditSavingId, setContactEditSavingId] = useState(null);
   /** PATCH /contacts/:id/review (approve) in flight. */
   const [contactApproveBusyId, setContactApproveBusyId] = useState(null);
+  /** Outbound draft is being generated in background after Approve — Drafts tab shows placeholder. */
+  const [pendingOutboundDraftByContactId, setPendingOutboundDraftByContactId] = useState(() => ({}));
+  const outboundDraftGenTimeoutRef = useRef({});
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   /** Keys: draft id string — outbound draft body regeneration in progress. */
   const [regeneratingOutboundDraftIds, setRegeneratingOutboundDraftIds] = useState(() => ({}));
@@ -841,6 +860,12 @@ export default function AiBizOsHumanUI() {
   const [applyAssetsToAllPendingDrafts, setApplyAssetsToAllPendingDrafts] = useState(false);
   const [assetsLibrary, setAssetsLibrary] = useState([]);
   const [runAssetPackets, setRunAssetPackets] = useState([]);
+  /** Global library: fetch once per session (Tracking can push updates via onStaticAssetsSynced). */
+  const assetsLibraryFetchedRef = useRef(false);
+  /** Packets for the current run — one GET per run id until invalidated by Tracking. */
+  const assetPacketsLoadedForRunIdRef = useRef(null);
+  /** Latest in-flight `loadRunDetails` run id — stale responses must not apply state. */
+  const runLoadTargetRef = useRef(null);
   const [draftForm, setDraftForm] = useState({
     subject: "",
     body: "",
@@ -855,6 +880,10 @@ export default function AiBizOsHumanUI() {
   const [promptSetupOpen, setPromptSetupOpen] = useState(false);
   const [promptSetupText, setPromptSetupText] = useState("");
   const [promptSetupSaving, setPromptSetupSaving] = useState(false);
+  /** GET /runs/:id in flight before opening Prompt setup (full context_json). */
+  const [promptSetupOpenLoading, setPromptSetupOpenLoading] = useState(false);
+  /** GET /runs/:id in flight before opening Signature setup (full sender_signature_html). */
+  const [signatureSetupOpenLoading, setSignatureSetupOpenLoading] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restartDialogRun, setRestartDialogRun] = useState(null);
   /** Non-blocking: restart runs in background after confirm (no full-screen lock). */
@@ -1008,7 +1037,7 @@ export default function AiBizOsHumanUI() {
       const data = await api(`/runs/${runId}/companies`);
       setCompaniesPanel(data);
       setCompanyFindUnavailable({});
-      refreshRunDetailsInBackground(runId);
+      refreshRunMetricsOnly(runId);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1049,7 +1078,7 @@ export default function AiBizOsHumanUI() {
           return next;
         });
       }
-      refreshRunDetailsInBackground(runId);
+      refreshRunMetricsOnly(runId);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1122,103 +1151,207 @@ export default function AiBizOsHumanUI() {
           });
         }
       }
-      refreshRunDetailsInBackground(runId);
+      refreshRunMetricsOnly(runId);
     } finally {
       setCompanyRetryAllLoading(false);
     }
   };
 
+  /**
+   * Loads run + steps + full workspace (+ optional global performance). Contacts/drafts lists are either
+   * bundled (restart/continue/create) or loaded on demand when the user opens Contacts / Drafts (see effect).
+   * @param {object} [options]
+   * @param {boolean} [options.includeLists] — when true, also fetch contacts + outbound drafts in the same round-trip.
+   */
   const loadRunDetails = async (runId, runRowHint, options = {}) => {
-    if (!runId) return null;
+    const rid = Number(runId);
+    if (!Number.isFinite(rid) || rid <= 0) return null;
     const requestTimeoutMs = options?.requestTimeoutMs ?? API_TIMEOUT_MS;
-    const workspaceLite = options?.workspace === "lite";
-    // Background polls call this with the same run — do not clear hydration or Contacts/Drafts
-    // flash back to snapshot placeholders until the request finishes.
-    setRunDetailsHydratedId((prev) => (prev === runId ? prev : null));
-    // Instant paint: pick run row from list + local run_cards snapshot so UI does not show the previous run
-    // for the whole API round-trip (server restart / slow proxy). Caller may pass runRowHint when state
-    // has not flushed yet (e.g. right after setRunsList in an async effect).
-    const rowGuess = runRowHint ?? runsList.find((r) => r.id === runId);
+    const includeLists = options.includeLists === true;
+    runLoadTargetRef.current = rid;
+    setContactsListReadyRunId(null);
+    setDraftsListReadyRunId(null);
+    setSteps([]);
+    setContacts([]);
+    setDrafts([]);
+    setRunDetailsHydratedId((prev) => (Number(prev) === rid ? prev : null));
+    const rowGuess = runRowHint ?? runsList.find((r) => Number(r.id) === rid);
     if (rowGuess) {
       setSelectedRun(rowGuess);
-      setWorkspace(snapshotMergeWorkspaceFromRunCards(snapshotReadRunCards(runId), rowGuess));
+      setWorkspace(snapshotMergeWorkspaceFromRunCards(snapshotReadRunCards(rid), rowGuess));
     }
     try {
-      const wsPath = workspaceLite ? `/runs/${runId}/workspace-lite` : `/runs/${runId}/workspace`;
-      const [run, stepsData, contactsData, draftsData, ws, packetsData] = await Promise.all([
-        api(`/runs/${runId}`, { timeoutMs: requestTimeoutMs }),
-        api(`/steps/run/${runId}`, { timeoutMs: requestTimeoutMs }),
-        api(`/contacts/run/${runId}`, { timeoutMs: requestTimeoutMs }),
-        api(`/email-drafts/run/${runId}`, { timeoutMs: requestTimeoutMs }),
+      const wsPath = `/runs/${rid}/workspace`;
+      const core = await Promise.all([
+        api(`/runs/${rid}`, { timeoutMs: requestTimeoutMs }),
+        api(`/steps/run/${rid}`, { timeoutMs: requestTimeoutMs }),
         api(wsPath, { timeoutMs: requestTimeoutMs }),
-        api(`/asset-packets/run/${runId}`, { timeoutMs: requestTimeoutMs }),
       ]);
+      if (runLoadTargetRef.current !== rid) return null;
+      let run = core[0];
+      const stepsData = core[1];
+      const ws = core[2];
+      let contactsData = null;
+      let draftsData = null;
+      if (includeLists) {
+        const lists = await Promise.all([
+          api(`/contacts/run/${rid}`, { timeoutMs: requestTimeoutMs }),
+          api(`/email-drafts/run/${rid}`, { timeoutMs: requestTimeoutMs }),
+        ]);
+        if (runLoadTargetRef.current !== rid) return null;
+        contactsData = lists[0];
+        draftsData = lists[1];
+      }
       setSelectedRun(run);
-      snapshotEnsureRunSetupPrefsSeedFromRun(runId, run);
+      snapshotEnsureRunSetupPrefsSeedFromRun(rid, run);
       setSteps(stepsData);
-      setContacts(contactsData);
-      setDrafts(draftsData);
-      if (workspaceLite) {
-        setWorkspace((prev) => {
-          const merged = mergeWorkspaceLiteInto(prev, ws);
-          if (merged) snapshotWriteRunCards(runId, merged);
-          return merged;
-        });
-      } else {
-        setWorkspace(ws);
-        if (ws) snapshotWriteRunCards(runId, ws);
-      }
-      try {
-        const cp = (Array.isArray(contactsData) ? contactsData : [])
-          .slice(0, MAX_CONTACTS_PANEL_LITE)
-          .map(stripContactForPanelLite)
-          .filter(Boolean);
-        const dp = (Array.isArray(draftsData) ? draftsData : [])
-          .map(stripDraftForPanelLite)
-          .filter(Boolean);
-        snapshotMergeWriteRunPanelLite(runId, { contactsPreview: cp, draftsPreview: dp });
-      } catch {
-        /* panel lite is best-effort */
-      }
-      setRunDetailsHydratedId(runId);
-      setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
-      if (!workspaceLite) {
+      if (includeLists) {
+        setContacts(Array.isArray(contactsData) ? contactsData : []);
+        setDrafts(Array.isArray(draftsData) ? draftsData : []);
+        setContactsListReadyRunId(rid);
+        setDraftsListReadyRunId(rid);
         try {
-          const tp = await api("/sending/global-performance", { timeoutMs: requestTimeoutMs });
-          setTotalPerformance({
-            emails_sent: Number(tp?.emails_sent) || 0,
-            emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
-            replies: Number(tp?.replies) || 0,
-          });
-        } catch (e) {
-          const msg = detailFromApiErrorMessage(e?.message || e);
-          console.warn("[Total performance] GET /sending/global-performance failed:", msg);
+          const cp = (Array.isArray(contactsData) ? contactsData : [])
+            .slice(0, MAX_CONTACTS_PANEL_LITE)
+            .map(stripContactForPanelLite)
+            .filter(Boolean);
+          const dp = (Array.isArray(draftsData) ? draftsData : [])
+            .map(stripDraftForPanelLite)
+            .filter(Boolean);
+          snapshotMergeWriteRunPanelLite(rid, { contactsPreview: cp, draftsPreview: dp });
+        } catch {
+          /* panel lite is best-effort */
         }
+      }
+      setWorkspace(ws);
+      if (ws) snapshotWriteRunCards(rid, ws);
+      setRunDetailsHydratedId(rid);
+      try {
+        const tp = await api("/sending/global-performance", { timeoutMs: requestTimeoutMs });
+        if (runLoadTargetRef.current !== rid) return ws;
+        setTotalPerformance({
+          emails_sent: Number(tp?.emails_sent) || 0,
+          emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+          replies: Number(tp?.replies) || 0,
+        });
+      } catch (e) {
+        const msg = detailFromApiErrorMessage(e?.message || e);
+        console.warn("[Total performance] GET /sending/global-performance failed:", msg);
       }
       return ws;
     } catch (e) {
-      setRunDetailsHydratedId(null);
-      setUiError(setError, e);
+      if (runLoadTargetRef.current === rid) {
+        setRunDetailsHydratedId(null);
+        setUiError(setError, e);
+      }
       return null;
     }
   };
 
-  /** Full run bundle without blocking the UI (used after small PATCHes; same long timeouts as setup saves). */
-  const refreshRunDetailsInBackground = (runId) => {
+  /**
+   * Workspace-lite + Total performance only — updates Run setup counts, Run performance, hourly chart, sidebar cards.
+   * Does not reload contacts, drafts, or steps (avoids multi‑second full bundle on every tick).
+   */
+  const refreshRunMetricsOnly = useCallback((runId) => {
     if (!runId) return;
-    void loadRunDetails(runId, undefined, {
-      requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
-    }).catch((e) => setUiError(setError, e));
-  };
+    void (async () => {
+      try {
+        const [wsLite, tp] = await Promise.all([
+          api(`/runs/${runId}/workspace-lite`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
+          api("/sending/global-performance", { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
+        ]);
+        setWorkspace((prev) => {
+          const merged = mergeWorkspaceLiteInto(prev, wsLite);
+          if (merged) snapshotWriteRunCards(runId, merged);
+          return merged;
+        });
+        setTotalPerformance({
+          emails_sent: Number(tp?.emails_sent) || 0,
+          emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+          replies: Number(tp?.replies) || 0,
+        });
+        setRunsList((prev) => {
+          if (!Array.isArray(prev)) return prev;
+          return prev.map((r) =>
+            r.id === runId
+              ? {
+                  ...r,
+                  display_phase: wsLite.display_phase ?? r.display_phase,
+                  companies_count: wsLite.setup_summary?.companies_collected ?? r.companies_count,
+                  contacts_count: wsLite.setup_summary?.contacts_found ?? r.contacts_count,
+                  emails_sent: wsLite.performance?.emails_sent ?? r.emails_sent,
+                  replies: wsLite.performance?.replies ?? r.replies,
+                  active_threads: wsLite.performance?.active_threads ?? r.active_threads,
+                }
+              : r,
+          );
+        });
+        setSelectedRun((prev) => {
+          if (!prev || prev.id !== runId) return prev;
+          return {
+            ...prev,
+            display_phase: wsLite.display_phase ?? prev.display_phase,
+            companies_count: wsLite.setup_summary?.companies_collected ?? prev.companies_count,
+            contacts_count: wsLite.setup_summary?.contacts_found ?? prev.contacts_count,
+            emails_sent: wsLite.performance?.emails_sent ?? prev.emails_sent,
+            replies: wsLite.performance?.replies ?? prev.replies,
+            active_threads: wsLite.performance?.active_threads ?? prev.active_threads,
+          };
+        });
+      } catch (e) {
+        const msg = String(e?.message || e);
+        if (isConsoleOnlyApiFailure(msg)) {
+          console.warn("[refreshRunMetricsOnly]", msg);
+        } else {
+          setUiError(setError, e);
+        }
+      }
+    })();
+  }, [setError]);
 
-  /** Global asset library: not part of loadRunDetails — fetch when opening draft editor (and similar). */
-  const loadAssetsLibrary = useCallback(async () => {
-    try {
-      const assetsData = await api(`/assets`);
-      setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
-    } catch {
-      /* keep previous list if request fails */
-    }
+  /**
+   * Reload contacts + outbound drafts only (e.g. after approve/review — server may create a draft).
+   * Lighter than full loadRunDetails; keeps metrics path separate.
+   */
+  const refreshRunContactsAndDrafts = useCallback(
+    async (runId) => {
+      if (!runId) return;
+      try {
+        const [contactsData, draftsData] = await Promise.all([
+          api(`/contacts/run/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
+          api(`/email-drafts/run/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
+        ]);
+        setContacts(Array.isArray(contactsData) ? contactsData : []);
+        setDrafts(Array.isArray(draftsData) ? draftsData : []);
+        try {
+          const cp = (Array.isArray(contactsData) ? contactsData : [])
+            .slice(0, MAX_CONTACTS_PANEL_LITE)
+            .map(stripContactForPanelLite)
+            .filter(Boolean);
+          const dp = (Array.isArray(draftsData) ? draftsData : [])
+            .map(stripDraftForPanelLite)
+            .filter(Boolean);
+          snapshotMergeWriteRunPanelLite(runId, { contactsPreview: cp, draftsPreview: dp });
+        } catch {
+          /* best-effort */
+        }
+      } catch (e) {
+        const msg = String(e?.message || e);
+        if (isConsoleOnlyApiFailure(msg)) {
+          console.warn("[refreshRunContactsAndDrafts]", msg);
+        } else {
+          setUiError(setError, e);
+        }
+      }
+    },
+    [setError],
+  );
+
+  const onStaticAssetsSynced = useCallback(({ assets, packets, runId: rid }) => {
+    setAssetsLibrary(Array.isArray(assets) ? assets : []);
+    setRunAssetPackets(Array.isArray(packets) ? packets : []);
+    assetsLibraryFetchedRef.current = true;
+    assetPacketsLoadedForRunIdRef.current = rid ?? null;
   }, []);
 
   const loadContactAnalyzer = useCallback(async () => {
@@ -1288,11 +1421,33 @@ export default function AiBizOsHumanUI() {
     if (mainNav === "drafts") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
 
-  /** One-shot when entering Drafts (not on loadRunDetails poll) so preview labels resolve asset names. */
+  /** Asset library + run packets once per session / run (not on every loadRunDetails or Drafts tab visit). */
   useEffect(() => {
-    if (mainNav !== "drafts" || !selectedRun?.id) return;
-    void loadAssetsLibrary();
-  }, [mainNav, selectedRun?.id, loadAssetsLibrary]);
+    const rid = selectedRun?.id;
+    if (!rid) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (!assetsLibraryFetchedRef.current) {
+          const assetsData = await api(`/assets`);
+          if (cancelled) return;
+          setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
+          assetsLibraryFetchedRef.current = true;
+        }
+        if (assetPacketsLoadedForRunIdRef.current !== rid) {
+          const packetsData = await api(`/asset-packets/run/${rid}`);
+          if (cancelled) return;
+          setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
+          assetPacketsLoadedForRunIdRef.current = rid;
+        }
+      } catch {
+        /* keep previous */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRun?.id]);
 
   useEffect(() => {
     if (mainNav === "assets") void loadSetupIntegration();
@@ -1444,20 +1599,103 @@ export default function AiBizOsHumanUI() {
     if (!selectedRun?.id) return;
     const id = selectedRun.id;
     const phase = workspace?.display_phase;
-    // Active: inbox/tracking need fresher data. Preparing/Ready: user actions already refetch; slow poll avoids piles of waits.
+    // Active: slightly faster metrics tick; Preparing/Ready: slower — lists do not reload here.
     const ms =
       phase === "Active" ? 8000 : phase === "Ready" ? 20000 : phase === "Preparing" ? 45000 : 60000;
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      // Preparing: full workspace keeps setup_summary / setup_steps in sync with the pipeline; other phases: cheap lite.
-      const useLite = phase != null && phase !== "Preparing";
-      void loadRunDetails(id, undefined, {
-        workspace: useLite ? "lite" : "full",
-        requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
-      });
+      refreshRunMetricsOnly(id);
     }, ms);
     return () => clearInterval(interval);
-  }, [selectedRun?.id, workspace?.display_phase]);
+  }, [selectedRun?.id, workspace?.display_phase, refreshRunMetricsOnly]);
+
+  /** Contacts / Drafts: lightweight GETs for the active section only — parallel to loadRunDetails core (no wait). */
+  useEffect(() => {
+    const rid = Number(selectedRun?.id);
+    if (!Number.isFinite(rid) || rid <= 0) return;
+    const loadContacts = mainNav === "contacts" || mainNav === "contact-analyzer";
+    const loadDrafts = mainNav === "drafts";
+    if (!loadContacts && !loadDrafts) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (loadContacts) {
+          const contactsData = await api(`/contacts/run/${rid}`, { timeoutMs: API_TIMEOUT_MS });
+          if (cancelled || runLoadTargetRef.current !== rid) return;
+          const arr = Array.isArray(contactsData) ? contactsData : [];
+          setContacts(arr);
+          setContactsListReadyRunId(rid);
+          try {
+            const cp = arr
+              .slice(0, MAX_CONTACTS_PANEL_LITE)
+              .map(stripContactForPanelLite)
+              .filter(Boolean);
+            snapshotMergeWriteRunPanelLite(rid, { contactsPreview: cp });
+          } catch {
+            /* best-effort */
+          }
+        }
+        if (loadDrafts) {
+          const draftsData = await api(`/email-drafts/run/${rid}`, { timeoutMs: API_TIMEOUT_MS });
+          if (cancelled || runLoadTargetRef.current !== rid) return;
+          const arr = Array.isArray(draftsData) ? draftsData : [];
+          setDrafts(arr);
+          setDraftsListReadyRunId(rid);
+          try {
+            const dp = arr.map(stripDraftForPanelLite).filter(Boolean);
+            snapshotMergeWriteRunPanelLite(rid, { draftsPreview: dp });
+          } catch {
+            /* best-effort */
+          }
+        }
+      } catch (e) {
+        if (cancelled) return;
+        const msg = String(e?.message || e);
+        if (isConsoleOnlyApiFailure(msg)) {
+          console.warn("[AiBizOsHumanUI] section lists", msg, e);
+        } else {
+          setUiError(setError, e);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRun?.id, mainNav]);
+
+  /** Clear “generating draft” when a draft row appears for that contact. */
+  useEffect(() => {
+    if (!Array.isArray(drafts)) return;
+    setPendingOutboundDraftByContactId((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const k of Object.keys(next)) {
+        const cid = Number(k);
+        if (drafts.some((d) => d.contact_id === cid)) {
+          delete next[k];
+          changed = true;
+          if (outboundDraftGenTimeoutRef.current[cid]) {
+            clearTimeout(outboundDraftGenTimeoutRef.current[cid]);
+            delete outboundDraftGenTimeoutRef.current[cid];
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [drafts]);
+
+  /** Poll contacts + drafts while outbound generation is in progress (background LLM). */
+  useEffect(() => {
+    const busy = Object.keys(pendingOutboundDraftByContactId).some(
+      (k) => pendingOutboundDraftByContactId[k],
+    );
+    if (!busy || !selectedRun?.id) return;
+    void refreshRunContactsAndDrafts(selectedRun.id);
+    const t = setInterval(() => {
+      void refreshRunContactsAndDrafts(selectedRun.id);
+    }, 2500);
+    return () => clearInterval(t);
+  }, [pendingOutboundDraftByContactId, selectedRun?.id, refreshRunContactsAndDrafts]);
 
   const createProject = async () => {
     const project = await api("/projects", {
@@ -1612,7 +1850,7 @@ export default function AiBizOsHumanUI() {
       setNewRunOpen(false);
       const runs = await api(`/runs/project/${pid}`);
       setRunsList(orderRunsOpenFirst(runs));
-      await loadRunDetails(run.id);
+      await loadRunDetails(run.id, undefined, { includeLists: true });
       setNewRunForm({
         name: "",
         notes: "",
@@ -1656,7 +1894,7 @@ export default function AiBizOsHumanUI() {
       setSelectedRun((prev) =>
         prev && prev.id === updatedRun.id ? { ...prev, ...updatedRun } : prev,
       );
-      refreshRunDetailsInBackground(newRunBaseline.runId);
+      refreshRunMetricsOnly(newRunBaseline.runId);
       setNewRunForm({
         name: "",
         notes: "",
@@ -1685,7 +1923,7 @@ export default function AiBizOsHumanUI() {
         segment: seeded.segment.trim(),
         outreach_brief: seeded.outreach_brief.trim(),
       });
-      refreshRunDetailsInBackground(run.id);
+      refreshRunMetricsOnly(run.id);
       setNewRunOpen(true);
     } catch (e) {
       setUiError(setError, e);
@@ -1726,7 +1964,7 @@ export default function AiBizOsHumanUI() {
       const ordered = orderRunsOpenFirst(runs);
       setRunsList(ordered);
       const nextOpen = ordered.find((r) => !r.closed_at);
-      await loadRunDetails(nextOpen ? nextOpen.id : closedId);
+      await loadRunDetails(nextOpen ? nextOpen.id : closedId, undefined, { includeLists: true });
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1778,6 +2016,7 @@ export default function AiBizOsHumanUI() {
       );
       const ws = await loadRunDetails(runId, undefined, {
         requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+        includeLists: true,
       });
       if (ws) {
         setRunsList((prev) =>
@@ -1800,7 +2039,10 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       if (restartPostOk) {
-        refreshRunDetailsInBackground(runId);
+        void loadRunDetails(runId, undefined, {
+          requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+          includeLists: true,
+        }).catch((err) => setUiError(setError, err));
       }
     } finally {
       setPendingRestart(null);
@@ -1813,7 +2055,10 @@ export default function AiBizOsHumanUI() {
       setError("");
       const run = await api(`/runs/${selectedRun.id}/continue`, { method: "POST" });
       setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
-      refreshRunDetailsInBackground(run.id);
+      void loadRunDetails(run.id, undefined, {
+        requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+        includeLists: true,
+      }).catch((err) => setUiError(setError, err));
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1821,17 +2066,61 @@ export default function AiBizOsHumanUI() {
 
   const approveContact = async (contactId) => {
     setContactApproveBusyId(contactId);
+    const cid = Number(contactId);
+    const prevSnapshot = contacts.find((c) => Number(c.id) === cid);
+    setContacts((prev) =>
+      prev.map((c) =>
+        Number(c.id) === cid
+          ? { ...c, review_status: "approved", reviewed_at: new Date().toISOString() }
+          : c,
+      ),
+    );
+    setPendingOutboundDraftByContactId((prev) => ({ ...prev, [cid]: true }));
+    if (outboundDraftGenTimeoutRef.current[cid]) {
+      clearTimeout(outboundDraftGenTimeoutRef.current[cid]);
+    }
+    outboundDraftGenTimeoutRef.current[cid] = setTimeout(() => {
+      setPendingOutboundDraftByContactId((p) => {
+        if (!p[cid]) return p;
+        const n = { ...p };
+        delete n[cid];
+        return n;
+      });
+      delete outboundDraftGenTimeoutRef.current[cid];
+    }, 120000);
     try {
       setError("");
       const updated = await api(`/contacts/${contactId}/review`, {
         method: "PATCH",
         body: { review_status: "approved" },
       });
-      setContacts((prev) => prev.map((c) => (c.id === contactId ? { ...c, ...updated } : c)));
-      if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
+      setContacts((prev) =>
+        prev.map((c) => (Number(c.id) === cid ? { ...c, ...updated } : c)),
+      );
+      if (selectedRun) {
+        void refreshRunContactsAndDrafts(selectedRun.id);
+        refreshRunMetricsOnly(selectedRun.id);
+      }
     } catch (e) {
       setUiError(setError, e);
-      if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
+      if (prevSnapshot) {
+        setContacts((prev) =>
+          prev.map((c) => (Number(c.id) === cid ? { ...c, ...prevSnapshot } : c)),
+        );
+      }
+      setPendingOutboundDraftByContactId((prev) => {
+        const n = { ...prev };
+        delete n[cid];
+        return n;
+      });
+      if (outboundDraftGenTimeoutRef.current[cid]) {
+        clearTimeout(outboundDraftGenTimeoutRef.current[cid]);
+        delete outboundDraftGenTimeoutRef.current[cid];
+      }
+      if (selectedRun) {
+        void refreshRunContactsAndDrafts(selectedRun.id);
+        refreshRunMetricsOnly(selectedRun.id);
+      }
     } finally {
       setContactApproveBusyId((id) => (id === contactId ? null : id));
     }
@@ -1844,8 +2133,37 @@ export default function AiBizOsHumanUI() {
         method: "PATCH",
         body: { review_status },
       });
-      setContacts((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
-      refreshRunDetailsInBackground(selectedRun.id);
+      const rid = Number(id);
+      setContacts((prev) => prev.map((c) => (Number(c.id) === rid ? { ...c, ...updated } : c)));
+      if (review_status === "approved") {
+        setPendingOutboundDraftByContactId((prev) => ({ ...prev, [rid]: true }));
+        if (outboundDraftGenTimeoutRef.current[rid]) {
+          clearTimeout(outboundDraftGenTimeoutRef.current[rid]);
+        }
+        outboundDraftGenTimeoutRef.current[rid] = setTimeout(() => {
+          setPendingOutboundDraftByContactId((p) => {
+            if (!p[rid]) return p;
+            const n = { ...p };
+            delete n[rid];
+            return n;
+          });
+          delete outboundDraftGenTimeoutRef.current[rid];
+        }, 120000);
+      } else {
+        setPendingOutboundDraftByContactId((prev) => {
+          const n = { ...prev };
+          delete n[rid];
+          return n;
+        });
+        if (outboundDraftGenTimeoutRef.current[rid]) {
+          clearTimeout(outboundDraftGenTimeoutRef.current[rid]);
+          delete outboundDraftGenTimeoutRef.current[rid];
+        }
+      }
+      if (selectedRun) {
+        void refreshRunContactsAndDrafts(selectedRun.id);
+        refreshRunMetricsOnly(selectedRun.id);
+      }
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1862,7 +2180,17 @@ export default function AiBizOsHumanUI() {
         if (idx >= 0) return prev.map((d, i) => (i === idx ? { ...d, ...draft } : d));
         return [...prev, draft];
       });
-      refreshRunDetailsInBackground(selectedRun.id);
+      const cid = Number(contactId);
+      setPendingOutboundDraftByContactId((prev) => {
+        const n = { ...prev };
+        delete n[cid];
+        return n;
+      });
+      if (outboundDraftGenTimeoutRef.current[cid]) {
+        clearTimeout(outboundDraftGenTimeoutRef.current[cid]);
+        delete outboundDraftGenTimeoutRef.current[cid];
+      }
+      refreshRunMetricsOnly(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1888,7 +2216,7 @@ export default function AiBizOsHumanUI() {
         body,
       });
       setDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, ...updated } : d)));
-      refreshRunDetailsInBackground(selectedRun.id);
+      refreshRunMetricsOnly(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1908,7 +2236,7 @@ export default function AiBizOsHumanUI() {
       setError("");
       const updated = await api(`/email-drafts/${draftId}/regenerate`, { method: "POST" });
       setDrafts((prev) => prev.map((d) => (d.id === draftId ? { ...d, ...updated } : d)));
-      refreshRunDetailsInBackground(selectedRun.id);
+      refreshRunMetricsOnly(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -1927,7 +2255,7 @@ export default function AiBizOsHumanUI() {
       await api(`/email-drafts/${draftId}`, { method: "DELETE" });
       if (editDraft?.id === draftId) setEditDraft(null);
       setDrafts((prev) => prev.filter((d) => d.id !== draftId));
-      refreshRunDetailsInBackground(selectedRun.id);
+      refreshRunMetricsOnly(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
     }
@@ -1944,7 +2272,8 @@ export default function AiBizOsHumanUI() {
     try {
       setError("");
       await api(`/sending/drafts/${draftId}/send`, { method: "POST" });
-      refreshRunDetailsInBackground(selectedRun.id);
+      refreshRunMetricsOnly(selectedRun.id);
+      void refreshRunContactsAndDrafts(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -1967,7 +2296,8 @@ export default function AiBizOsHumanUI() {
     try {
       setError("");
       await api(`/sending/runs/${selectedRun.id}/send`, { method: "POST" });
-      refreshRunDetailsInBackground(selectedRun.id);
+      refreshRunMetricsOnly(selectedRun.id);
+      void refreshRunContactsAndDrafts(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -2012,7 +2342,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       try {
         await loadContactAnalyzer();
-        refreshRunDetailsInBackground(runId);
+        refreshRunMetricsOnly(runId);
       } catch {
         /* refresh failed — user can reopen the tab */
       }
@@ -2037,7 +2367,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       try {
         await loadContactAnalyzer();
-        refreshRunDetailsInBackground(runId);
+        refreshRunMetricsOnly(runId);
       } catch {
         /* ignore */
       }
@@ -2071,7 +2401,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       try {
         await loadContactAnalyzer();
-        refreshRunDetailsInBackground(runId);
+        refreshRunMetricsOnly(runId);
       } catch {
         /* ignore */
       }
@@ -2146,15 +2476,6 @@ export default function AiBizOsHumanUI() {
       body: d.body ?? "",
       attached_asset_ids: normalizeAttachedAssetIds(d.attached_asset_ids),
     });
-    void (async () => {
-      try {
-        const packetsData = await api(`/asset-packets/run/${selectedRun.id}`);
-        setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
-      } catch {
-        /* keep previous packets if request fails */
-      }
-      await loadAssetsLibrary();
-    })();
   };
 
   const saveEditDraft = async () => {
@@ -2186,13 +2507,13 @@ export default function AiBizOsHumanUI() {
     if (updatedDraft && !applyAll) {
       setDrafts((prev) => prev.map((d) => (d.id === draftId ? { ...d, ...updatedDraft } : d)));
     }
-    refreshRunDetailsInBackground(runId);
+    if (applyAll && selectedRun?.id) {
+      void refreshRunContactsAndDrafts(selectedRun.id);
+    }
+    refreshRunMetricsOnly(runId);
   };
 
-  const openSignatureSetup = () => {
-    setSignatureFormHtml(selectedRun?.sender_signature_html ?? "");
-    setSignatureEditorKey((k) => k + 1);
-    setSignatureSetupOpen(true);
+  const mountSignatureEditorDeferred = () => {
     setSignatureEditorMount(false);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -2201,10 +2522,43 @@ export default function AiBizOsHumanUI() {
     });
   };
 
-  const openPromptSetup = () => {
+  const openSignatureSetup = async () => {
+    if (!selectedRun?.id) return;
+    setSignatureSetupOpenLoading(true);
+    try {
+      const run = await api(`/runs/${selectedRun.id}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+      setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
+      setSignatureFormHtml(String(run.sender_signature_html ?? ""));
+      setSignatureEditorKey((k) => k + 1);
+      setSignatureSetupOpen(true);
+      mountSignatureEditorDeferred();
+    } catch (e) {
+      setUiError(setError, e);
+      setSignatureFormHtml(String(selectedRun?.sender_signature_html ?? ""));
+      setSignatureEditorKey((k) => k + 1);
+      setSignatureSetupOpen(true);
+      mountSignatureEditorDeferred();
+    } finally {
+      setSignatureSetupOpenLoading(false);
+    }
+  };
+
+  const openPromptSetup = async () => {
+    if (!selectedRun?.id) return;
     setPromptSetupSaving(false);
-    setPromptSetupText(getPromptSetupEditorInitialText(selectedRun));
-    setPromptSetupOpen(true);
+    setPromptSetupOpenLoading(true);
+    try {
+      const run = await api(`/runs/${selectedRun.id}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+      setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
+      setPromptSetupText(getPromptSetupEditorInitialText(run));
+      setPromptSetupOpen(true);
+    } catch (e) {
+      setUiError(setError, e);
+      setPromptSetupText(getPromptSetupEditorInitialText(selectedRun));
+      setPromptSetupOpen(true);
+    } finally {
+      setPromptSetupOpenLoading(false);
+    }
   };
 
   const savePromptSetup = async () => {
@@ -2222,9 +2576,22 @@ export default function AiBizOsHumanUI() {
         prompt_setup_saved: promptSetupText.trim().length > 0,
       });
       setRunSetupPrefsRev((x) => x + 1);
-      setSelectedRun((prev) => (prev && prev.id === rid ? { ...prev, ...updated } : prev));
+      setSelectedRun((prev) => {
+        if (!prev || prev.id !== rid) return prev;
+        const nextCtx = { ...(prev.context_json || {}) };
+        if (promptSetupText.trim().length === 0) {
+          delete nextCtx[PROMPT_SETUP_STORAGE_KEY];
+        } else {
+          nextCtx[PROMPT_SETUP_STORAGE_KEY] = promptSetupText;
+        }
+        return {
+          ...prev,
+          context_json: nextCtx,
+          prompt_setup_saved: Boolean(updated?.prompt_setup_saved),
+        };
+      });
       setPromptSetupOpen(false);
-      refreshRunDetailsInBackground(rid);
+      refreshRunMetricsOnly(rid);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -2247,9 +2614,16 @@ export default function AiBizOsHumanUI() {
         sender_signature_configured: runSignatureHasMeaningfulContent(signatureFormHtml),
       });
       setRunSetupPrefsRev((x) => x + 1);
-      setSelectedRun((prev) => (prev && prev.id === rid ? { ...prev, ...updated } : prev));
+      setSelectedRun((prev) => {
+        if (!prev || prev.id !== rid) return prev;
+        return {
+          ...prev,
+          sender_signature_html: signatureFormHtml,
+          sender_signature_configured: Boolean(updated?.sender_signature_configured),
+        };
+      });
       setSignatureSetupOpen(false);
-      refreshRunDetailsInBackground(rid);
+      refreshRunMetricsOnly(rid);
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -2369,6 +2743,20 @@ export default function AiBizOsHumanUI() {
     return m;
   }, [drafts]);
 
+  /** Approved but no draft row yet — background LLM after Approve on contact. */
+  const contactsAwaitingOutboundDraftPlaceholder = useMemo(() => {
+    if (!Array.isArray(contacts) || !Array.isArray(drafts)) return [];
+    const draftContactIds = new Set(drafts.map((d) => d.contact_id));
+    return contacts.filter((c) => {
+      if (!pendingOutboundDraftByContactId[c.id]) return false;
+      if (!["approved", "edited"].includes(c.review_status)) return false;
+      if (c.status !== "valid") return false;
+      if (!String(c.email || "").trim()) return false;
+      if (draftContactIds.has(c.id)) return false;
+      return true;
+    });
+  }, [contacts, drafts, pendingOutboundDraftByContactId]);
+
   const approvedContactsReachable = contactsVisible.filter(
     (c) =>
       ["approved", "edited"].includes(c.review_status) &&
@@ -2414,18 +2802,32 @@ export default function AiBizOsHumanUI() {
 
   const displayContactReviewCounts = useMemo(() => {
     const live = liveContactReviewCounts;
-    if (runDetailsHydratedId === selectedRun?.id) return live;
+    if (contactsListReadyRunId === Number(selectedRun?.id)) return live;
     return mergeContactReviewSnap(innerTabSnap?.contacts, live);
-  }, [liveContactReviewCounts, runDetailsHydratedId, selectedRun?.id, innerTabSnap?.contacts]);
+  }, [
+    liveContactReviewCounts,
+    contactsListReadyRunId,
+    selectedRun?.id,
+    innerTabSnap?.contacts,
+  ]);
 
   const displayDraftReviewCounts = useMemo(() => {
     const live = liveDraftReviewCounts;
-    if (runDetailsHydratedId === selectedRun?.id) return live;
+    if (draftsListReadyRunId === Number(selectedRun?.id)) return live;
     return mergeDraftReviewSnap(innerTabSnap?.drafts, live);
-  }, [liveDraftReviewCounts, runDetailsHydratedId, selectedRun?.id, innerTabSnap?.drafts]);
+  }, [
+    liveDraftReviewCounts,
+    draftsListReadyRunId,
+    selectedRun?.id,
+    innerTabSnap?.drafts,
+  ]);
 
-  const contactsRunHydrated =
-    Boolean(selectedRun?.id) && runDetailsHydratedId === selectedRun?.id;
+  const needsContactsSectionData =
+    mainNav === "contacts" || mainNav === "contact-analyzer";
+  const contactsReviewHydrated =
+    !needsContactsSectionData || contactsListReadyRunId === Number(selectedRun?.id);
+  const draftsReviewHydrated =
+    mainNav !== "drafts" || draftsListReadyRunId === Number(selectedRun?.id);
   const reviewContactsSnapModeVal = useMemo(
     () => reviewContactsSnapMode(innerTabSnap?.contacts),
     [innerTabSnap?.contacts],
@@ -2437,7 +2839,7 @@ export default function AiBizOsHumanUI() {
 
   const runPanelLiteHuman = useMemo(
     () => (selectedRun?.id ? snapshotReadRunPanelLite(selectedRun.id) : null),
-    [selectedRun?.id, runDetailsHydratedId],
+    [selectedRun?.id, runDetailsHydratedId, contactsListReadyRunId, draftsListReadyRunId],
   );
 
   const contactsPanelLiteFiltered = useMemo(() => {
@@ -2455,12 +2857,18 @@ export default function AiBizOsHumanUI() {
   }, [runPanelLiteHuman?.draftsPreview, draftReviewTab]);
 
   useEffect(() => {
-    if (!selectedRun?.id || runDetailsHydratedId !== selectedRun.id) return;
+    if (!selectedRun?.id || contactsListReadyRunId !== Number(selectedRun.id)) return;
     snapshotMergeWriteInnerTabs(selectedRun.id, {
       contacts: liveContactReviewCounts,
+    });
+  }, [selectedRun?.id, contactsListReadyRunId, liveContactReviewCounts]);
+
+  useEffect(() => {
+    if (!selectedRun?.id || draftsListReadyRunId !== Number(selectedRun.id)) return;
+    snapshotMergeWriteInnerTabs(selectedRun.id, {
       drafts: liveDraftReviewCounts,
     });
-  }, [selectedRun?.id, runDetailsHydratedId, liveContactReviewCounts, liveDraftReviewCounts]);
+  }, [selectedRun?.id, draftsListReadyRunId, liveDraftReviewCounts]);
 
   /**
    * Group order used to follow raw contact id order. If companies interleave by id (Acme, Beta, Acme),
@@ -2875,7 +3283,7 @@ export default function AiBizOsHumanUI() {
                     });
                     setEditingContact(null);
                     setContacts((prev) => prev.map((c) => (c.id === contact.id ? { ...c, ...updated } : c)));
-                    if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
+                    if (selectedRun) refreshRunMetricsOnly(selectedRun.id);
                   } catch (e) {
                     setUiError(setError, e);
                   } finally {
@@ -2968,6 +3376,27 @@ export default function AiBizOsHumanUI() {
       </Card>
     );
   };
+
+  const renderGeneratingOutboundDraftPlaceholder = (contact) => (
+    <Card key={`outreach-gen-${contact.id}`} className="border-2 border-dashed border-muted-foreground/35">
+      <CardContent className="p-5">
+        <div className="flex flex-col gap-2">
+          <div className="break-words text-lg font-semibold">{contact.company || "—"}</div>
+          <div className="text-sm text-muted-foreground">
+            {contact.name || "—"} · {contact.email || "—"}
+          </div>
+          <div
+            className="flex items-center gap-2 text-sm text-muted-foreground"
+            role="status"
+            aria-live="polite"
+          >
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+            Generating email…
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 
   const renderDraftCard = (draft) => {
     const draftContact = contactById.get(draft.contact_id);
@@ -3728,7 +4157,7 @@ export default function AiBizOsHumanUI() {
                               className="shrink-0 whitespace-nowrap"
                               disabled={r.display_phase === "Closed"}
                               onClick={() => {
-                                refreshRunDetailsInBackground(r.id);
+                                refreshRunMetricsOnly(r.id);
                                 setCloseRunOpen(true);
                               }}
                             >
@@ -4049,10 +4478,13 @@ export default function AiBizOsHumanUI() {
                         variant="outline"
                         size="sm"
                         className="gap-1.5"
-                        onClick={() => openPromptSetup()}
-                        disabled={!selectedRun}
+                        onClick={() => void openPromptSetup()}
+                        disabled={!selectedRun || promptSetupOpenLoading}
+                        aria-busy={promptSetupOpenLoading}
                       >
-                        {promptSetupSavedFilled ? (
+                        {promptSetupOpenLoading ? (
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                        ) : promptSetupSavedFilled ? (
                           <CircleCheck
                             className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500"
                             aria-hidden
@@ -4070,10 +4502,13 @@ export default function AiBizOsHumanUI() {
                         variant="outline"
                         size="sm"
                         className="gap-1.5"
-                        onClick={() => openSignatureSetup()}
-                        disabled={!selectedRun}
+                        onClick={() => void openSignatureSetup()}
+                        disabled={!selectedRun || signatureSetupOpenLoading}
+                        aria-busy={signatureSetupOpenLoading}
                       >
-                        {signatureSetupFilled ? (
+                        {signatureSetupOpenLoading ? (
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                        ) : signatureSetupFilled ? (
                           <CircleCheck
                             className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500"
                             aria-hidden
@@ -4099,7 +4534,7 @@ export default function AiBizOsHumanUI() {
               <CardContent>
                 {mainNav === "contacts" ? (
                   <div className="space-y-6">
-                    {contactsRunHydrated ? (
+                    {contactsReviewHydrated ? (
                     <>
                     {approveContactsContinueCta ? (
                       <div className="flex max-w-xl flex-col gap-1">
@@ -4480,7 +4915,7 @@ export default function AiBizOsHumanUI() {
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    {contactsRunHydrated ? (
+                    {draftsReviewHydrated ? (
                     <>
                     <div className="flex flex-wrap items-center gap-2">
                       <Button
@@ -4501,7 +4936,7 @@ export default function AiBizOsHumanUI() {
                         Send all approved
                       </Button>
                     </div>
-                    {drafts.length > 0 ? (
+                    {drafts.length > 0 || contactsAwaitingOutboundDraftPlaceholder.length > 0 ? (
                       <div className="space-y-3">
                         <div
                           className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
@@ -4544,6 +4979,18 @@ export default function AiBizOsHumanUI() {
 
                         {draftReviewTab === "pending" ? (
                           <>
+                            {contactsAwaitingOutboundDraftPlaceholder.length > 0 ? (
+                              <div className="space-y-3">
+                                <div className="text-sm font-medium">
+                                  Generating ({contactsAwaitingOutboundDraftPlaceholder.length})
+                                </div>
+                                <div className="grid gap-3">
+                                  {contactsAwaitingOutboundDraftPlaceholder.map((c) =>
+                                    renderGeneratingOutboundDraftPlaceholder(c),
+                                  )}
+                                </div>
+                              </div>
+                            ) : null}
                             {draftsPending.length > 0 ? (
                               <div className="space-y-3">
                                 <div className="text-sm font-medium">Pending ({draftsPending.length})</div>
@@ -4561,7 +5008,9 @@ export default function AiBizOsHumanUI() {
                                 </div>
                               </details>
                             ) : null}
-                            {draftsPending.length === 0 && draftsRejectedList.length === 0 ? (
+                            {draftsPending.length === 0 &&
+                            draftsRejectedList.length === 0 &&
+                            contactsAwaitingOutboundDraftPlaceholder.length === 0 ? (
                               <div className="text-sm text-muted-foreground">
                                 No drafts in pending review for this search — try Approved or clear search.
                               </div>
@@ -4879,9 +5328,11 @@ export default function AiBizOsHumanUI() {
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
                 onActiveTabChange={(tab) => setMainNav(trackingTabToMainNav(tab))}
-                onRunWorkspaceRefresh={() => refreshRunDetailsInBackground(selectedRun.id)}
+                onRunWorkspaceRefresh={() => refreshRunMetricsOnly(selectedRun.id)}
+                onStaticAssetsSynced={onStaticAssetsSynced}
                 workspaceDisplayPhase={workspace?.display_phase ?? selectedRun?.display_phase}
                 cdnR2UploadReady={setupIntegration?.cdn_r2_upload_ready === true}
+                pollLiveEnabled={mainNav === "events" || mainNav === "threads"}
               />
             ) : null}
 
@@ -5154,59 +5605,69 @@ export default function AiBizOsHumanUI() {
               if (!editDraftSaving) setEditDraft(null);
             }}
           />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Edit email draft</h2>
-            <div className="mt-4 grid gap-3">
-              <Input
-                placeholder="Subject"
-                value={draftForm.subject}
-                onChange={(e) => setDraftForm((f) => ({ ...f, subject: e.target.value }))}
-              />
-              <EmailDraftRichTextEditor
-                key={editDraft.id}
-                initialBody={draftForm.body}
-                onChange={(body) => setDraftForm((f) => ({ ...f, body }))}
-              />
-              <DraftAssetAttachmentsField
-                assets={assetsLibrary}
-                assetPackets={runAssetPackets}
-                selectedIds={draftForm.attached_asset_ids}
-                onSelectedIdsChange={(attached_asset_ids) =>
-                  setDraftForm((f) => ({ ...f, attached_asset_ids }))
-                }
-              />
-            </div>
-            <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-              <label className="flex max-w-[min(100%,20rem)] cursor-pointer items-start gap-2.5 text-sm leading-snug text-muted-foreground">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
-                  checked={applyAssetsToAllPendingDrafts}
-                  disabled={editDraftSaving}
-                  onChange={(e) => setApplyAssetsToAllPendingDrafts(e.target.checked)}
+          <div
+            className="relative z-50 flex h-[80vh] max-h-[80vh] w-full max-w-[63rem] flex-col overflow-hidden rounded-xl border-2 border-border bg-card shadow-lg"
+            role="dialog"
+            aria-labelledby="edit-email-draft-title"
+          >
+            <h2 id="edit-email-draft-title" className="shrink-0 px-6 pt-6 text-lg font-semibold">
+              Edit email draft
+            </h2>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
+              <div className="grid gap-3">
+                <Input
+                  placeholder="Subject"
+                  value={draftForm.subject}
+                  onChange={(e) => setDraftForm((f) => ({ ...f, subject: e.target.value }))}
                 />
-                <span>
-                  <span className="font-medium text-foreground">Apply assets to all drafts</span>
-                  <span className="mt-0.5 block text-xs">
-                    Pending review only — same attachments as here after Save.
+                <EmailDraftRichTextEditor
+                  key={editDraft.id}
+                  initialBody={draftForm.body}
+                  onChange={(body) => setDraftForm((f) => ({ ...f, body }))}
+                />
+                <DraftAssetAttachmentsField
+                  assets={assetsLibrary}
+                  assetPackets={runAssetPackets}
+                  selectedIds={draftForm.attached_asset_ids}
+                  onSelectedIdsChange={(attached_asset_ids) =>
+                    setDraftForm((f) => ({ ...f, attached_asset_ids }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="shrink-0 border-t border-border px-6 py-4">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <label className="flex max-w-[min(100%,20rem)] cursor-pointer items-start gap-2.5 text-sm leading-snug text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
+                    checked={applyAssetsToAllPendingDrafts}
+                    disabled={editDraftSaving}
+                    onChange={(e) => setApplyAssetsToAllPendingDrafts(e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium text-foreground">Apply assets to all drafts</span>
+                    <span className="mt-0.5 block text-xs">
+                      Pending review only — same attachments as here after Save.
+                    </span>
                   </span>
-                </span>
-              </label>
-              <div className="flex shrink-0 justify-end gap-2">
-                <Button variant="outline" disabled={editDraftSaving} onClick={() => setEditDraft(null)}>
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  disabled={editDraftSaving}
-                  aria-busy={editDraftSaving}
-                  onClick={() => void saveEditDraft()}
-                >
-                  {editDraftSaving ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                  ) : null}
-                  Save
-                </Button>
+                </label>
+                <div className="flex shrink-0 justify-end gap-2">
+                  <Button variant="outline" disabled={editDraftSaving} onClick={() => setEditDraft(null)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={editDraftSaving}
+                    aria-busy={editDraftSaving}
+                    onClick={() => void saveEditDraft()}
+                  >
+                    {editDraftSaving ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                    ) : null}
+                    Save
+                  </Button>
+                </div>
               </div>
             </div>
           </div>

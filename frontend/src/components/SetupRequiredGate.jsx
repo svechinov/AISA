@@ -12,7 +12,8 @@ const API_BASE =
       ? "/api"
       : "http://127.0.0.1:8000";
 
-const SETUP_STATUS_TIMEOUT_MS = 25000;
+/** Cold Docker / slow import — 25s was too tight and blocked the gate on healthy APIs. */
+const SETUP_STATUS_TIMEOUT_MS = 60000;
 const VERIFY_STAGGER_MS = 380;
 
 async function fetchJsonWithTimeout(url, init, timeoutMs) {
@@ -118,10 +119,13 @@ export default function SetupRequiredGate({ children }) {
       setStatus(await res.json());
     } catch (e) {
       const name = e?.name;
+      const devProxyHint = import.meta.env.DEV
+        ? `\n\nDev: the UI calls ${API_BASE}/setup/status. Vite proxies /api → VITE_API_PROXY_TARGET (see vite.config.js), default http://127.0.0.1:8000.\nStart API: cd ai-biz-os/backend && uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
+        : `\n\nProduction: set VITE_API_BASE to your API origin (no trailing slash).`;
       const msg =
         name === "AbortError"
-          ? `Timed out after ${SETUP_STATUS_TIMEOUT_MS / 1000}s — API may still be starting. Re-check.`
-          : String(e?.message || e);
+          ? `Timed out after ${SETUP_STATUS_TIMEOUT_MS / 1000}s — no response from GET ${API_BASE}/setup/status.${devProxyHint}`
+          : `${String(e?.message || e)}.${devProxyHint}`;
       setLoadErr(msg);
       setStatus(null);
     } finally {
@@ -351,9 +355,13 @@ export default function SetupRequiredGate({ children }) {
             ) : null}
 
             {loadErr ? (
-              <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive">
-                Could not reach the API ({loadErr}). Fix the backend URL or start the server, then Re-check.
-              </p>
+              <div className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive">
+                <p className="text-sm font-medium">Could not reach the API</p>
+                <p className="whitespace-pre-wrap text-xs opacity-95">{loadErr}</p>
+                <p className="text-xs text-destructive/90">
+                  Fix the backend URL or start the API process, then use Re-check.
+                </p>
+              </div>
             ) : null}
 
             {/* Setup form when incomplete */}

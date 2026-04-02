@@ -464,6 +464,7 @@ def build_run_workspace_lite(db: Session, run) -> dict:
     return {
         "display_phase": phase,
         "setup_state_message": setup_state_message_from_phase(phase),
+        "setup_summary": get_run_setup_summary(db, rid),
         "performance": get_run_performance_lite(db, rid),
         "conversations": get_conversations_lite(db, rid),
         "hourly_sends_24h": hourly_send_counts_24h_utc(db, rid),

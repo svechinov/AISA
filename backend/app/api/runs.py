@@ -27,8 +27,10 @@ from app.schemas.run import (
     RunHumanUiPatch,
     RunOutreachPatch,
     RunPromptSetupPatch,
+    RunPromptSetupPatchResult,
     RunRead,
     RunSignaturePatch,
+    RunSignaturePatchResult,
     RunStart,
     RunWorkspaceLiteRead,
     RunWorkspaceRead,
@@ -52,6 +54,8 @@ from app.services.run_display_service import (
     get_run_setup_summary,
     get_setup_state_message,
     hourly_send_counts_24h_utc,
+    prompt_setup_saved_from_context,
+    signature_html_has_meaningful_content,
 )
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -88,7 +92,7 @@ def run_workspace_route(run_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{run_id}/workspace-lite", response_model=RunWorkspaceLiteRead)
 def run_workspace_lite_route(run_id: int, db: Session = Depends(get_db)):
-    """Lighter dashboard refresh: phase + counters only (no setup steps / setup summary block)."""
+    """Light dashboard refresh: phase, setup_summary counts, performance, conversations, hourly chart (no run row / contacts / drafts)."""
     run = get_run(db, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -298,20 +302,26 @@ def send_replacement_drafts_route(run_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.patch("/{run_id}/signature", response_model=RunRead)
+@router.patch("/{run_id}/signature", response_model=RunSignaturePatchResult)
 def patch_run_signature_route(run_id: int, payload: RunSignaturePatch, db: Session = Depends(get_db)):
     run = update_run_signature(db, run_id, payload.signature_html.strip() or None)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return RunSignaturePatchResult(
+        id=run.id,
+        sender_signature_configured=signature_html_has_meaningful_content(run.sender_signature_html),
+    )
 
 
-@router.patch("/{run_id}/prompt-setup", response_model=RunRead)
+@router.patch("/{run_id}/prompt-setup", response_model=RunPromptSetupPatchResult)
 def patch_run_prompt_setup_route(run_id: int, payload: RunPromptSetupPatch, db: Session = Depends(get_db)):
     run = update_run_prompt_setup_text(db, run_id, payload.prompt_setup_text)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return RunPromptSetupPatchResult(
+        id=run.id,
+        prompt_setup_saved=prompt_setup_saved_from_context(run.context_json),
+    )
 
 
 @router.patch("/{run_id}/human-ui", response_model=RunRead)

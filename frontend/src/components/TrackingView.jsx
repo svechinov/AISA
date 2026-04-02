@@ -261,10 +261,14 @@ export default function TrackingView({
   onActiveTabChange,
   singleTabMode = false,
   onRunWorkspaceRefresh,
+  /** Sync Human UI draft chips / library when assets or run packets change (not polled with threads/events). */
+  onStaticAssetsSynced,
   /** From workspace / run card: Preparing | Ready | Active | Closed — tighter poll only when Active. */
   workspaceDisplayPhase,
   /** From GET /setup/status — R2 env complete for POST /assets/upload */
   cdnR2UploadReady = false,
+  /** Poll live threads/events/etc. only on Events / Threads — other tabs load once per visit. */
+  pollLiveEnabled = false,
 }) {
   const showSignaturePlaceholder = Boolean((runSignatureHtml ?? "").trim());
   const [events, setEvents] = useState([]);
@@ -336,74 +340,92 @@ export default function TrackingView({
     onActiveTabChange?.(v);
   };
 
+  const fetchLiveData = useCallback(async () => {
+    if (!runId) return;
+    const [er, sr, dr, cr, tr, th, msg, rep, rem] = await Promise.all([
+      fetch(`${API_BASE}/email-events/run/${runId}`),
+      fetch(`${API_BASE}/sending/runs/${runId}/summary`),
+      fetch(`${API_BASE}/email-drafts/run/${runId}`),
+      fetch(`${API_BASE}/contacts/run/${runId}`),
+      fetch(`${API_BASE}/research-tasks/run/${runId}`),
+      fetch(`${API_BASE}/email-threads/run/${runId}`),
+      fetch(`${API_BASE}/email-threads/run/${runId}/messages`),
+      fetch(`${API_BASE}/reply-drafts/run/${runId}`),
+      fetch(`${API_BASE}/reminders/run/${runId}`),
+    ]);
+    if (!er.ok) throw new Error(`Events: ${er.status}`);
+    if (!sr.ok) throw new Error(`Summary: ${sr.status}`);
+    const [e, s] = await Promise.all([er.json(), sr.json()]);
+    setEvents(Array.isArray(e) ? e : []);
+    setSummary(s || null);
+
+    const d = dr.ok ? await dr.json() : [];
+    setDrafts(Array.isArray(d) ? d : []);
+
+    const c = cr.ok ? await cr.json() : [];
+    setContacts(Array.isArray(c) ? c : []);
+
+    const t = tr.ok ? await tr.json() : [];
+    setTasks(Array.isArray(t) ? t : []);
+
+    const threadData = th.ok ? await th.json() : [];
+    setThreads(Array.isArray(threadData) ? threadData : []);
+    const msgData = msg.ok ? await msg.json() : [];
+    setRunMessages(Array.isArray(msgData) ? msgData : []);
+    const repData = rep.ok ? await rep.json() : [];
+    setReplyDrafts(Array.isArray(repData) ? repData : []);
+    const remData = rem.ok ? await rem.json() : [];
+    setReminders(Array.isArray(remData) ? remData : []);
+    try {
+      const threadsLite = sortThreadPanelLiteRows(
+        buildThreadPanelLiteRows(
+          Array.isArray(threadData) ? threadData : [],
+          Array.isArray(c) ? c : [],
+          Array.isArray(d) ? d : [],
+          Array.isArray(msgData) ? msgData : [],
+          Array.isArray(remData) ? remData : [],
+        ),
+      );
+      const eventsLite = buildEventsPanelLite(
+        Array.isArray(e) ? e : [],
+        Array.isArray(d) ? d : [],
+        Array.isArray(c) ? c : [],
+      );
+      snapshotMergeWriteRunPanelLite(runId, {
+        threads: threadsLite,
+        eventsGroups: eventsLite,
+      });
+    } catch {
+      /* lite snapshot is best-effort */
+    }
+  }, [runId]);
+
+  const fetchStaticAssets = useCallback(async () => {
+    if (!runId) return;
+    try {
+      const [ast, apk] = await Promise.all([
+        fetch(`${API_BASE}/assets`),
+        fetch(`${API_BASE}/asset-packets/run/${runId}`),
+      ]);
+      const astData = ast.ok ? await ast.json() : [];
+      const apkData = apk.ok ? await apk.json() : [];
+      const assets = Array.isArray(astData) ? astData : [];
+      const packets = Array.isArray(apkData) ? apkData : [];
+      setAssets(assets);
+      setAssetPackets(packets);
+      onStaticAssetsSynced?.({ assets, packets, runId });
+    } catch {
+      /* keep previous lists */
+    }
+  }, [runId, onStaticAssetsSynced]);
+
   const load = useCallback(async () => {
     if (!runId) return;
     setLoading(true);
     setError("");
     let ok = false;
     try {
-      const [er, sr, dr, cr, tr, th, msg, rep, rem, ast, apk] = await Promise.all([
-        fetch(`${API_BASE}/email-events/run/${runId}`),
-        fetch(`${API_BASE}/sending/runs/${runId}/summary`),
-        fetch(`${API_BASE}/email-drafts/run/${runId}`),
-        fetch(`${API_BASE}/contacts/run/${runId}`),
-        fetch(`${API_BASE}/research-tasks/run/${runId}`),
-        fetch(`${API_BASE}/email-threads/run/${runId}`),
-        fetch(`${API_BASE}/email-threads/run/${runId}/messages`),
-        fetch(`${API_BASE}/reply-drafts/run/${runId}`),
-        fetch(`${API_BASE}/reminders/run/${runId}`),
-        fetch(`${API_BASE}/assets`),
-        fetch(`${API_BASE}/asset-packets/run/${runId}`),
-      ]);
-      if (!er.ok) throw new Error(`Events: ${er.status}`);
-      if (!sr.ok) throw new Error(`Summary: ${sr.status}`);
-      const [e, s] = await Promise.all([er.json(), sr.json()]);
-      setEvents(Array.isArray(e) ? e : []);
-      setSummary(s || null);
-
-      const d = dr.ok ? await dr.json() : [];
-      setDrafts(Array.isArray(d) ? d : []);
-
-      const c = cr.ok ? await cr.json() : [];
-      setContacts(Array.isArray(c) ? c : []);
-
-      const t = tr.ok ? await tr.json() : [];
-      setTasks(Array.isArray(t) ? t : []);
-
-      const threadData = th.ok ? await th.json() : [];
-      setThreads(Array.isArray(threadData) ? threadData : []);
-      const msgData = msg.ok ? await msg.json() : [];
-      setRunMessages(Array.isArray(msgData) ? msgData : []);
-      const repData = rep.ok ? await rep.json() : [];
-      setReplyDrafts(Array.isArray(repData) ? repData : []);
-      const remData = rem.ok ? await rem.json() : [];
-      setReminders(Array.isArray(remData) ? remData : []);
-      const astData = ast.ok ? await ast.json() : [];
-      setAssets(Array.isArray(astData) ? astData : []);
-      const apkData = apk.ok ? await apk.json() : [];
-      setAssetPackets(Array.isArray(apkData) ? apkData : []);
-      try {
-        const threadsLite = sortThreadPanelLiteRows(
-          buildThreadPanelLiteRows(
-            Array.isArray(threadData) ? threadData : [],
-            Array.isArray(c) ? c : [],
-            Array.isArray(d) ? d : [],
-            Array.isArray(msgData) ? msgData : [],
-            Array.isArray(remData) ? remData : [],
-          ),
-        );
-        const eventsLite = buildEventsPanelLite(
-          Array.isArray(e) ? e : [],
-          Array.isArray(d) ? d : [],
-          Array.isArray(c) ? c : [],
-        );
-        snapshotMergeWriteRunPanelLite(runId, {
-          threads: threadsLite,
-          eventsGroups: eventsLite,
-        });
-      } catch {
-        /* lite snapshot is best-effort */
-      }
+      await Promise.all([fetchLiveData(), fetchStaticAssets()]);
       ok = true;
     } catch (err) {
       const msg = String(err?.message || err || "");
@@ -419,7 +441,32 @@ export default function TrackingView({
       setLoading(false);
       if (ok) setTrackingCountsReady(true);
     }
-  }, [runId]);
+  }, [runId, fetchLiveData, fetchStaticAssets]);
+
+  /** Threads, events, drafts, reminders — polled; does not hit /assets or /asset-packets. */
+  const loadLive = useCallback(async () => {
+    if (!runId) return;
+    setLoading(true);
+    setError("");
+    let ok = false;
+    try {
+      await fetchLiveData();
+      ok = true;
+    } catch (err) {
+      const msg = String(err?.message || err || "");
+      const transient =
+        /failed to fetch/i.test(msg) ||
+        /load failed|networkerror|network request failed|aborted|abort$/i.test(msg);
+      if (transient) {
+        console.warn("[TrackingView] refresh skipped (transient):", msg);
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+      if (ok) setTrackingCountsReady(true);
+    }
+  }, [runId, fetchLiveData]);
 
   useEffect(() => {
     setTrackingCountsReady(false);
@@ -449,13 +496,17 @@ export default function TrackingView({
       return;
     }
     void load();
+  }, [runId, load, activeTab]);
+
+  useEffect(() => {
+    if (!runId || !pollLiveEnabled) return;
     const pollMs = trackingPollIntervalMs(workspaceDisplayPhase);
     const i = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      void load();
+      void loadLive();
     }, pollMs);
     return () => clearInterval(i);
-  }, [runId, load, workspaceDisplayPhase]);
+  }, [runId, loadLive, workspaceDisplayPhase, pollLiveEnabled]);
 
   useEffect(() => {
     if (threadModalId == null) {
@@ -777,7 +828,7 @@ export default function TrackingView({
   async function sendSingleDraft(draftId) {
     try {
       await fetch(`${API_BASE}/sending/drafts/${draftId}/send`, { method: "POST" });
-      await load();
+      await loadLive();
     } catch {
       setError("Send failed — check network / backend.");
     }
@@ -787,7 +838,7 @@ export default function TrackingView({
     if (!runId) return;
     try {
       await fetch(`${API_BASE}/sending/runs/${runId}/send`, { method: "POST" });
-      await load();
+      await loadLive();
     } catch {
       setError("Batch send failed — check network / backend.");
     }
@@ -804,7 +855,7 @@ export default function TrackingView({
         return;
       }
       await res.json();
-      await load();
+      await loadLive();
     } catch {
       setError("Generate replacement drafts failed — check network / backend.");
     }
@@ -821,7 +872,7 @@ export default function TrackingView({
         return;
       }
       await res.json();
-      await load();
+      await loadLive();
     } catch {
       setError("Send replacement drafts failed — check network / backend.");
     }
@@ -874,7 +925,7 @@ export default function TrackingView({
       setThreadDeliveryLlmResult(null);
       setThreadModalId(null);
       setThreadBucketTab(kind === "bounced" ? "bounced" : "dead_mailbox");
-      await load();
+      await loadLive();
       onRunWorkspaceRefresh?.();
     } catch (e) {
       setError(String(e?.message || e));
@@ -953,7 +1004,7 @@ export default function TrackingView({
       if (taskPayload) {
         setTasks((prev) => prev.map((t) => (t.id === taskPayload.id ? taskPayload : t)));
       }
-      await load();
+      await loadLive();
     } catch {
       setTasks((prev) => prev.map((t) => (t.id === task.id ? snapshot : t)));
       setError("Re-run failed — check network / backend.");
@@ -982,7 +1033,7 @@ export default function TrackingView({
         return;
       }
       await res.json();
-      await load();
+      await loadLive();
     } catch {
       setError("Generate reply draft failed — check network / backend.");
     }
@@ -1001,7 +1052,7 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Reminder update failed (${res.status})`);
         return;
       }
-      await load();
+      await loadLive();
       onRunWorkspaceRefresh?.();
     } catch {
       setError("Reminder update failed.");
@@ -1023,7 +1074,7 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Snooze failed (${res.status})`);
         return;
       }
-      await load();
+      await loadLive();
       onRunWorkspaceRefresh?.();
     } catch {
       setError("Snooze failed.");
@@ -1054,7 +1105,7 @@ export default function TrackingView({
       }
       setNewAssetName("");
       setNewAssetUrl("");
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Create asset failed.");
     }
@@ -1088,7 +1139,7 @@ export default function TrackingView({
       if (uploadFileInputRef.current) {
         uploadFileInputRef.current.value = "";
       }
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Upload failed.");
     } finally {
@@ -1120,11 +1171,11 @@ export default function TrackingView({
       }
       if (data.deduplicated) {
         setError("");
-        await load();
+        await loadLive();
         onRunWorkspaceRefresh?.();
         return;
       }
-      await load();
+      await loadLive();
       onRunWorkspaceRefresh?.();
     } catch {
       setError("Create reminder failed.");
@@ -1144,7 +1195,7 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Update packet failed (${res.status})`);
         return;
       }
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Update asset packet failed.");
     }
@@ -1218,7 +1269,7 @@ export default function TrackingView({
         return;
       }
       setPacketEditState(null);
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Save packet failed.");
     }
@@ -1233,7 +1284,7 @@ export default function TrackingView({
         setError(typeof data.detail === "string" ? data.detail : `Duplicate failed (${res.status})`);
         return;
       }
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Duplicate packet failed.");
     }
@@ -1260,7 +1311,7 @@ export default function TrackingView({
         return;
       }
       setNewPacketForm({ title: "", draftAssets: [], addPick: "" });
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Create packet failed.");
     } finally {
@@ -1281,7 +1332,7 @@ export default function TrackingView({
       }
       setPacketToDelete(null);
       setPacketEditState((st) => (st?.packetId === id ? null : st));
-      await load();
+      await fetchStaticAssets();
     } catch {
       setError("Delete packet failed.");
     }
@@ -1359,7 +1410,7 @@ export default function TrackingView({
         return next;
       });
       setReplyEditing(null);
-      await load();
+      await loadLive();
     } catch {
       setError("Regenerate failed — check network / backend.");
     }
@@ -1378,7 +1429,7 @@ export default function TrackingView({
         setError(detail?.detail ? String(detail.detail) : `Review failed (${res.status})`);
         return;
       }
-      await load();
+      await loadLive();
     } catch {
       setError("Review failed — check network / backend.");
     }
@@ -1396,7 +1447,7 @@ export default function TrackingView({
       if (data.status === "failed") {
         setError(data.error || "Send failed");
       }
-      await load();
+      await loadLive();
     } catch {
       setError("Send reply draft failed — check network / backend.");
     }
@@ -1421,7 +1472,7 @@ export default function TrackingView({
         return;
       }
       setReplyEditing(null);
-      await load();
+      await loadLive();
     } catch {
       setError("Save failed — check network / backend.");
     }

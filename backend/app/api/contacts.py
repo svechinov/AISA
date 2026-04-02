@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.repositories.contact_repo import (
     get_contact,
     list_contacts_by_run,
@@ -16,6 +16,17 @@ from app.workers.email_worker import (
 )
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
+
+
+def _background_ensure_outreach_draft(contact_id: int) -> None:
+    """Run after HTTP response — LLM draft generation must not block PATCH /review."""
+    db = SessionLocal()
+    try:
+        contact = get_contact(db, contact_id)
+        if contact and contact.review_status in {"approved", "edited"}:
+            ensure_outreach_draft_for_contact(db, contact)
+    finally:
+        db.close()
 
 
 @router.get("/run/{run_id}", response_model=list[ContactRead])
@@ -54,6 +65,7 @@ def create_draft_for_contact_route(contact_id: int, db: Session = Depends(get_db
 def review_contact_route(
     contact_id: int,
     payload: ContactReviewUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     contact = get_contact(db, contact_id)
@@ -76,7 +88,7 @@ def review_contact_route(
         review_notes=payload.review_notes,
     )
     if updated.review_status in {"approved", "edited"}:
-        ensure_outreach_draft_for_contact(db, updated)
+        background_tasks.add_task(_background_ensure_outreach_draft, updated.id)
     return updated
 
 
@@ -84,6 +96,7 @@ def review_contact_route(
 def edit_contact_route(
     contact_id: int,
     payload: ContactEditUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     contact = get_contact(db, contact_id)
@@ -102,5 +115,5 @@ def edit_contact_route(
         confidence=payload.confidence,
         review_notes=payload.review_notes,
     )
-    ensure_outreach_draft_for_contact(db, updated)
+    background_tasks.add_task(_background_ensure_outreach_draft, updated.id)
     return updated
