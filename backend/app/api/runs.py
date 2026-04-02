@@ -51,7 +51,7 @@ from app.services.run_display_service import (
     get_run_performance_rows,
     get_run_setup_summary,
     get_setup_state_message,
-    setup_steps_for_run,
+    hourly_send_counts_24h_utc,
 )
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -64,10 +64,11 @@ def _workspace(db, run) -> RunWorkspaceRead:
         **base,
         display_phase=get_run_display_phase(db, run),
         setup_summary=get_run_setup_summary(db, rid),
-        setup_steps=setup_steps_for_run(db, rid),
+        setup_steps=[],
         setup_state_message=get_setup_state_message(db, run),
         performance=get_run_performance_rows(db, rid),
         conversations=get_conversations_snapshot(db, rid),
+        hourly_sends_24h=hourly_send_counts_24h_utc(db, rid),
     )
 
 

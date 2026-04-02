@@ -25,6 +25,7 @@ import {
   normalizeAttachedAssetIds,
 } from "@/components/DraftAssetAttachmentsField";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { RunSetupHourlySendsChart } from "@/components/RunSetupHourlySendsChart";
 import { cn } from "@/lib/utils";
 import {
   snapshotEnsureRunSetupPrefsSeedFromRun,
@@ -470,7 +471,7 @@ function formatSetupIntegrationInformer(si) {
 function mergeWorkspaceLiteInto(prevWorkspace, lite) {
   if (!lite || typeof lite !== "object") return prevWorkspace;
   if (!prevWorkspace || typeof prevWorkspace !== "object") return prevWorkspace;
-  return {
+  const next = {
     ...prevWorkspace,
     display_phase: lite.display_phase ?? prevWorkspace.display_phase,
     setup_state_message: lite.setup_state_message ?? prevWorkspace.setup_state_message,
@@ -487,6 +488,10 @@ function mergeWorkspaceLiteInto(prevWorkspace, lite) {
       ...(lite.conversations && typeof lite.conversations === "object" ? lite.conversations : {}),
     },
   };
+  if (Array.isArray(lite.hourly_sends_24h)) {
+    next.hourly_sends_24h = lite.hourly_sends_24h;
+  }
+  return next;
 }
 
 /** Job title for header + edit form: column `role`, else common keys in source_json (LLM / legacy). */
@@ -1683,7 +1688,7 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  /** @param {{ prefilledFromSelected?: boolean }} [options] — prefill from current run only for “Continue outreach”; bare “New run” opens an empty form. */
+  /** @param {{ prefilledFromSelected?: boolean }} [options] — prefill from current run (e.g. Runs tab “Continue outreach”); bare “New run” opens an empty form. */
   const openNewRunDialog = useCallback((options = {}) => {
     const prefilled = Boolean(options.prefilledFromSelected) && Boolean(selectedRun?.id);
     if (prefilled) {
@@ -1754,11 +1759,20 @@ export default function AiBizOsHumanUI() {
     setRestartDialogOpen(false);
     setRestartDialogRun(null);
     setPendingRestart({ id: runId, name: runName });
+    let restartPostOk = false;
     try {
       const pid = projectPk(selectedProject);
       await api(`/runs/${runId}/restart`, { method: "POST", timeoutMs: RESTART_RUN_TIMEOUT_MS });
-      setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
-      const ws = await loadRunDetails(runId);
+      restartPostOk = true;
+      // Restart can run a long setup on the server; the follow-up bundle must not use the default 25s ceiling.
+      setRunsList(
+        orderRunsOpenFirst(
+          await api(`/runs/project/${pid}`, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+        ),
+      );
+      const ws = await loadRunDetails(runId, undefined, {
+        requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+      });
       if (ws) {
         setRunsList((prev) =>
           prev.map((r) =>
@@ -1779,6 +1793,9 @@ export default function AiBizOsHumanUI() {
       void loadSetupIntegration();
     } catch (e) {
       setUiError(setError, e);
+      if (restartPostOk) {
+        refreshRunDetailsInBackground(runId);
+      }
     } finally {
       setPendingRestart(null);
     }
@@ -2503,17 +2520,6 @@ export default function AiBizOsHumanUI() {
 
   const canContinue = approvedContactsReachable > 0;
 
-  /** Share of outbound drafts with a terminal delivery outcome (for “next wave” gating). */
-  const outreachBatchProgress = useMemo(() => {
-    if (!drafts.length) return { fraction: 0, done: 0, total: 0 };
-    const terminal = new Set(["sent", "replied", "bounced", "dead_mailbox", "failed"]);
-    const done = drafts.filter((d) => {
-      const st = String(d.tracking_status || d.status || "").toLowerCase();
-      return terminal.has(st);
-    }).length;
-    return { fraction: done / drafts.length, done, total: drafts.length };
-  }, [drafts]);
-
   const totalPerformance24hUi = useMemo(
     () => totalPerformance24hBand(totalPerformance?.emails_sent_24h ?? 0),
     [totalPerformance?.emails_sent_24h],
@@ -2593,24 +2599,10 @@ export default function AiBizOsHumanUI() {
       };
     }
     if (phase === "Active") {
-      const { fraction, done, total } = outreachBatchProgress;
-      const halfDone = total > 0 && fraction >= 0.5;
-      return {
-        label: "Continue outreach",
-        disabled: !halfDone,
-        hint: !halfDone
-          ? total === 0
-            ? "No drafts on this run yet — send and track the current batch first."
-            : `Enable after ≥50% of outbound emails are resolved (${done}/${total} · ${Math.round(fraction * 100)}%). Counts: sent, replied, bounced, failed, dead mailbox.`
-          : "Opens Runs and New run — a new search & batch in this project (current run stays in the list).",
-        onClick: () => {
-          setMainNav("runs");
-          openNewRunDialog({ prefilledFromSelected: true });
-        },
-      };
+      return null;
     }
     return null;
-  }, [selectedRun, workspace?.display_phase, outreachBatchProgress, openNewRunDialog]);
+  }, [selectedRun?.id, workspace?.display_phase]);
 
   const contactCardClass = (c) => {
     if (contactHasBadEmailHealth(c)) {
@@ -3464,32 +3456,7 @@ export default function AiBizOsHumanUI() {
                     </div>
                   </CardHeader>
                   <CardContent className="min-w-0 space-y-4">
-                    <div className="grid grid-cols-1 gap-3 min-[520px]:grid-cols-3">
-                      {(workspace.setup_steps || []).map((st) => {
-                        const capClass =
-                          st.ui_status === "Completed"
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-muted text-muted-foreground";
-                        return (
-                          <div
-                            key={st.step_name}
-                            className="overflow-hidden rounded-2xl border-2 border-border bg-card shadow-none"
-                          >
-                            <div
-                              className={`px-3 py-2 text-center text-xs font-semibold ${capClass}`}
-                            >
-                              {st.ui_status}
-                            </div>
-                            <div className="p-3 pt-3">
-                              <div className="text-sm font-medium leading-snug">{st.title}</div>
-                              <div className="mt-2 text-xs text-muted-foreground">
-                                Retry count: {st.retry_count}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    <RunSetupHourlySendsChart counts={workspace.hourly_sends_24h} />
                     <div className="rounded-2xl border-2 border-border bg-muted/30 p-3 text-sm">
                       <div className="font-medium">Setup summary</div>
                       <ul className="mt-2 space-y-1 text-muted-foreground">
@@ -3654,16 +3621,22 @@ export default function AiBizOsHumanUI() {
                           <div className="space-y-1 text-sm">
                             <div className="font-semibold">{r.name}</div>
                             <div className="text-muted-foreground">Status: {r.display_phase}</div>
-                            <div className="text-xs text-muted-foreground">
-                              Companies {r.companies_count} · Contacts {r.contacts_count} · Sent{" "}
-                              {r.emails_sent} · Replies {r.replies} · Threads {r.active_threads}
+                            <div className="space-y-0.5 text-xs text-muted-foreground">
+                              <div>
+                                Companies {r.companies_count} · Contacts {r.contacts_count}
+                              </div>
+                              <div>
+                                Sent {r.emails_sent} · Replies {r.replies} · Threads{" "}
+                                {r.active_threads}
+                              </div>
                             </div>
                           </div>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="flex max-w-full flex-nowrap items-center gap-2 overflow-x-auto">
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
+                              className="shrink-0 whitespace-nowrap"
                               disabled={openRunEditLoading}
                               onClick={() => void openRunEditDialog(r)}
                             >
@@ -3673,6 +3646,7 @@ export default function AiBizOsHumanUI() {
                               type="button"
                               size="sm"
                               variant="outline"
+                              className="shrink-0 whitespace-nowrap"
                               disabled={r.display_phase === "Closed" || pendingRestart != null}
                               onClick={() => openRestartDialog(r)}
                             >
@@ -3682,19 +3656,21 @@ export default function AiBizOsHumanUI() {
                               type="button"
                               size="sm"
                               variant="outline"
+                              className="shrink-0 whitespace-nowrap"
                               title="Switch to this run"
                               disabled={
                                 selectedRun?.id === r.id || pendingRestart != null || openRunEditLoading
                               }
                               onClick={() => void openRunById(r.id)}
                             >
-                              <RefreshCw className="mr-1 h-4 w-4" aria-hidden />
+                              <RefreshCw className="mr-1 h-4 w-4 shrink-0" aria-hidden />
                               Switch
                             </Button>
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
+                              className="shrink-0 whitespace-nowrap"
                               disabled={r.display_phase === "Closed"}
                               onClick={() => {
                                 refreshRunDetailsInBackground(r.id);
@@ -5067,9 +5043,14 @@ export default function AiBizOsHumanUI() {
                         </Badge>
                       ) : null}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {r.display_phase} · Companies {r.companies_count} · Contacts {r.contacts_count} · Sent{" "}
-                      {r.emails_sent}
+                    <div className="space-y-0.5 text-xs text-muted-foreground">
+                      <div>{r.display_phase}</div>
+                      <div>
+                        Companies {r.companies_count} · Contacts {r.contacts_count}
+                      </div>
+                      <div>
+                        Sent {r.emails_sent} · Replies {r.replies} · Threads {r.active_threads}
+                      </div>
                     </div>
                   </button>
                 );

@@ -86,6 +86,57 @@ def count_emails_sent_in_last_hours(db: Session, run_id: int, *, hours: int = 24
     return int(n_out or 0) + int(n_reply or 0)
 
 
+def hourly_send_counts_24h_utc(db: Session, run_id: int) -> list[int]:
+    """Outreach + reply sends per hour over the last 24 hours (UTC).
+
+    ``buckets[0]`` = hour starting at (now_utc - 24h), ``buckets[23]`` = hour ending at now_utc.
+    """
+    now = datetime.utcnow()
+    start = now - timedelta(hours=24)
+    buckets = [0] * 24
+
+    def bump(st: datetime | None) -> None:
+        if st is None or st < start or st > now:
+            return
+        sec = (st - start).total_seconds()
+        if sec < 0:
+            return
+        idx = int(sec // 3600)
+        if idx >= 24:
+            idx = 23
+        if idx < 0:
+            return
+        buckets[idx] += 1
+
+    for st in (
+        db.query(EmailDraft.sent_at)
+        .filter(
+            EmailDraft.run_id == run_id,
+            EmailDraft.status == "sent",
+            EmailDraft.sent_at.isnot(None),
+            EmailDraft.sent_at >= start,
+            EmailDraft.sent_at <= now,
+        )
+        .all()
+    ):
+        bump(st[0])
+
+    for st in (
+        db.query(ReplyDraft.sent_at)
+        .filter(
+            ReplyDraft.run_id == run_id,
+            ReplyDraft.status == "sent",
+            ReplyDraft.sent_at.isnot(None),
+            ReplyDraft.sent_at >= start,
+            ReplyDraft.sent_at <= now,
+        )
+        .all()
+    ):
+        bump(st[0])
+
+    return buckets
+
+
 def _count_contacts_approved_reachable(db: Session, run_id: int) -> int:
     """Approved or edited contacts that are not bounced / dead mailbox."""
     contacts = list_contacts_by_run(db, run_id)
@@ -415,6 +466,7 @@ def build_run_workspace_lite(db: Session, run) -> dict:
         "setup_state_message": setup_state_message_from_phase(phase),
         "performance": get_run_performance_lite(db, rid),
         "conversations": get_conversations_lite(db, rid),
+        "hourly_sends_24h": hourly_send_counts_24h_utc(db, rid),
     }
 
 

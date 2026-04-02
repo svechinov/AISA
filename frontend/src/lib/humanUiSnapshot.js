@@ -125,6 +125,7 @@ export function snapshotReadRunCards(runId) {
     setup_state_message: v.setup_state_message,
     performance: v.performance,
     conversations: v.conversations,
+    hourly_sends_24h: v.hourly_sends_24h,
     savedAt: v.savedAt,
   };
 }
@@ -141,6 +142,7 @@ export function snapshotWriteRunCards(runId, ws) {
     setup_state_message: ws.setup_state_message,
     performance: ws.performance,
     conversations: ws.conversations,
+    hourly_sends_24h: ws.hourly_sends_24h,
   };
   storageSet(storageKey(`run_cards.${runId}`), JSON.stringify(payload));
 }
@@ -158,6 +160,7 @@ export function snapshotMergeWorkspaceFromRunCards(snap, runRow) {
     setup_state_message: snap.setup_state_message,
     performance: snap.performance,
     conversations: snap.conversations,
+    hourly_sends_24h: snap.hourly_sends_24h,
   };
 }
 

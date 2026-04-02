@@ -124,10 +124,13 @@ class RunCardRead(BaseModel):
 class RunWorkspaceRead(RunRead):
     display_phase: str
     setup_summary: dict[str, Any]
+    #: Deprecated in UI; kept for API compatibility (empty list).
     setup_steps: list[dict[str, Any]]
     setup_state_message: str
     performance: dict[str, Any]
     conversations: dict[str, Any]
+    #: Outreach + reply sends per UTC hour, last 24h; index 0 = oldest hour.
+    hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)
 
 
 class RunWorkspaceLiteRead(BaseModel):
@@ -137,3 +140,4 @@ class RunWorkspaceLiteRead(BaseModel):
     setup_state_message: str
     performance: dict[str, Any]
     conversations: dict[str, Any]
+    hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)
