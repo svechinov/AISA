@@ -3137,6 +3137,7 @@ export default function AiBizOsHumanUI() {
                   disabled={!selectedProject || runsList.length === 0}
                   onClick={() => setSwitchRunOpen(true)}
                 >
+                  <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
                   Switch run
                 </Button>
                 <Button
@@ -3561,8 +3562,20 @@ export default function AiBizOsHumanUI() {
                               disabled={r.display_phase === "Closed" || pendingRestart != null}
                               onClick={() => openRestartDialog(r)}
                             >
+                              Continue outreach
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              title="Switch to this run"
+                              disabled={
+                                selectedRun?.id === r.id || pendingRestart != null || openRunEditLoading
+                              }
+                              onClick={() => void openRunById(r.id)}
+                            >
                               <RefreshCw className="mr-1 h-4 w-4" aria-hidden />
-                              Restart
+                              Switch
                             </Button>
                             <Button
                               type="button"
