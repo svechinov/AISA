@@ -92,10 +92,11 @@ class RunOutreachPatch(BaseModel):
 
 
 class TotalPerformanceRead(BaseModel):
-    """All runs/projects: outreach (max of drafts sent vs distinct `email_events` type sent) + reply drafts sent."""
+    """All runs/projects: outreach (max of drafts sent vs distinct `email_events` type sent) + reply drafts sent; plus reply events."""
 
     emails_sent: int
     emails_sent_24h: int
+    replies: int
 
 
 class RunCardRead(BaseModel):

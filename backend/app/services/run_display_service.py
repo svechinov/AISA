@@ -537,7 +537,15 @@ def get_total_performance_global(db: Session) -> dict:
     )
     n_reply_24 = int(n_reply_24 or 0)
     emails_sent_24h = n_outreach_24h + n_reply_24
-    return {"emails_sent": emails_sent, "emails_sent_24h": emails_sent_24h}
+
+    n_replies = (
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.event_type == "replied")
+        .scalar()
+    )
+    n_replies = int(n_replies or 0)
+    return {"emails_sent": emails_sent, "emails_sent_24h": emails_sent_24h, "replies": n_replies}
 
 
 def get_run_performance_rows(db: Session, run_id: int) -> dict:

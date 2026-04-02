@@ -823,6 +823,10 @@ export default function AiBizOsHumanUI() {
 
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
+  /** POST PATCH /contacts/:id/edit in flight (Review contacts Save). */
+  const [contactEditSavingId, setContactEditSavingId] = useState(null);
+  /** PATCH /contacts/:id/review (approve) in flight. */
+  const [contactApproveBusyId, setContactApproveBusyId] = useState(null);
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   /** Keys: draft id string — outbound draft body regeneration in progress. */
   const [regeneratingOutboundDraftIds, setRegeneratingOutboundDraftIds] = useState(() => ({}));
@@ -1184,6 +1188,7 @@ export default function AiBizOsHumanUI() {
           setTotalPerformance({
             emails_sent: Number(tp?.emails_sent) || 0,
             emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+            replies: Number(tp?.replies) || 0,
           });
         } catch (e) {
           const msg = detailFromApiErrorMessage(e?.message || e);
@@ -1260,6 +1265,7 @@ export default function AiBizOsHumanUI() {
           setTotalPerformance({
             emails_sent: Number(tp?.emails_sent) || 0,
             emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+            replies: Number(tp?.replies) || 0,
           });
         }
       } catch (e) {
@@ -1814,6 +1820,7 @@ export default function AiBizOsHumanUI() {
   };
 
   const approveContact = async (contactId) => {
+    setContactApproveBusyId(contactId);
     try {
       setError("");
       const updated = await api(`/contacts/${contactId}/review`, {
@@ -1825,6 +1832,8 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
+    } finally {
+      setContactApproveBusyId((id) => (id === contactId ? null : id));
     }
   };
 
@@ -2712,6 +2721,7 @@ export default function AiBizOsHumanUI() {
               <Button
                 size="sm"
                 variant="outline"
+                disabled={contactApproveBusyId === contact.id}
                 onClick={() =>
                   setEditingContact({
                     id: contact.id,
@@ -2727,24 +2737,50 @@ export default function AiBizOsHumanUI() {
             {isPending ? (
               <>
                 {hasEmail ? (
-                  <Button size="sm" onClick={() => approveContact(contact.id)}>
+                  <Button
+                    size="sm"
+                    disabled={contactApproveBusyId === contact.id}
+                    aria-busy={contactApproveBusyId === contact.id}
+                    onClick={() => void approveContact(contact.id)}
+                  >
+                    {contactApproveBusyId === contact.id ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                    ) : null}
                     Approve
                   </Button>
                 ) : null}
                 {!isDeadMailbox ? (
-                  <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={contactApproveBusyId === contact.id}
+                    onClick={() => reviewContact(contact.id, "rejected")}
+                  >
                     Reject
                   </Button>
                 ) : null}
               </>
             ) : null}
             {!isPending && !isRejected && !isDeadMailbox ? (
-              <Button size="sm" variant="outline" onClick={() => reviewContact(contact.id, "rejected")}>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={contactApproveBusyId === contact.id}
+                onClick={() => reviewContact(contact.id, "rejected")}
+              >
                 Reject
               </Button>
             ) : null}
             {isRejected && hasEmail ? (
-              <Button size="sm" onClick={() => approveContact(contact.id)}>
+              <Button
+                size="sm"
+                disabled={contactApproveBusyId === contact.id}
+                aria-busy={contactApproveBusyId === contact.id}
+                onClick={() => void approveContact(contact.id)}
+              >
+                {contactApproveBusyId === contact.id ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
                 Approve
               </Button>
             ) : null}
@@ -2817,7 +2853,10 @@ export default function AiBizOsHumanUI() {
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
+                disabled={contactEditSavingId === contact.id}
+                aria-busy={contactEditSavingId === contact.id}
                 onClick={async () => {
+                  setContactEditSavingId(contact.id);
                   try {
                     setError("");
                     const nameVal = (editingContact.name ?? "").trim();
@@ -2839,12 +2878,22 @@ export default function AiBizOsHumanUI() {
                     if (selectedRun) refreshRunDetailsInBackground(selectedRun.id);
                   } catch (e) {
                     setUiError(setError, e);
+                  } finally {
+                    setContactEditSavingId((id) => (id === contact.id ? null : id));
                   }
                 }}
               >
+                {contactEditSavingId === contact.id ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
                 Save
               </Button>
-              <Button size="sm" variant="outline" onClick={() => setEditingContact(null)}>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={contactEditSavingId === contact.id}
+                onClick={() => setEditingContact(null)}
+              >
                 Cancel
               </Button>
             </div>
@@ -3204,29 +3253,31 @@ export default function AiBizOsHumanUI() {
 
           <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
             <div className="flex min-w-0 flex-1 flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
-              <div className="space-y-1 text-sm">
-                <div>
-                  <span className="text-muted-foreground">Project</span>{" "}
-                  <span className="font-medium">{selectedProject?.name ?? "—"}</span>
+              <div className="space-y-2">
+                <div className="text-lg font-medium leading-snug md:text-xl">
+                  <span className="text-muted-foreground font-normal">Project</span>{" "}
+                  <span>{selectedProject?.name ?? "—"}</span>
                 </div>
-                <div>
-                  <span className="text-muted-foreground">Run</span>{" "}
-                  <span className="font-medium">
+                <div className="text-lg font-medium leading-snug md:text-xl">
+                  <span className="text-muted-foreground font-normal">Run</span>{" "}
+                  <span>
                     {selectedRun
                       ? selectedRun.name?.trim() || `Run #${selectedRun.id}`
                       : "Select a run"}
                   </span>
                 </div>
-                <div>
-                  <span className="text-muted-foreground">Status</span>{" "}
-                  <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
-                </div>
-                <div className="text-foreground/90">
-                  <span className="text-muted-foreground">LLMs</span>{" "}
-                  <span className="font-medium">{integrationInformer.llmPart}</span>
-                  <span className="px-1.5 text-muted-foreground">·</span>
-                  <span className="text-muted-foreground">CDN</span>{" "}
-                  <span className="font-medium">{integrationInformer.cdnPart}</span>
+                <div className="space-y-1 pt-1 text-sm">
+                  <div>
+                    <span className="text-muted-foreground">Status</span>{" "}
+                    <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
+                  </div>
+                  <div className="text-foreground/90">
+                    <span className="text-muted-foreground">LLMs</span>{" "}
+                    <span className="font-medium">{integrationInformer.llmPart}</span>
+                    <span className="px-1.5 text-muted-foreground">·</span>
+                    <span className="text-muted-foreground">CDN</span>{" "}
+                    <span className="font-medium">{integrationInformer.cdnPart}</span>
+                  </div>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -3277,6 +3328,10 @@ export default function AiBizOsHumanUI() {
                   <li>
                     Emails sent (24 hrs):{" "}
                     <span className="font-medium">{totalPerformance?.emails_sent_24h ?? 0}</span>
+                  </li>
+                  <li>
+                    Replies:{" "}
+                    <span className="font-medium">{totalPerformance?.replies ?? 0}</span>
                   </li>
                 </ul>
               </CardContent>
