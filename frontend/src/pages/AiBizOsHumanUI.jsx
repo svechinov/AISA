@@ -5071,7 +5071,7 @@ export default function AiBizOsHumanUI() {
             onClick={closeRestartDialog}
           />
           <div className="relative z-50 w-full max-w-lg rounded-xl border-2 border-border bg-card p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Restart run</h2>
+            <h2 className="text-lg font-semibold">Continue outreach</h2>
             <p className="mt-1 text-sm text-muted-foreground">
               <span className="font-medium text-foreground">{restartDialogRun.name}</span>
               {" — "}
@@ -5084,8 +5084,7 @@ export default function AiBizOsHumanUI() {
                 Cancel
               </Button>
               <Button type="button" onClick={() => void confirmRestartRun()} disabled={pendingRestart != null}>
-                <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
-                Restart
+                Continue...
               </Button>
             </div>
           </div>
