@@ -387,8 +387,14 @@ function seedNewRunFormFromRun(run) {
 const API_TIMEOUT_MS = 25000;
 /** POST /runs/:id/restart runs the full LLM setup loop synchronously. */
 const RESTART_RUN_TIMEOUT_MS = 600000;
+/** POST /runs/start runs `run_workflow` synchronously on the server (same class of long work as restart). */
+const START_RUN_TIMEOUT_MS = 600000;
 /** Single-company find retry calls the LLM again; allow longer than default API timeout. */
 const COMPANY_RETRY_FIND_TIMEOUT_MS = 120000;
+/** PATCH prompt/signature is fast on the server, but slow proxies or queued workers can exceed the default. */
+const RUN_SETUP_PATCH_TIMEOUT_MS = 120000;
+/** Run-details bundle is many parallel GETs; allow the same headroom when refreshing after setup saves. */
+const LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS = 120000;
 /** Contact analyzer: many Gmail searches in one request — allow long run (default 25s would abort mid-flight). */
 const CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS = 600000;
 /** Single-address Gmail search can be slow. */
@@ -811,6 +817,9 @@ export default function AiBizOsHumanUI() {
   const [signatureSetupOpen, setSignatureSetupOpen] = useState(false);
   const [signatureFormHtml, setSignatureFormHtml] = useState("");
   const [signatureEditorKey, setSignatureEditorKey] = useState(0);
+  /** Defer TipTap mount so the modal shell paints before heavy editor init. */
+  const [signatureEditorMount, setSignatureEditorMount] = useState(false);
+  const [signatureSetupSaving, setSignatureSetupSaving] = useState(false);
   const [promptSetupOpen, setPromptSetupOpen] = useState(false);
   const [promptSetupText, setPromptSetupText] = useState("");
   const [promptSetupSaving, setPromptSetupSaving] = useState(false);
@@ -1087,8 +1096,9 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const loadRunDetails = async (runId, runRowHint) => {
+  const loadRunDetails = async (runId, runRowHint, options = {}) => {
     if (!runId) return null;
+    const requestTimeoutMs = options?.requestTimeoutMs ?? API_TIMEOUT_MS;
     // Background polls call this with the same run — do not clear hydration or Contacts/Drafts
     // flash back to snapshot placeholders until the request finishes.
     setRunDetailsHydratedId((prev) => (prev === runId ? prev : null));
@@ -1102,13 +1112,13 @@ export default function AiBizOsHumanUI() {
     }
     try {
       const [run, stepsData, contactsData, draftsData, ws, assetsData, packetsData] = await Promise.all([
-        api(`/runs/${runId}`),
-        api(`/steps/run/${runId}`),
-        api(`/contacts/run/${runId}`),
-        api(`/email-drafts/run/${runId}`),
-        api(`/runs/${runId}/workspace`),
-        api(`/assets`),
-        api(`/asset-packets/run/${runId}`),
+        api(`/runs/${runId}`, { timeoutMs: requestTimeoutMs }),
+        api(`/steps/run/${runId}`, { timeoutMs: requestTimeoutMs }),
+        api(`/contacts/run/${runId}`, { timeoutMs: requestTimeoutMs }),
+        api(`/email-drafts/run/${runId}`, { timeoutMs: requestTimeoutMs }),
+        api(`/runs/${runId}/workspace`, { timeoutMs: requestTimeoutMs }),
+        api(`/assets`, { timeoutMs: requestTimeoutMs }),
+        api(`/asset-packets/run/${runId}`, { timeoutMs: requestTimeoutMs }),
       ]);
       setSelectedRun(run);
       snapshotEnsureRunSetupPrefsSeedFromRun(runId, run);
@@ -1133,7 +1143,7 @@ export default function AiBizOsHumanUI() {
       setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
       setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
       try {
-        const tp = await api("/sending/global-performance");
+        const tp = await api("/sending/global-performance", { timeoutMs: requestTimeoutMs });
         setTotalPerformance({
           emails_sent: Number(tp?.emails_sent) || 0,
           emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
@@ -1174,6 +1184,10 @@ export default function AiBizOsHumanUI() {
     const c = contacts.find((x) => x.id === editingContact.id);
     if (c?.email_health === "dead_mailbox") setEditingContact(null);
   }, [contacts, editingContact?.id]);
+
+  useEffect(() => {
+    if (!signatureSetupOpen) setSignatureEditorMount(false);
+  }, [signatureSetupOpen]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -1511,6 +1525,7 @@ export default function AiBizOsHumanUI() {
       const pid = projectPk(selectedProject);
       const run = await api("/runs/start", {
         method: "POST",
+        timeoutMs: START_RUN_TIMEOUT_MS,
         body: {
           project_id: pid,
           workflow_name: "generic_outreach",
@@ -1532,7 +1547,18 @@ export default function AiBizOsHumanUI() {
         outreach_brief: DEFAULT_OUTREACH_BRIEF,
       });
     } catch (e) {
-      setUiError(setError, e);
+      const raw = String(e?.message ?? e ?? "");
+      const timedOutOrAborted =
+        raw.includes("Timed out or cancelled") ||
+        (raw.includes("Abort") && (raw.includes("aborted") || raw.includes("cancel")));
+      if (timedOutOrAborted) {
+        setError(
+          "Request timed out or was cancelled while starting the run. The server may still be working — " +
+            "refresh the Runs list in a minute. If the new run never appears, try again or check the API logs.",
+        );
+      } else {
+        setUiError(setError, e);
+      }
     } finally {
       setNewRunCreateInFlight(false);
     }
@@ -2069,6 +2095,12 @@ export default function AiBizOsHumanUI() {
     setSignatureFormHtml(selectedRun?.sender_signature_html ?? "");
     setSignatureEditorKey((k) => k + 1);
     setSignatureSetupOpen(true);
+    setSignatureEditorMount(false);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setSignatureEditorMount(true);
+      });
+    });
   };
 
   const openPromptSetup = () => {
@@ -2079,19 +2111,22 @@ export default function AiBizOsHumanUI() {
 
   const savePromptSetup = async () => {
     if (!selectedRun?.id) return;
+    const rid = selectedRun.id;
     try {
       setPromptSetupSaving(true);
       setError("");
-      await api(`/runs/${selectedRun.id}/prompt-setup`, {
+      const updated = await api(`/runs/${rid}/prompt-setup`, {
         method: "PATCH",
         body: { prompt_setup_text: promptSetupText },
+        timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
       });
-      snapshotWriteRunSetupPrefs(selectedRun.id, {
+      snapshotWriteRunSetupPrefs(rid, {
         prompt_setup_saved: promptSetupText.trim().length > 0,
       });
       setRunSetupPrefsRev((x) => x + 1);
+      setSelectedRun((prev) => (prev && prev.id === rid ? { ...prev, ...updated } : prev));
       setPromptSetupOpen(false);
-      await loadRunDetails(selectedRun.id);
+      void loadRunDetails(rid, undefined, { requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS });
     } catch (e) {
       setUiError(setError, e);
     } finally {
@@ -2101,20 +2136,26 @@ export default function AiBizOsHumanUI() {
 
   const saveSignatureSetup = async () => {
     if (!selectedRun?.id) return;
+    const rid = selectedRun.id;
     try {
+      setSignatureSetupSaving(true);
       setError("");
-      await api(`/runs/${selectedRun.id}/signature`, {
+      const updated = await api(`/runs/${rid}/signature`, {
         method: "PATCH",
         body: { signature_html: signatureFormHtml },
+        timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
       });
-      snapshotWriteRunSetupPrefs(selectedRun.id, {
+      snapshotWriteRunSetupPrefs(rid, {
         sender_signature_configured: runSignatureHasMeaningfulContent(signatureFormHtml),
       });
       setRunSetupPrefsRev((x) => x + 1);
-      await loadRunDetails(selectedRun.id);
+      setSelectedRun((prev) => (prev && prev.id === rid ? { ...prev, ...updated } : prev));
       setSignatureSetupOpen(false);
+      void loadRunDetails(rid, undefined, { requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS });
     } catch (e) {
       setUiError(setError, e);
+    } finally {
+      setSignatureSetupSaving(false);
     }
   };
 
@@ -5406,7 +5447,10 @@ export default function AiBizOsHumanUI() {
             type="button"
             className="fixed inset-0 bg-black/50"
             aria-label="Close"
-            onClick={() => setSignatureSetupOpen(false)}
+            disabled={signatureSetupSaving}
+            onClick={() => {
+              if (!signatureSetupSaving) setSignatureSetupOpen(false);
+            }}
           />
           <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Signature setup</h2>
@@ -5416,17 +5460,35 @@ export default function AiBizOsHumanUI() {
               <span className="font-mono text-xs">[Signature]</span> on its own line at the end.
             </p>
             <div className="mt-4">
-              <EmailDraftRichTextEditor
-                key={signatureEditorKey}
-                initialBody={signatureFormHtml}
-                onChange={setSignatureFormHtml}
-              />
+              {signatureEditorMount ? (
+                <EmailDraftRichTextEditor
+                  key={signatureEditorKey}
+                  initialBody={signatureFormHtml}
+                  onChange={setSignatureFormHtml}
+                />
+              ) : (
+                <div
+                  className="flex min-h-[260px] items-center justify-center rounded-md border border-input bg-muted/20 text-sm text-muted-foreground"
+                  aria-hidden
+                >
+                  Loading editor…
+                </div>
+              )}
             </div>
             <div className="mt-6 flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setSignatureSetupOpen(false)}>
+              <Button
+                variant="outline"
+                disabled={signatureSetupSaving}
+                onClick={() => setSignatureSetupOpen(false)}
+              >
                 Cancel
               </Button>
-              <Button onClick={() => void saveSignatureSetup()}>Save</Button>
+              <Button type="button" disabled={signatureSetupSaving} onClick={() => void saveSignatureSetup()}>
+                {signatureSetupSaving ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
+                Save
+              </Button>
             </div>
           </div>
         </div>

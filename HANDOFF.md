@@ -2,7 +2,7 @@
 
 Документ для следующей итерации разработки. Репозиторий: `ai-biz-os/` (backend + frontend + `infra/`).
 
-**Обновление:** март 2026 · актуальный релиз — **фронтенд `package.json` v2.4.0**. Продуктовая линия «не только VOD» (§1–6) без изменений по смыслу. История операторского UI и данных: **§12** (снимок 2.1.4) → **§13** (релиз **2.4.0**, Gmail sync + вкладки Review/Tracking/Events).
+**Обновление:** март 2026 · актуальная версия фронтенда — **`frontend/package.json` v2.5.3** (смотрите файл при handoff; в тексте ниже для истории сохранены §12–13 под 2.1.4 / 2.4.0). Продуктовая линия «не только VOD» (§1–6) без изменений по смыслу. **Расширенный технический handoff для ИИ и команды:** **§14** (структура, дерево процессов, потоки данных, ускорение). История UI: **§12** → **§13**.
 
 **Заявленная цель владельца продукта:** система не должна восприниматься и работать как узкоспециализированный инструмент поиска VOD-площадок. Нужна **вертикально-независимая** логика аутриха: разные отрасли (страхование, фестивали, производство игрушек и т.д.) — **разные формулировки задач, роли контактов, шаблоны писем**, без жёсткой привязки к «видеоплатформам» в коде и UX.
 
@@ -403,4 +403,192 @@ git show v2.4.0 --stat
 
 ---
 
-*Версия документа: март 2026 (§13 = релиз 2.4.0; синхронизируйте `HANDOFF CURSOR.md` при изменении схемы БД).*
+---
+
+## 14. Технический справочник (структура, процессы, данные, производительность)
+
+Раздел для следующей итерации и для консультаций с моделями ИИ: **как устроен код**, **какие процессы живут параллельно**, **почему UI может ощущаться «тяжёлым»**, **куда копать для глобального ускорения**. Репозиторий: `ai-biz-os/` внутри рабочего дерева (например `freeman-lab/ai-biz-os`).
+
+### 14.1 Карта системы (слои)
+
+| Слой | Реализация | Примечание |
+|------|------------|------------|
+| HTTP API | FastAPI, роутеры в `backend/app/api/*.py` | Префиксы: `/runs`, `/contacts`, `/projects`, … см. `main.py` |
+| БД | SQLAlchemy 2.x, модели `backend/app/models/` | PostgreSQL по умолчанию (`DATABASE_URL`); SQLite возможен |
+| Схема | `init_db.ensure_schema()` в **lifespan** (`main.py`) | Нет обязательного Alembic; точечные `_ensure_*` ALTER |
+| Бизнес-логика | `backend/app/services/`, `repositories/` | Оркестрация пайплайна: `orchestrator.py` |
+| LLM / шаги воркфлоу | `backend/app/workers/` | `research_worker`, `contacts_worker`, `email_worker` |
+| Фон Gmail | `asyncio` task в lifespan | `GMAIL_SYNC_INTERVAL_SECONDS` из `config.py` (0 = только ручной sync) |
+| Frontend | React + Vite, главная страница `frontend/src/pages/AiBizOsHumanUI.jsx` | Прокси `/api` → `VITE_API_PROXY_TARGET` |
+| Контейнеры | `infra/docker-compose.yml` | Postgres, Redis, backend :8000 |
+
+### 14.2 Дерево каталогов (рабочая структура)
+
+```
+ai-biz-os/
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI, CORS, include_router, lifespan → ensure_schema + Gmail loop
+│   │   ├── config.py            # Settings (DATABASE_URL, GMAIL_SYNC_INTERVAL_SECONDS, …)
+│   │   ├── db.py                # engine, SessionLocal, get_db
+│   │   ├── init_db.py           # create_all + _ensure_* миграции колонок/таблиц
+│   │   ├── api/
+│   │   │   ├── projects.py
+│   │   │   ├── runs.py          # CRUD run, workspace, companies, start/continue/restart, prompt/signature patch
+│   │   │   ├── steps.py
+│   │   │   ├── contacts.py
+│   │   │   ├── contact_analyzer.py
+│   │   │   ├── email_drafts.py
+│   │   │   ├── email_events.py
+│   │   │   ├── email_threads.py
+│   │   │   ├── reply_drafts.py
+│   │   │   ├── sending.py       # отправка, summary run
+│   │   │   ├── tracking.py
+│   │   │   ├── inbox.py
+│   │   │   ├── gmail_sync.py
+│   │   │   ├── oauth_google.py
+│   │   │   ├── setup.py
+│   │   │   ├── assets.py
+│   │   │   ├── asset_packets.py
+│   │   │   ├── follow_up_tasks.py
+│   │   │   ├── reminders.py
+│   │   │   ├── research_tasks.py
+│   │   │   ├── rules.py
+│   │   │   └── templates.py
+│   │   ├── models/              # SQLAlchemy: run, contact, email_draft, email_thread, …
+│   │   ├── schemas/             # Pydantic request/response
+│   │   ├── repositories/      # CRUD и выборки по сессии
+│   │   ├── services/          # доменная логика, трекинг, Gmail, display, orchestrator helpers
+│   │   ├── workers/           # шаги пайплайна (collect/find/validate/emails)
+│   │   └── utils/
+│   ├── scripts/               # утилиты (uvicorn bg, wipe, токены, …)
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── pages/AiBizOsHumanUI.jsx   # Review workspace, run switch, loadRunDetails bundle
+│   │   ├── components/
+│   │   │   ├── TrackingView.jsx       # Events/Threads/… + load() each 3s
+│   │   │   ├── EmailDraftRichTextEditor.jsx  # TipTap
+│   │   │   ├── DraftAssetAttachmentsField.jsx
+│   │   │   └── ui/
+│   │   └── lib/
+│   ├── vite.config.js
+│   └── package.json
+├── infra/
+│   └── docker-compose.yml
+└── scripts/
+    └── deploy-local.sh          # compose + npm build (см. комментарии в проекте)
+```
+
+### 14.3 Дерево процессов и потоков выполнения (runtime)
+
+Ниже — логическое «дерево», а не обязательно отдельные OS-процессы на каждый узел.
+
+```
+[Оператор: браузер]
+  └─ React (Vite dev или статика nginx)
+       └─ Human UI (AiBizOsHumanUI.jsx)
+            ├─ fetch → /api/* (прокси на backend)
+            ├─ loadRunDetails(runId): параллельно (типично):
+            │     GET /runs/:id
+            │     GET /steps/run/:id
+            │     GET /contacts/run/:id
+            │     GET /email-drafts/run/:id
+            │     GET /runs/:id/workspace   ← агрегат display/setup/performance/conversations
+            │     GET /assets               ← глобальная библиотека (не scoped на run)
+            │     GET /asset-packets/run/:id
+            │     затем GET /sending/global-performance
+            ├─ Периодический poll loadRunDetails (интервал зависит от workspace.display_phase):
+            │     Active ~8s, Ready ~20s, Preparing ~45s, иначе ~60s; пауза если вкладка hidden
+            └─ Навигация в TrackingView
+                 └─ load() по интервалу 3s (пока компонент смонтирован)
+[Backend: uvicorn / Docker]
+  └─ FastAPI
+       ├─ HTTP handlers → Session (SQLAlchemy) → repositories/services
+       ├─ Lifespan (старт):
+       │     ensure_schema()
+       │     optional: asyncio.create_task(_gmail_background_sync_loop)
+       │        └─ каждые GMAIL_SYNC_INTERVAL_SECONDS: SessionLocal → sync_gmail_all_open_runs(db)
+       └─ Долгие запросы: POST /runs/start, restart, continue (синхронный run_workflow / continue_workflow в том же worker-процессе)
+[Gmail API]  ← только при настроенных GOOGLE_* и sync (фон или POST /gmail-sync)
+[PostgreSQL]
+[Redis]      ← в compose; не все пути кода обязаны использовать
+```
+
+**Важно для диагностики «всё тормозит»:** Human UI и Tracking одновременно могут генерировать **много параллельных HTTP** и **конкурировать за один пул соединений БД** на бэкенде; плюс фоновый Gmail sync держит открытую сессию и делает сетевые вызовы.
+
+### 14.4 Пайплайн аутриха (логика шагов)
+
+Регистр воркфлоу: `backend/app/services/workflow_registry.py` — ключи `vod_outreach` и `generic_outreach` с одинаковым списком шагов:
+
+1. `collect_companies` — `workers/research_worker.py`
+2. `find_contacts` — `workers/contacts_worker.py`
+3. `validate_contacts` — там же
+4. *(пауза: ревью контактов в UI)*
+5. `generate_master_email_draft` — `workers/email_worker.py`
+6. `generate_emails` — `workers/email_worker.py`
+
+Оркестратор: `backend/app/services/orchestrator.py` — таблица `STEP_HANDLERS`, запись шагов в `steps`, merge компаний/контактов из `output_json`, после `validate_contacts` ожидание действия пользователя; продолжение через API **continue** (см. `api/runs.py`).
+
+### 14.5 Ключевые HTTP-траектории UI
+
+| Действие | Типичные эндпоинты |
+|----------|-------------------|
+| Смена проекта | `GET /runs/project/:projectId`, затем `loadRunDetails` для выбранного run |
+| Любое «освежить run» | полный бандл как в §14.3 |
+| Список карточек run | `enrich_run_for_card` на каждый run: несколько запросов/агрегаций на run (см. `run_display_service.py`) |
+| Workspace strip в шапке | данные приходят из `GET /runs/:id/workspace`: внутри `_workspace` вызываются `get_run_display_phase`, `get_run_setup_summary`, `setup_steps_for_run`, `get_run_performance_rows`, `get_conversations_snapshot` — каждая тянет данные из БД |
+| Tracking | отдельные эндпоинты (threads, events, reply drafts, …) по реализации `TrackingView.load()` |
+| Gmail | фон: `sync_gmail_all_open_runs`; ручной: `gmail_sync` router |
+
+### 14.6 Почему ощущается медленно «даже при маленьких данных»
+
+Возможные причины **не только объём строк**, а **число round-trip и тяжесть агрегатов**:
+
+1. **Лавина запросов с фронта:** один `loadRunDetails` = много параллельных GET + отдельно `global-performance`; при поллинге и открытой Tracking — ещё циклы каждые 3s.
+2. **Тяжёлый workspace:** `get_run_setup_summary` опирается на `get_run_summary` и доп. подсчёты по контактам/шагам; несколько обходов таблиц на один запрос.
+3. **Список runs:** для каждой карточки `enrich_run_for_card` → снова summary, steps, счётчики — при росте числа run линейно растёт число запросов (N×паттерн).
+4. **Глобальный `GET /assets`:** при каждом полном refresh тянется вся библиотека ассетов, даже если для экрана нужен поднабор.
+5. **Клиент:** тяжёлое монтирование TipTap (`EmailDraftRichTextEditor`), большой JSX-файл Human UI — основной поток; часть UX уже смягчена отложенным mount в модалке подписи (см. историю коммитов вокруг Signature setup).
+6. **Сеть/прокси:** несовпадение порта Docker 8000 vs локальный uvicorn 8001 даёт ощущение «зависло» или старый API.
+7. **Таймауты клиента:** `API_TIMEOUT_MS` по умолчанию 25s в `AiBizOsHumanUI.jsx`; для части операций заданы увеличенные таймауты (старты run, retry LLM, бандл после save setup). Прерывание по таймауту без явного баннера при «console-only» классификации ошибок выглядело как «ничего не произошло» — при разборе логов смотреть `setUiError` / `isConsoleOnlyApiFailure`.
+
+Рекомендация для профилирования: в браузере **Network** (waterfall при одном действии), на сервере **логирование длительности** или `EXPLAIN ANALYZE` для самых частых SELECT.
+
+### 14.7 Направления глобального ускорения (чек-лист для ИИ/архитектора)
+
+Сгруппировано по слоям; можно комбинировать.
+
+**Backend / БД**
+
+- Свести **N запросов в 1–2**: один «run dashboard」 read-model (материализованное представление или кэш по `run_id`, инвалидируемый при изменении контактов/драфтов/событий).
+- Облегчить **`GET /runs/project/{id}`**: один запрос с JOIN/подзапросами или batch `get_run_summary` для списка id вместо `enrich_run_for_card` per row.
+- Разделить **`/workspace`** на лёгкий (фаза + короткий summary) и тяжёлый (по кнопке Refresh / реже).
+- **`/assets`:** пагинация, фильтр по проекту/run если продуктово допустимо; или ETag/`If-None-Match`.
+- Индексы на **foreign keys** и частые фильтры: `run_id` на contacts, drafts, events, threads, steps; `status`, `sent_at`; проверить планы для `get_run_summary`.
+- Пул соединений SQLAlchemy и **не держать** долгие транзакции на время Gmail HTTP.
+- Вынести **Gmail sync** в отдельный worker-процесс/Celery (если появится), чтобы не делить event loop и пул с API.
+
+**Frontend**
+
+- Уменьшить частоту poll Tracking (3s → адаптивно, или только при фокусе вкладки / после пользовательского действия).
+- Не вызывать полный `loadRunDetails` при каждом мелком действии; инкрементальные PATCH + локальный merge state (уже частично для prompt/signature save).
+- **Разбить** `AiBizOsHumanUI.jsx` на подмодули (не ускорит БД, но ускорит сборку и сопровождение).
+- Virtualize длинные списки контактов/драфтов.
+
+**Инфра**
+
+- Postgres на том же хосте, что API, в dev; в prod — ближе к приложению, SSD.
+- Connection pooling (PgBouncer) при множествах воркеров uvicorn.
+
+### 14.8 Связь с продуктовыми разделами выше
+
+- Нейтрализация VOD и сценарии — по-прежнему **§1–6, §10–11**.
+- Операторский UI, Gmail, вкладки — **§12–13** (версии релизов в тексте исторические; актуальный номер пакета — **`package.json`**).
+- Краткая шпаргалка файлов — **`HANDOFF CURSOR.md`** (обновлять при изменении схемы и критичных потоков).
+
+---
+
+*Версия документа: март 2026 — добавлен **§14**; §12–13 сохраняют исторические номера релизов; актуальный фронт см. **`frontend/package.json`**. Синхронизируйте **`HANDOFF CURSOR.md`** при изменении схемы БД и потоков §14.*

@@ -2,7 +2,9 @@
 
 **Актуальная продуктовая передача и план ухода от логики «только VOD»:** см. корневой **`HANDOFF.md`** в этом же репозитории.
 
-**Операторский UI и Gmail sync на релизе 2.4.0:** раздел **`HANDOFF.md` §13**; исторический снимок 2.1.4 — **§12**. Фронтенд-версия — `frontend/package.json`.
+**Технический handoff (структура репо, дерево процессов, API, производительность):** **`HANDOFF.md` §14** — основной документ для передачи контекста ИИ и новым разработчикам.
+
+**Операторский UI и Gmail sync (релиз 2.4.0 в тексте):** **`HANDOFF.md` §13**; исторический снимок 2.1.4 — **§12**. Актуальный номер фронта всегда смотреть в **`frontend/package.json`**.
 
 ---
 
@@ -161,8 +163,8 @@ Draft.attached_asset_ids ≠ AssetPacket  (ручной список вложе�
 ### 5.7 Frontend
 
 - **Review workspace:** **`AiBizOsHumanUI.jsx`** — контакты и исходящие email drafts, Approve / Send later (часы, `review_notes: "send_later"`), dead mailbox стили и ограничения (Delete драфта только при `tracking_status == dead_mailbox`), Edit с rich text + вложения из Assets.
-- **Tracking:** **`TrackingView.jsx`** — Events, Threads, Reply drafts (модалка редактирования как у outreach), Next actions, Reminders, Assets, Packets, Dead mailboxes, Re-search queue; единый `border-2` для карточек; подсветка dead mailbox по цепочкам событий и тредам; убраны успешные toast `actionNote`.
-- Версия пакета фронта: **`package.json` → 2.4.0** (смотреть при handoff); детали релиза — **`HANDOFF.md` §13**.
+- **Tracking:** **`TrackingView.jsx`** — Events, Threads, Reply drafts (модалка редактирования как у outreach), Next actions, Reminders, Assets, Packets, Dead mailboxes, Re-search queue; единый `border-2` для карточек; подсветка dead mailbox по цепочкам событий и тредам; убраны успешные toast `actionNote`; периодический **`load()` каждые ~3s** при открытом трекинге (конкурирует с Human UI poll — см. **`HANDOFF.md` §14**).
+- Версия пакета фронта — **`frontend/package.json`** (исторические §12–13 в `HANDOFF.md` могут ссылаться на старые номера).
 
 ### 5.8 Инфра и запуск
 
