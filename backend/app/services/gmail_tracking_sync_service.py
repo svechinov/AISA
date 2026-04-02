@@ -28,6 +28,7 @@ from app.services.email_tracking_service import (
     register_dead_mailbox_event,
     register_replied_event,
 )
+from app.services.inbound_delivery_llm_service import maybe_apply_inbound_delivery_llm_after_message
 from app.services.gmail_inbox_import_service import (
     _header_map,
     _norm,
@@ -179,6 +180,19 @@ def sync_thread_messages_for_run(
             )
             imported += 1
             bump_email_thread_last_message_at(db, th, parsed.internal_dt)
+
+            if direction == "inbound" and th.draft_id:
+                try:
+                    maybe_apply_inbound_delivery_llm_after_message(
+                        db,
+                        draft_id=th.draft_id,
+                        from_email=parsed.from_email,
+                        subject=parsed.subject or "",
+                        body=parsed.body or "",
+                        gmail_message_id=mid,
+                    )
+                except Exception:
+                    _log.debug("inbound LLM delivery pass failed thread=%s", th.id, exc_info=True)
 
             if direction == "inbound" and th.draft_id and _should_mark_replied(
                 db,

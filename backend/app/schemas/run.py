@@ -83,6 +83,21 @@ class RunHumanUiPatch(BaseModel):
     event_chain_collapsed: dict[str, bool] | None = None
 
 
+class RunOutreachPatch(BaseModel):
+    """Update segment, wave notes, and labeled outreach brief on an existing run (same parsing as POST /runs/start)."""
+
+    notes: str | None = None
+    segment: str = ""
+    outreach_brief: str = ""
+
+
+class TotalPerformanceRead(BaseModel):
+    """All runs/projects: outreach (max of drafts sent vs distinct `email_events` type sent) + reply drafts sent."""
+
+    emails_sent: int
+    emails_sent_24h: int
+
+
 class RunCardRead(BaseModel):
     id: int
     project_id: int
@@ -100,6 +115,10 @@ class RunCardRead(BaseModel):
     active_threads: int
     updated_at: datetime | None = None
     created_at: datetime
+    #: Human UI: prompt setup textarea saved under context_json (no heavy payload on list).
+    prompt_setup_saved: bool = False
+    #: Human UI: signature HTML has visible text (same idea as dashboard check).
+    sender_signature_configured: bool = False
 
 
 class RunWorkspaceRead(RunRead):

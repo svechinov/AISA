@@ -9,7 +9,7 @@ from app.services.env_bootstrap import LLM_KEY_BY_PROVIDER, VALID_LLM
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["generate_json", "parse_json_text"]
+__all__ = ["generate_json", "parse_json_text", "complete_prompt_json_object", "llm_configured"]
 
 ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
 OPENAI_API = "https://api.openai.com/v1/chat/completions"
@@ -135,6 +135,11 @@ def _any_llm_key() -> bool:
         if _api_key_for(pid):
             return True
     return False
+
+
+def llm_configured() -> bool:
+    """True if at least one LLM provider API key is set."""
+    return _any_llm_key()
 
 
 def _content_openai_style(data: dict) -> str:
@@ -331,3 +336,17 @@ def generate_json(prompt: str, model: str = "stub", task_kind: str | None = None
         "LLM prompt did not match a known workflow step (companies / contacts / emails). "
         "Check prompt_builder output."
     )
+
+
+def complete_prompt_json_object(prompt: str) -> dict:
+    """
+    General-purpose JSON object completion (classification, short extracts).
+    Caller supplies the full prompt and JSON schema instructions.
+    """
+    if not _any_llm_key():
+        raise ValueError(
+            "No LLM API keys configured. Set at least one of: "
+            "ANTHROPIC_API_KEY, OPENAI_API_KEY, PERPLEXITY_API_KEY, XAI_API_KEY."
+        )
+    raw = _complete_with_fallback(prompt)
+    return _coerce_json_dict_from_text(raw)

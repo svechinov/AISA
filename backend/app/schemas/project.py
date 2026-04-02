@@ -8,6 +8,10 @@ class ProjectCreate(BaseModel):
     type: str = "generic"
 
 
+class ProjectPatch(BaseModel):
+    name: str
+
+
 class ProjectRead(BaseModel):
     id: int
     project_id: int

@@ -38,3 +38,11 @@ def restore_project(db: Session, project: Project) -> Project:
     db.commit()
     db.refresh(project)
     return project
+
+
+def update_project_name(db: Session, project: Project, *, name: str) -> Project:
+    project.name = name
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project

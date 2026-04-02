@@ -6,16 +6,24 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.repositories.email_draft_repo import get_email_draft
 from app.repositories.run_repo import get_run
+from app.schemas.run import TotalPerformanceRead
 from app.services.email_sender import (
     mock_send_first_approved_draft_preview,
     send_approved_drafts_for_run,
     send_one_draft,
 )
 from app.services.gmail_oauth import GmailOAuthError
+from app.services.run_display_service import get_total_performance_global
 from app.services.run_summary_service import get_run_summary
 
 router = APIRouter(prefix="/sending", tags=["sending"])
 _log = logging.getLogger(__name__)
+
+
+@router.get("/global-performance", response_model=TotalPerformanceRead)
+def global_performance_route(db: Session = Depends(get_db)):
+    """Aggregate sent counts for all runs (all projects); safe path (no clash with /runs/{id})."""
+    return TotalPerformanceRead(**get_total_performance_global(db))
 
 
 @router.post("/drafts/{draft_id}/send")

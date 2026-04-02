@@ -27,6 +27,31 @@ import {
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { cn } from "@/lib/utils";
 import {
+  snapshotEnsureRunSetupPrefsSeedFromRun,
+  snapshotInitialProjectView,
+  snapshotMergeWorkspaceFromRunCards,
+  snapshotMergeWriteInnerTabs,
+  snapshotMergeWriteRunPanelLite,
+  snapshotPickSelectedProject,
+  snapshotReadInnerTabCounts,
+  snapshotReadLastContext,
+  snapshotReadProjects,
+  snapshotReadRunCards,
+  snapshotReadRunPanelLite,
+  snapshotReadRunSetupPrefs,
+  snapshotReadRuns,
+  snapshotWriteLastContext,
+  snapshotWriteProjects,
+  snapshotWriteRunCards,
+  snapshotWriteRunSetupPrefs,
+  snapshotWriteRuns,
+} from "@/lib/humanUiSnapshot";
+import {
+  MAX_CONTACTS_PANEL_LITE,
+  stripContactForPanelLite,
+  stripDraftForPanelLite,
+} from "@/lib/runPanelLite";
+import {
   Archive,
   ArchiveRestore,
   ArrowDownWideNarrow,
@@ -42,7 +67,9 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  Settings,
   Users,
+  X,
 } from "lucide-react";
 
 /**
@@ -133,6 +160,61 @@ function isOutboundDraftClosedForReview(d) {
   return Boolean(d && String(d.status) === "sent");
 }
 
+function mergeContactReviewSnap(snap, live) {
+  return {
+    pending: snap?.pending ?? live.pending,
+    approved: snap?.approved ?? live.approved,
+    rejected: snap?.rejected ?? live.rejected,
+    bounced: snap?.bounced ?? live.bounced,
+    dead_mailbox: snap?.dead_mailbox ?? live.dead_mailbox,
+    no_email: snap?.no_email ?? live.no_email,
+  };
+}
+
+function mergeDraftReviewSnap(snap, live) {
+  return {
+    pendingReview: snap?.pendingReview ?? live.pendingReview,
+    approved: snap?.approved ?? live.approved,
+  };
+}
+
+/** Snapshot-only: «все нули» → сразу empty; нет снапшота или есть >0 → ждём загрузку. */
+function reviewContactsSnapMode(contactsSnap) {
+  if (!contactsSnap || typeof contactsSnap !== "object") return "loading";
+  const keys = ["pending", "approved", "rejected", "bounced", "dead_mailbox", "no_email"];
+  let sum = 0;
+  for (const k of keys) sum += Number(contactsSnap[k]) || 0;
+  return sum === 0 ? "empty" : "loading";
+}
+
+function reviewDraftsSnapMode(draftsSnap) {
+  if (!draftsSnap || typeof draftsSnap !== "object") return "loading";
+  const sum = (Number(draftsSnap.pendingReview) || 0) + (Number(draftsSnap.approved) || 0);
+  return sum === 0 ? "empty" : "loading";
+}
+
+function SnapshotCardsPlaceholder({ mode, kind }) {
+  if (mode === "empty") {
+    return (
+      <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
+        No {kind} data for this run.
+      </div>
+    );
+  }
+  return (
+    <div
+      className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      <Clock className="h-8 w-8 shrink-0 animate-spin text-primary" aria-hidden />
+      <p>
+        {kind} data is loading…
+      </p>
+    </div>
+  );
+}
+
 /**
  * API returns runs newest-first (id desc). Surface non-closed runs first for default
  * selection and lists so a closed wave is not shown ahead of an active one.
@@ -144,11 +226,13 @@ function orderRunsOpenFirst(runs) {
   return [...open, ...closed];
 }
 
+/** Longest first so e.g. "professional notes:" wins over embedded "notes:". */
 const BRIEF_LABEL_PREFIXES = [
-  ["offer:", "offer"],
   ["target entities:", "target_entities"],
-  ["target:", "target_entities"],
+  ["professional notes:", "notes"],
   ["target roles:", "target_roles"],
+  ["offer:", "offer"],
+  ["target:", "target_entities"],
   ["roles:", "target_roles"],
   ["role:", "target_roles"],
   ["goal:", "goal"],
@@ -157,7 +241,10 @@ const BRIEF_LABEL_PREFIXES = [
 ];
 
 function briefLineLabelAndRest(line) {
-  const s = line.trim();
+  let s = line.trim();
+  if (!s) return [null, ""];
+  /** Markdown-wrapped labels (**Offer:**) break prefix match; strip * for detection only. */
+  s = s.replace(/\*/g, "").trim();
   if (!s) return [null, ""];
   const lower = s.toLowerCase();
   for (const [prefix, key] of BRIEF_LABEL_PREFIXES) {
@@ -268,7 +355,7 @@ function getPromptSetupEditorInitialText(run) {
   return contextToOutreachBriefText(ctx);
 }
 
-/** Prefill dialog from the current run — same name/brief as that run until the user edits (then UI adds “ · next”). */
+/** Prefill dialog from a run (GET /runs/:id or selected run). */
 function seedNewRunFormFromRun(run) {
   if (!run) {
     return {
@@ -551,6 +638,38 @@ function contactReviewTabBucket(c) {
   return "no_email";
 }
 
+/** Total performance card: Gmail daily send-tier hint from 24h volume (all runs). */
+function totalPerformance24hBand(emailsSent24h) {
+  const n = Number(emailsSent24h);
+  const safe = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  if (safe >= 200) {
+    return {
+      label: "danger of blocking",
+      cardClass: "border-red-500/55 bg-red-500/15",
+      captionClass: "text-red-700 dark:text-red-400",
+    };
+  }
+  if (safe >= 180) {
+    return {
+      label: "blocking capability",
+      cardClass: "border-orange-500/55 bg-orange-500/15",
+      captionClass: "text-orange-800 dark:text-orange-400",
+    };
+  }
+  if (safe > 160) {
+    return {
+      label: "above normal",
+      cardClass: "border-amber-400/55 bg-amber-500/15",
+      captionClass: "text-amber-900 dark:text-amber-300",
+    };
+  }
+  return {
+    label: "normal",
+    cardClass: "border-border bg-card",
+    captionClass: "text-muted-foreground",
+  };
+}
+
 function NewProjectFooter({ projectName, onCreated }) {
   const { setOpen } = useDialog();
   return (
@@ -602,6 +721,22 @@ function mainNavToTrackingTab(nav) {
   return map[nav] || "events";
 }
 
+/** Inverse map — TrackingView tab value → Human UI main nav (single global «place»). */
+function trackingTabToMainNav(tab) {
+  const t = String(tab || "");
+  const map = {
+    events: "events",
+    threads: "threads",
+    replies: "reply-drafts",
+    reminders: "reminders",
+    "assets-library": "assets",
+    "asset-packets": "packets",
+    dead: "dead",
+    queue: "queue",
+  };
+  return map[t] || "events";
+}
+
 export default function AiBizOsHumanUI() {
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
@@ -611,31 +746,54 @@ export default function AiBizOsHumanUI() {
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  /** Hide draft error banner after dismiss; key = `${id}:${error_message}` so a new error shows again. */
+  const [dismissedOutboundDraftErrorKeys, setDismissedOutboundDraftErrorKeys] = useState(
+    () => new Set(),
+  );
   const [projectName, setProjectName] = useState("New campaign");
   const [search, setSearch] = useState("");
-  const [draftShowApproved, setDraftShowApproved] = useState(true);
-  const [draftShowPendingReview, setDraftShowPendingReview] = useState(true);
-  const [projectView, setProjectView] = useState("active");
-  const [mainNav, setMainNav] = useState("runs");
+  /** Review email drafts: same idea as contact review tabs — only two buckets. */
+  const [draftReviewTab, setDraftReviewTab] = useState("pending");
+  const [projectView, setProjectView] = useState(() => snapshotInitialProjectView());
+  const [mainNav, setMainNav] = useState(() => {
+    const lc = snapshotReadLastContext();
+    return typeof lc?.mainNav === "string" ? lc.mainNav : "runs";
+  });
   const [runsList, setRunsList] = useState([]);
   const [workspace, setWorkspace] = useState(null);
+  /** When === selectedRun.id, Review contacts / Drafts sub-tab counts use live data; else localStorage snapshot. */
+  const [runDetailsHydratedId, setRunDetailsHydratedId] = useState(null);
+  /** Bumps when Prompt/Signature setup localStorage prefs change so icons re-read snapshots without waiting on run object. */
+  const [runSetupPrefsRev, setRunSetupPrefsRev] = useState(0);
+  /** All runs / all projects — from GET /sending/global-performance. */
+  const [totalPerformance, setTotalPerformance] = useState(null);
   const [newRunOpen, setNewRunOpen] = useState(false);
-  /** Snapshot when the dialog opened from a selected run (trimmed fields) — used to detect “same outreach” vs new wave. */
+  /** Snapshot when the dialog opened from an existing run: trimmed fields + optional runId for Update vs Create. */
   const [newRunBaseline, setNewRunBaseline] = useState(null);
+  const [newRunCreateInFlight, setNewRunCreateInFlight] = useState(false);
+  const [newRunUpdateInFlight, setNewRunUpdateInFlight] = useState(false);
+  const newRunDialogBusy = newRunCreateInFlight || newRunUpdateInFlight;
   const [switchRunOpen, setSwitchRunOpen] = useState(false);
   const [closeRunOpen, setCloseRunOpen] = useState(false);
+  const [renameProjectOpen, setRenameProjectOpen] = useState(false);
+  const [renameProjectId, setRenameProjectId] = useState(null);
+  const [renameProjectNameField, setRenameProjectNameField] = useState("");
+  const [renameProjectSaving, setRenameProjectSaving] = useState(false);
   const [newRunForm, setNewRunForm] = useState({
     name: "",
     notes: "",
     segment: "",
     outreach_brief: DEFAULT_OUTREACH_BRIEF,
   });
+  const [openRunEditLoading, setOpenRunEditLoading] = useState(false);
 
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
   const [createDraftContactId, setCreateDraftContactId] = useState(null);
   /** Keys: draft id string — outbound draft body regeneration in progress. */
   const [regeneratingOutboundDraftIds, setRegeneratingOutboundDraftIds] = useState(() => ({}));
+  /** Outbound draft id → review PATCH in flight (Approve / Send later / Reject). */
+  const [outboundDraftReviewBusy, setOutboundDraftReviewBusy] = useState(() => ({}));
   /** Keys: draft id string — POST /sending/drafts/:id/send in flight (Review → Drafts). */
   const [sendingOutboundDraftIds, setSendingOutboundDraftIds] = useState(() => ({}));
   /** POST /sending/runs/:id/send in flight (Send all approved). */
@@ -655,6 +813,7 @@ export default function AiBizOsHumanUI() {
   const [signatureEditorKey, setSignatureEditorKey] = useState(0);
   const [promptSetupOpen, setPromptSetupOpen] = useState(false);
   const [promptSetupText, setPromptSetupText] = useState("");
+  const [promptSetupSaving, setPromptSetupSaving] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restartDialogRun, setRestartDialogRun] = useState(null);
   /** Non-blocking: restart runs in background after confirm (no full-screen lock). */
@@ -695,6 +854,10 @@ export default function AiBizOsHumanUI() {
   const gmailSendReady = setupIntegration?.gmail_send_ready === true;
 
   const contactsVisible = useMemo(() => filterShadowNoEmailContacts(contacts), [contacts]);
+
+  useEffect(() => {
+    if (!selectedRun) setRunDetailsHydratedId(null);
+  }, [selectedRun]);
 
   const contactAnalyzerNavVisible = Boolean(
     gmailSendReady && selectedRun && Array.isArray(contactsVisible) && contactsVisible.length > 0,
@@ -767,17 +930,22 @@ export default function AiBizOsHumanUI() {
   const loadProjects = useCallback(async (listView, options = {}) => {
     const { signal } = options;
     const v = listView === undefined ? projectView : listView;
+    const cached = snapshotReadProjects(v);
+    if (cached?.length && !signal?.aborted) {
+      setProjects(cached);
+      setSelectedProject((prev) => snapshotPickSelectedProject(cached, prev, v));
+    }
     setLoading(true);
     setError("");
     try {
       const qs = v === "archived" ? "?archived=true" : "?archived=false";
       const data = await api(`/projects${qs}`, { signal });
       if (signal?.aborted) return;
+      snapshotWriteProjects(v, data);
       setProjects(data);
       setSelectedProject((prev) => {
         if (!data.length) return null;
-        if (prev && data.some((p) => p.id === prev.id)) return prev;
-        return data[0];
+        return snapshotPickSelectedProject(data, prev, v);
       });
     } catch (e) {
       if (signal?.aborted) return;
@@ -919,8 +1087,19 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const loadRunDetails = async (runId) => {
+  const loadRunDetails = async (runId, runRowHint) => {
     if (!runId) return null;
+    // Background polls call this with the same run — do not clear hydration or Contacts/Drafts
+    // flash back to snapshot placeholders until the request finishes.
+    setRunDetailsHydratedId((prev) => (prev === runId ? prev : null));
+    // Instant paint: pick run row from list + local run_cards snapshot so UI does not show the previous run
+    // for the whole API round-trip (server restart / slow proxy). Caller may pass runRowHint when state
+    // has not flushed yet (e.g. right after setRunsList in an async effect).
+    const rowGuess = runRowHint ?? runsList.find((r) => r.id === runId);
+    if (rowGuess) {
+      setSelectedRun(rowGuess);
+      setWorkspace(snapshotMergeWorkspaceFromRunCards(snapshotReadRunCards(runId), rowGuess));
+    }
     try {
       const [run, stepsData, contactsData, draftsData, ws, assetsData, packetsData] = await Promise.all([
         api(`/runs/${runId}`),
@@ -932,14 +1111,40 @@ export default function AiBizOsHumanUI() {
         api(`/asset-packets/run/${runId}`),
       ]);
       setSelectedRun(run);
+      snapshotEnsureRunSetupPrefsSeedFromRun(runId, run);
       setSteps(stepsData);
       setContacts(contactsData);
       setDrafts(draftsData);
       setWorkspace(ws);
+      if (ws) snapshotWriteRunCards(runId, ws);
+      try {
+        const cp = (Array.isArray(contactsData) ? contactsData : [])
+          .slice(0, MAX_CONTACTS_PANEL_LITE)
+          .map(stripContactForPanelLite)
+          .filter(Boolean);
+        const dp = (Array.isArray(draftsData) ? draftsData : [])
+          .map(stripDraftForPanelLite)
+          .filter(Boolean);
+        snapshotMergeWriteRunPanelLite(runId, { contactsPreview: cp, draftsPreview: dp });
+      } catch {
+        /* panel lite is best-effort */
+      }
+      setRunDetailsHydratedId(runId);
       setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
       setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
+      try {
+        const tp = await api("/sending/global-performance");
+        setTotalPerformance({
+          emails_sent: Number(tp?.emails_sent) || 0,
+          emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+        });
+      } catch (e) {
+        const msg = detailFromApiErrorMessage(e?.message || e);
+        console.warn("[Total performance] GET /sending/global-performance failed:", msg);
+      }
       return ws;
     } catch (e) {
+      setRunDetailsHydratedId(null);
       setUiError(setError, e);
       return null;
     }
@@ -975,6 +1180,29 @@ export default function AiBizOsHumanUI() {
     void loadProjects(undefined, { signal: ac.signal });
     return () => ac.abort();
   }, [projectView, loadProjects]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const tp = await api("/sending/global-performance");
+        if (!cancelled) {
+          setTotalPerformance({
+            emails_sent: Number(tp?.emails_sent) || 0,
+            emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          const msg = detailFromApiErrorMessage(e?.message || e);
+          console.warn("[Total performance] initial fetch failed:", msg);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     void loadSetupIntegration();
@@ -1051,13 +1279,47 @@ export default function AiBizOsHumanUI() {
   useEffect(() => {
     if (!selectedProject) return;
     const pid = projectPk(selectedProject);
+    const cachedRuns = snapshotReadRuns(pid);
+    const orderedCache = Array.isArray(cachedRuns) && cachedRuns.length ? orderRunsOpenFirst(cachedRuns) : [];
+    setRunsList(orderedCache);
+
+    const last = snapshotReadLastContext();
+    if (orderedCache.length > 0) {
+      const targetIdEarly =
+        last &&
+        last.projectId === pid &&
+        last.runId != null &&
+        orderedCache.some((r) => r.id === last.runId)
+          ? last.runId
+          : orderedCache[0].id;
+      const runRowEarly = orderedCache.find((r) => r.id === targetIdEarly) ?? orderedCache[0];
+      const cardSnapEarly = snapshotReadRunCards(targetIdEarly);
+      setSelectedRun(runRowEarly);
+      setWorkspace(snapshotMergeWorkspaceFromRunCards(cardSnapEarly, runRowEarly));
+    } else {
+      setSelectedRun(null);
+      setWorkspace(null);
+    }
+
+    const ac = new AbortController();
     (async () => {
       try {
-        const runs = await api(`/runs/project/${pid}`);
+        const runs = await api(`/runs/project/${pid}`, { signal: ac.signal });
         const ordered = orderRunsOpenFirst(runs);
         setRunsList(ordered);
         if (ordered.length > 0) {
-          await loadRunDetails(ordered[0].id);
+          const targetId =
+            last &&
+            last.projectId === pid &&
+            last.runId != null &&
+            ordered.some((r) => r.id === last.runId)
+              ? last.runId
+              : ordered[0].id;
+          const runRow = ordered.find((r) => r.id === targetId) ?? ordered[0];
+          const cardSnap = snapshotReadRunCards(targetId);
+          setSelectedRun(runRow);
+          setWorkspace(snapshotMergeWorkspaceFromRunCards(cardSnap, runRow));
+          await loadRunDetails(targetId, runRow);
         } else {
           setSelectedRun(null);
           setSteps([]);
@@ -1066,6 +1328,7 @@ export default function AiBizOsHumanUI() {
           setWorkspace(null);
         }
       } catch (e) {
+        if (ac.signal.aborted) return;
         const msg = String(e?.message || e);
         if (isConsoleOnlyApiFailure(msg)) {
           console.warn("[AiBizOsHumanUI] runs list", msg, e);
@@ -1075,16 +1338,39 @@ export default function AiBizOsHumanUI() {
         }
       }
     })();
+    return () => ac.abort();
   }, [selectedProject]);
+
+  useEffect(() => {
+    const pid = selectedProject ? projectPk(selectedProject) : null;
+    const rid =
+      selectedProject && selectedRun && selectedRun.project_id === pid ? selectedRun.id : null;
+    snapshotWriteLastContext({
+      projectId: pid,
+      runId: rid,
+      mainNav,
+      projectView,
+    });
+  }, [selectedProject, selectedRun?.id, selectedRun?.project_id, mainNav, projectView]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    snapshotWriteRuns(projectPk(selectedProject), runsList);
+  }, [runsList, selectedProject]);
 
   useEffect(() => {
     if (!selectedRun?.id) return;
     const id = selectedRun.id;
+    const phase = workspace?.display_phase;
+    // Active: inbox/tracking need fresher data. Preparing/Ready: user actions already refetch; slow poll avoids piles of waits.
+    const ms =
+      phase === "Active" ? 8000 : phase === "Ready" ? 20000 : phase === "Preparing" ? 45000 : 60000;
     const interval = setInterval(() => {
-      loadRunDetails(id);
-    }, 4000);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void loadRunDetails(id);
+    }, ms);
     return () => clearInterval(interval);
-  }, [selectedRun?.id]);
+  }, [selectedRun?.id, workspace?.display_phase]);
 
   const createProject = async () => {
     const project = await api("/projects", {
@@ -1125,6 +1411,33 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  const openRenameProject = (project) => {
+    const pid = project?.id ?? project?.project_id;
+    if (pid == null || Number.isNaN(Number(pid))) return;
+    setRenameProjectId(Number(pid));
+    setRenameProjectNameField(String(project.name ?? "").trim() || "");
+    setRenameProjectOpen(true);
+  };
+
+  const submitRenameProject = async () => {
+    if (renameProjectId == null) return;
+    const name = renameProjectNameField.trim();
+    if (!name) return;
+    setRenameProjectSaving(true);
+    setError("");
+    try {
+      await api(`/projects/${renameProjectId}`, { method: "PATCH", body: { name } });
+      setRenameProjectOpen(false);
+      setRenameProjectId(null);
+      setRenameProjectNameField("");
+      await loadProjects();
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setRenameProjectSaving(false);
+    }
+  };
+
   const canSubmitNewRun =
     !!selectedProject &&
     newRunForm.name.trim().length > 0 &&
@@ -1132,16 +1445,31 @@ export default function AiBizOsHumanUI() {
     newRunForm.outreach_brief.trim().length > 0 &&
     outreachBriefHasOfferOrGoal(newRunForm.outreach_brief);
 
-  const newRunMatchesBaseline = useMemo(() => {
+  const newRunNameDirty = useMemo(() => {
+    if (!newRunBaseline) return false;
+    return newRunForm.name.trim() !== newRunBaseline.name;
+  }, [newRunForm.name, newRunBaseline]);
+
+  const newRunOtherDirty = useMemo(() => {
     if (!newRunBaseline) return false;
     const b = newRunBaseline;
     return (
-      newRunForm.name.trim() === b.name &&
-      newRunForm.notes.trim() === b.notes &&
-      newRunForm.segment.trim() === b.segment &&
-      newRunForm.outreach_brief.trim() === b.outreach_brief
+      newRunForm.notes.trim() !== b.notes ||
+      newRunForm.segment.trim() !== b.segment ||
+      newRunForm.outreach_brief.trim() !== b.outreach_brief
     );
-  }, [newRunForm, newRunBaseline]);
+  }, [newRunForm.notes, newRunForm.segment, newRunForm.outreach_brief, newRunBaseline]);
+
+  const canUpdateRun = Boolean(
+    newRunBaseline?.runId &&
+      canSubmitNewRun &&
+      !newRunNameDirty &&
+      newRunOtherDirty,
+  );
+
+  const canCreateRunInDialog = Boolean(
+    canSubmitNewRun && (!newRunBaseline || newRunNameDirty),
+  );
 
   const integrationInformer = useMemo(
     () => formatSetupIntegrationInformer(setupIntegration),
@@ -1149,29 +1477,36 @@ export default function AiBizOsHumanUI() {
   );
 
   useEffect(() => {
-    if (!newRunOpen) setNewRunBaseline(null);
+    if (!newRunOpen) {
+      setNewRunBaseline(null);
+      setNewRunCreateInFlight(false);
+      setNewRunUpdateInFlight(false);
+    }
   }, [newRunOpen]);
 
-  /** Opening from an existing run: once any field diverges, suggest a new wave name with “ · next” unless the user already edited the name. */
-  useEffect(() => {
-    if (!newRunOpen || !newRunBaseline) return;
-    const b = newRunBaseline;
-    const name = newRunForm.name.trim();
-    const notes = newRunForm.notes.trim();
-    const segment = newRunForm.segment.trim();
-    const brief = newRunForm.outreach_brief.trim();
-    const dirty =
-      name !== b.name || notes !== b.notes || segment !== b.segment || brief !== b.outreach_brief;
-    if (!dirty || name !== b.name || !b.name) return;
-    const withNext = `${b.name} · next`;
-    if (newRunForm.name !== withNext) {
-      setNewRunForm((f) => ({ ...f, name: withNext }));
-    }
-  }, [newRunOpen, newRunBaseline, newRunForm.name, newRunForm.notes, newRunForm.segment, newRunForm.outreach_brief]);
-
   const createNewRun = async () => {
-    if (!canSubmitNewRun) return;
+    if (newRunBaseline && !newRunNameDirty) return;
+    if (!selectedProject) {
+      setError("Select a project first.");
+      return;
+    }
+    if (!newRunForm.name.trim() || !newRunForm.segment.trim()) {
+      setError("Run name and segment are required.");
+      return;
+    }
+    if (!newRunForm.outreach_brief.trim()) {
+      setError("Outreach brief is required.");
+      return;
+    }
+    if (!outreachBriefHasOfferOrGoal(newRunForm.outreach_brief)) {
+      setError(
+        "Outreach brief must include lines starting with Offer: and/or Goal: (see placeholder). " +
+          "Labels can use markdown (e.g. **Goal:**). Professional Notes: counts as Notes, not Goal.",
+      );
+      return;
+    }
     try {
+      setNewRunCreateInFlight(true);
       setError("");
       const pid = projectPk(selectedProject);
       const run = await api("/runs/start", {
@@ -1190,7 +1525,6 @@ export default function AiBizOsHumanUI() {
       const runs = await api(`/runs/project/${pid}`);
       setRunsList(orderRunsOpenFirst(runs));
       await loadRunDetails(run.id);
-      setMainNav("contacts");
       setNewRunForm({
         name: "",
         notes: "",
@@ -1199,16 +1533,63 @@ export default function AiBizOsHumanUI() {
       });
     } catch (e) {
       setUiError(setError, e);
+    } finally {
+      setNewRunCreateInFlight(false);
     }
   };
 
-  const submitNewRunDialog = async () => {
-    if (!canSubmitNewRun) return;
-    if (newRunBaseline && newRunMatchesBaseline) {
+  const updateExistingRun = async () => {
+    if (!canUpdateRun || !newRunBaseline?.runId) return;
+    try {
+      setNewRunUpdateInFlight(true);
+      setError("");
+      await api(`/runs/${newRunBaseline.runId}/outreach`, {
+        method: "PATCH",
+        body: {
+          notes: newRunForm.notes.trim() || undefined,
+          segment: newRunForm.segment.trim(),
+          outreach_brief: newRunForm.outreach_brief.trim(),
+        },
+      });
       setNewRunOpen(false);
-      return;
+      const pid = projectPk(selectedProject);
+      setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
+      await loadRunDetails(newRunBaseline.runId);
+      setNewRunForm({
+        name: "",
+        notes: "",
+        segment: "",
+        outreach_brief: DEFAULT_OUTREACH_BRIEF,
+      });
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setNewRunUpdateInFlight(false);
     }
-    await createNewRun();
+  };
+
+  const openRunEditDialog = async (runRow) => {
+    if (!runRow?.id || !selectedProject) return;
+    try {
+      setOpenRunEditLoading(true);
+      setError("");
+      const run = await api(`/runs/${runRow.id}`);
+      const seeded = seedNewRunFormFromRun(run);
+      setNewRunForm(seeded);
+      setNewRunBaseline({
+        runId: run.id,
+        name: seeded.name.trim(),
+        notes: seeded.notes.trim(),
+        segment: seeded.segment.trim(),
+        outreach_brief: seeded.outreach_brief.trim(),
+      });
+      await loadRunDetails(run.id);
+      setNewRunOpen(true);
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setOpenRunEditLoading(false);
+    }
   };
 
   /** @param {{ prefilledFromSelected?: boolean }} [options] — prefill from current run only for “Continue outreach”; bare “New run” opens an empty form. */
@@ -1260,7 +1641,6 @@ export default function AiBizOsHumanUI() {
         /* ignore */
       }
     }
-    setMainNav("contacts");
   };
 
   const openRestartDialog = (run) => {
@@ -1329,7 +1709,9 @@ export default function AiBizOsHumanUI() {
       setError("");
       const current = contacts.find((c) => c.id === contactId);
       if (current?.review_status === "pending") {
-        setContacts((prev) => prev.filter((c) => c.id !== contactId));
+        setContacts((prev) =>
+          prev.map((c) => (c.id === contactId ? { ...c, review_status: "approved" } : c)),
+        );
       }
       await api(`/contacts/${contactId}/review`, {
         method: "PATCH",
@@ -1370,6 +1752,14 @@ export default function AiBizOsHumanUI() {
   };
 
   const reviewDraft = async (id, review_status, review_notes) => {
+    const idKey = String(id);
+    const busyKind =
+      review_status === "approved"
+        ? review_notes === OUTBOUND_REVIEW_SEND_LATER
+          ? "later"
+          : "approve"
+        : "reject";
+    setOutboundDraftReviewBusy((p) => ({ ...p, [idKey]: busyKind }));
     try {
       setError("");
       const body = { review_status };
@@ -1381,6 +1771,12 @@ export default function AiBizOsHumanUI() {
       await loadRunDetails(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
+    } finally {
+      setOutboundDraftReviewBusy((p) => {
+        const next = { ...p };
+        delete next[idKey];
+        return next;
+      });
     }
   };
 
@@ -1644,10 +2040,12 @@ export default function AiBizOsHumanUI() {
 
   const saveEditDraft = async () => {
     if (!editDraft || !selectedRun || editDraftSaving) return;
+    const runId = selectedRun.id;
+    const draftId = editDraft.id;
     setEditDraftSaving(true);
     try {
       setError("");
-      await api(`/email-drafts/${editDraft.id}/edit`, {
+      await api(`/email-drafts/${draftId}/edit`, {
         method: "PATCH",
         body: {
           subject: draftForm.subject,
@@ -1655,14 +2053,16 @@ export default function AiBizOsHumanUI() {
           attached_asset_ids: draftForm.attached_asset_ids,
           apply_assets_to_pending_drafts: applyAssetsToAllPendingDrafts,
         },
+        timeoutMs: applyAssetsToAllPendingDrafts ? 120000 : 60000,
       });
-      setEditDraft(null);
-      await loadRunDetails(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
+      return;
     } finally {
       setEditDraftSaving(false);
     }
+    setEditDraft(null);
+    void loadRunDetails(runId).catch((e) => setUiError(setError, e));
   };
 
   const openSignatureSetup = () => {
@@ -1672,6 +2072,7 @@ export default function AiBizOsHumanUI() {
   };
 
   const openPromptSetup = () => {
+    setPromptSetupSaving(false);
     setPromptSetupText(getPromptSetupEditorInitialText(selectedRun));
     setPromptSetupOpen(true);
   };
@@ -1679,15 +2080,22 @@ export default function AiBizOsHumanUI() {
   const savePromptSetup = async () => {
     if (!selectedRun?.id) return;
     try {
+      setPromptSetupSaving(true);
       setError("");
       await api(`/runs/${selectedRun.id}/prompt-setup`, {
         method: "PATCH",
         body: { prompt_setup_text: promptSetupText },
       });
+      snapshotWriteRunSetupPrefs(selectedRun.id, {
+        prompt_setup_saved: promptSetupText.trim().length > 0,
+      });
+      setRunSetupPrefsRev((x) => x + 1);
       setPromptSetupOpen(false);
       await loadRunDetails(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
+    } finally {
+      setPromptSetupSaving(false);
     }
   };
 
@@ -1699,6 +2107,10 @@ export default function AiBizOsHumanUI() {
         method: "PATCH",
         body: { signature_html: signatureFormHtml },
       });
+      snapshotWriteRunSetupPrefs(selectedRun.id, {
+        sender_signature_configured: runSignatureHasMeaningfulContent(signatureFormHtml),
+      });
+      setRunSetupPrefsRev((x) => x + 1);
       await loadRunDetails(selectedRun.id);
       setSignatureSetupOpen(false);
     } catch (e) {
@@ -1720,18 +2132,41 @@ export default function AiBizOsHumanUI() {
     [drafts],
   );
 
-  const filteredDrafts = useMemo(() => {
+  const draftsMatchingSearch = useMemo(() => {
     return draftsVisibleInReview.filter((d) => {
       const q = search.trim().toLowerCase();
-      const matchesSearch =
-        !q || [d.company, d.to_email, d.subject, d.body].some((v) => (v || "").toLowerCase().includes(q));
-      const isApprovedBucket = ["approved", "edited"].includes(d.review_status);
-      const isPendingBucket = d.review_status === "pending" || d.review_status === "rejected";
-      const matchesBucket =
-        (draftShowApproved && isApprovedBucket) || (draftShowPendingReview && isPendingBucket);
-      return matchesSearch && matchesBucket;
+      return (
+        !q || [d.company, d.to_email, d.subject, d.body].some((v) => (v || "").toLowerCase().includes(q))
+      );
     });
-  }, [draftsVisibleInReview, search, draftShowApproved, draftShowPendingReview]);
+  }, [draftsVisibleInReview, search]);
+
+  const draftReviewTabCounts = useMemo(() => {
+    const pendingReview = draftsMatchingSearch.filter(
+      (d) => d.review_status === "pending" || d.review_status === "rejected",
+    ).length;
+    const approved = draftsMatchingSearch.filter((d) =>
+      ["approved", "edited"].includes(d.review_status),
+    ).length;
+    return { pendingReview, approved };
+  }, [draftsMatchingSearch]);
+
+  const liveDraftReviewCounts = useMemo(
+    () => ({
+      pendingReview: draftReviewTabCounts.pendingReview,
+      approved: draftReviewTabCounts.approved,
+    }),
+    [draftReviewTabCounts],
+  );
+
+  const filteredDrafts = useMemo(() => {
+    return draftsMatchingSearch.filter((d) => {
+      const isApprovedBucket = ["approved", "edited"].includes(d.review_status);
+      const isPendingReviewBucket = d.review_status === "pending" || d.review_status === "rejected";
+      if (draftReviewTab === "approved") return isApprovedBucket;
+      return isPendingReviewBucket;
+    });
+  }, [draftsMatchingSearch, draftReviewTab]);
 
   const contactHasBadEmailHealth = (c) =>
     c.email_health === "dead_mailbox" || c.email_health === "bounced";
@@ -1821,9 +2256,88 @@ export default function AiBizOsHumanUI() {
     return buckets;
   }, [contactsMatchingSearch]);
 
+  const liveContactReviewCounts = useMemo(
+    () => ({
+      pending: contactsByReviewTab.pending.length,
+      approved: contactsByReviewTab.approved.length,
+      rejected: contactsByReviewTab.rejected.length,
+      bounced: contactsByReviewTab.bounced.length,
+      dead_mailbox: contactsByReviewTab.dead_mailbox.length,
+      no_email: contactsByReviewTab.no_email.length,
+    }),
+    [contactsByReviewTab],
+  );
+
+  const innerTabSnap = useMemo(() => {
+    if (!selectedRun?.id) return null;
+    return snapshotReadInnerTabCounts(selectedRun.id);
+  }, [selectedRun?.id]);
+
+  const displayContactReviewCounts = useMemo(() => {
+    const live = liveContactReviewCounts;
+    if (runDetailsHydratedId === selectedRun?.id) return live;
+    return mergeContactReviewSnap(innerTabSnap?.contacts, live);
+  }, [liveContactReviewCounts, runDetailsHydratedId, selectedRun?.id, innerTabSnap?.contacts]);
+
+  const displayDraftReviewCounts = useMemo(() => {
+    const live = liveDraftReviewCounts;
+    if (runDetailsHydratedId === selectedRun?.id) return live;
+    return mergeDraftReviewSnap(innerTabSnap?.drafts, live);
+  }, [liveDraftReviewCounts, runDetailsHydratedId, selectedRun?.id, innerTabSnap?.drafts]);
+
+  const contactsRunHydrated =
+    Boolean(selectedRun?.id) && runDetailsHydratedId === selectedRun?.id;
+  const reviewContactsSnapModeVal = useMemo(
+    () => reviewContactsSnapMode(innerTabSnap?.contacts),
+    [innerTabSnap?.contacts],
+  );
+  const reviewDraftsSnapModeVal = useMemo(
+    () => reviewDraftsSnapMode(innerTabSnap?.drafts),
+    [innerTabSnap?.drafts],
+  );
+
+  const runPanelLiteHuman = useMemo(
+    () => (selectedRun?.id ? snapshotReadRunPanelLite(selectedRun.id) : null),
+    [selectedRun?.id, runDetailsHydratedId],
+  );
+
+  const contactsPanelLiteFiltered = useMemo(() => {
+    const list = runPanelLiteHuman?.contactsPreview || [];
+    return list.filter((c) => contactReviewTabBucket(c) === contactReviewTab);
+  }, [runPanelLiteHuman?.contactsPreview, contactReviewTab]);
+
+  const draftsPanelLiteFiltered = useMemo(() => {
+    const list = runPanelLiteHuman?.draftsPreview || [];
+    if (!list.length) return [];
+    if (draftReviewTab === "pending") {
+      return list.filter((d) => d.review_status === "pending" || d.review_status === "rejected");
+    }
+    return list.filter((d) => ["approved", "edited"].includes(d.review_status));
+  }, [runPanelLiteHuman?.draftsPreview, draftReviewTab]);
+
+  useEffect(() => {
+    if (!selectedRun?.id || runDetailsHydratedId !== selectedRun.id) return;
+    snapshotMergeWriteInnerTabs(selectedRun.id, {
+      contacts: liveContactReviewCounts,
+      drafts: liveDraftReviewCounts,
+    });
+  }, [selectedRun?.id, runDetailsHydratedId, liveContactReviewCounts, liveDraftReviewCounts]);
+
+  /**
+   * Group order used to follow raw contact id order. If companies interleave by id (Acme, Beta, Acme),
+   * approving the first Acme left the second Acme after Beta — the card “jumped” to the end. Sort groups by
+   * stable company key, then min contact id in the group.
+   */
   const contactReviewTabGroups = useMemo(() => {
     const list = contactsByReviewTab[contactReviewTab];
-    return groupContactsByCompanyAndReviewStatus(list);
+    const groups = groupContactsByCompanyAndReviewStatus(list);
+    return [...groups].sort((a, b) => {
+      const keyA = contactCompanyGroupKey(a[0]);
+      const keyB = contactCompanyGroupKey(b[0]);
+      const cmp = keyA.localeCompare(keyB);
+      if (cmp !== 0) return cmp;
+      return Math.min(...a.map((c) => c.id)) - Math.min(...b.map((c) => c.id));
+    });
   }, [contactsByReviewTab, contactReviewTab]);
 
   const companiesListForPage = companiesPanel?.companies;
@@ -1864,15 +2378,15 @@ export default function AiBizOsHumanUI() {
     setContactsReviewPage(1);
   }, [contactReviewTab]);
 
+  useEffect(() => {
+    setDraftReviewTab("pending");
+  }, [selectedRun?.id]);
+
   const draftsPending = filteredDrafts.filter((d) => d.review_status === "pending");
   const draftsApprovedList = filteredDrafts.filter((d) =>
     ["approved", "edited"].includes(d.review_status),
   );
   const draftsRejectedList = filteredDrafts.filter((d) => d.review_status === "rejected");
-
-  /** Hide empty review buckets when a narrow filter is active (e.g. Approved → no "Pending (0)"). */
-  const showDraftsPendingSection = draftShowPendingReview && draftsPending.length > 0;
-  const showDraftsApprovedSection = draftShowApproved && draftsApprovedList.length > 0;
 
   const canContinue = approvedContactsReachable > 0;
 
@@ -1887,15 +2401,45 @@ export default function AiBizOsHumanUI() {
     return { fraction: done / drafts.length, done, total: drafts.length };
   }, [drafts]);
 
+  const totalPerformance24hUi = useMemo(
+    () => totalPerformance24hBand(totalPerformance?.emails_sent_24h ?? 0),
+    [totalPerformance?.emails_sent_24h],
+  );
+
   const promptSetupSavedFilled = useMemo(() => {
+    const rid = selectedRun?.id;
+    if (rid == null) return false;
+    const snap = snapshotReadRunSetupPrefs(rid);
+    if (snap) return Boolean(snap.prompt_setup_saved);
+    if (typeof selectedRun?.prompt_setup_saved === "boolean") return selectedRun.prompt_setup_saved;
     const raw = selectedRun?.context_json?.[PROMPT_SETUP_STORAGE_KEY];
     return typeof raw === "string" && raw.trim().length > 0;
-  }, [selectedRun?.id, selectedRun?.context_json]);
+  }, [
+    selectedRun?.id,
+    selectedRun?.context_json,
+    selectedRun?.prompt_setup_saved,
+    runDetailsHydratedId,
+    runSetupPrefsRev,
+  ]);
 
   const signatureSetupFilled = useMemo(() => {
+    const rid = selectedRun?.id;
+    if (rid == null) return false;
+    const snap = snapshotReadRunSetupPrefs(rid);
+    if (snap) return Boolean(snap.sender_signature_configured);
+    if (typeof selectedRun?.sender_signature_configured === "boolean") {
+      return selectedRun.sender_signature_configured;
+    }
     const html = selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "";
     return runSignatureHasMeaningfulContent(html);
-  }, [selectedRun?.id, selectedRun?.sender_signature_html, workspace?.sender_signature_html]);
+  }, [
+    selectedRun?.id,
+    selectedRun?.sender_signature_html,
+    selectedRun?.sender_signature_configured,
+    workspace?.sender_signature_html,
+    runDetailsHydratedId,
+    runSetupPrefsRev,
+  ]);
 
   /** Shown in Review workspace (Contacts) above “N contacts left to review”, not in Run setup. */
   const approveContactsContinueCta = useMemo(() => {
@@ -2280,6 +2824,8 @@ export default function AiBizOsHumanUI() {
       ["approved", "edited"].includes(draft.review_status);
     const isRegeneratingOutbound = Boolean(regeneratingOutboundDraftIds[String(draft.id)]);
     const isSendingOutbound = Boolean(sendingOutboundDraftIds[String(draft.id)]);
+    const draftReviewKind = outboundDraftReviewBusy[String(draft.id)];
+    const isDraftReviewBusy = Boolean(draftReviewKind);
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
@@ -2344,30 +2890,55 @@ export default function AiBizOsHumanUI() {
                   </Button>
                   {draft.review_status === "pending" ? (
                     <>
-                      <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
+                      <Button
+                        size="sm"
+                        disabled={isDraftReviewBusy}
+                        aria-busy={draftReviewKind === "approve"}
+                        onClick={() => void reviewDraft(draft.id, "approved")}
+                      >
+                        {draftReviewKind === "approve" ? (
+                          <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                        ) : null}
                         Approve
                       </Button>
                       <Button
                         size="sm"
                         variant="secondary"
-                        onClick={() => reviewDraft(draft.id, "approved", OUTBOUND_REVIEW_SEND_LATER)}
+                        disabled={isDraftReviewBusy}
+                        aria-busy={draftReviewKind === "later"}
+                        onClick={() =>
+                          void reviewDraft(draft.id, "approved", OUTBOUND_REVIEW_SEND_LATER)
+                        }
                         className="px-2.5"
                         aria-label="Send later"
                         title="Send later — approve without sending now"
                       >
-                        <Clock className="h-4 w-4" aria-hidden />
+                        {draftReviewKind === "later" ? (
+                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                        ) : (
+                          <Clock className="h-4 w-4" aria-hidden />
+                        )}
                       </Button>
                       {canRegenerateOutboundDraft(draft) ? (
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={isRegeneratingOutbound}
+                          disabled={isRegeneratingOutbound || isDraftReviewBusy}
                           onClick={() => void regenerateOutboundDraft(draft.id)}
                         >
                           Regenerate
                         </Button>
                       ) : null}
-                      <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={isDraftReviewBusy}
+                        aria-busy={draftReviewKind === "reject"}
+                        onClick={() => void reviewDraft(draft.id, "rejected")}
+                      >
+                        {draftReviewKind === "reject" ? (
+                          <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                        ) : null}
                         Reject
                       </Button>
                     </>
@@ -2378,19 +2949,36 @@ export default function AiBizOsHumanUI() {
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={isRegeneratingOutbound}
+                          disabled={isRegeneratingOutbound || isDraftReviewBusy}
                           onClick={() => void regenerateOutboundDraft(draft.id)}
                         >
                           Regenerate
                         </Button>
                       ) : null}
-                      <Button size="sm" variant="outline" onClick={() => reviewDraft(draft.id, "rejected")}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={isDraftReviewBusy}
+                        aria-busy={draftReviewKind === "reject"}
+                        onClick={() => void reviewDraft(draft.id, "rejected")}
+                      >
+                        {draftReviewKind === "reject" ? (
+                          <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                        ) : null}
                         Reject
                       </Button>
                     </>
                   ) : null}
                   {draft.review_status === "rejected" ? (
-                    <Button size="sm" onClick={() => reviewDraft(draft.id, "approved")}>
+                    <Button
+                      size="sm"
+                      disabled={isDraftReviewBusy}
+                      aria-busy={draftReviewKind === "approve"}
+                      onClick={() => void reviewDraft(draft.id, "approved")}
+                    >
+                      {draftReviewKind === "approve" ? (
+                        <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                      ) : null}
                       Approve
                     </Button>
                   ) : null}
@@ -2426,9 +3014,22 @@ export default function AiBizOsHumanUI() {
             </div>
           </div>
           {draft.error_message &&
-          !["bounced", "dead_mailbox", "replied"].includes(String(draft.tracking_status || "")) ? (
-            <div className="rounded-xl border-2 border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {draft.error_message}
+          !["bounced", "dead_mailbox", "replied"].includes(String(draft.tracking_status || "")) &&
+          !dismissedOutboundDraftErrorKeys.has(`${draft.id}:${draft.error_message}`) ? (
+            <div className="flex items-start gap-2 rounded-xl border-2 border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <p className="min-w-0 flex-1">{draft.error_message}</p>
+              <button
+                type="button"
+                className="shrink-0 rounded-md p-1 opacity-80 hover:bg-destructive/15 hover:opacity-100"
+                aria-label="Dismiss"
+                onClick={() =>
+                  setDismissedOutboundDraftErrorKeys((prev) =>
+                    new Set(prev).add(`${draft.id}:${draft.error_message}`),
+                  )
+                }
+              >
+                <X className="h-4 w-4" aria-hidden />
+              </button>
             </div>
           ) : null}
           <EmailDraftBodyPreview
@@ -2495,63 +3096,100 @@ export default function AiBizOsHumanUI() {
             </div>
           ) : null}
 
-          <div className="flex flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
-            <div className="space-y-1 text-sm">
-              <div>
-                <span className="text-muted-foreground">Project</span>{" "}
-                <span className="font-medium">{selectedProject?.name ?? "—"}</span>
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
+            <div className="flex min-w-0 flex-1 flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
+              <div className="space-y-1 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Project</span>{" "}
+                  <span className="font-medium">{selectedProject?.name ?? "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Run</span>{" "}
+                  <span className="font-medium">
+                    {selectedRun
+                      ? selectedRun.name?.trim() || `Run #${selectedRun.id}`
+                      : "Select a run"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Status</span>{" "}
+                  <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
+                </div>
+                <div className="text-foreground/90">
+                  <span className="text-muted-foreground">LLMs</span>{" "}
+                  <span className="font-medium">{integrationInformer.llmPart}</span>
+                  <span className="px-1.5 text-muted-foreground">·</span>
+                  <span className="text-muted-foreground">CDN</span>{" "}
+                  <span className="font-medium">{integrationInformer.cdnPart}</span>
+                </div>
               </div>
-              <div>
-                <span className="text-muted-foreground">Run</span>{" "}
-                <span className="font-medium">
-                  {selectedRun
-                    ? selectedRun.name?.trim() || `Run #${selectedRun.id}`
-                    : "Select a run"}
-                </span>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Status</span>{" "}
-                <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
-              </div>
-              <div className="text-foreground/90">
-                <span className="text-muted-foreground">LLMs</span>{" "}
-                <span className="font-medium">{integrationInformer.llmPart}</span>
-                <span className="px-1.5 text-muted-foreground">·</span>
-                <span className="text-muted-foreground">CDN</span>{" "}
-                <span className="font-medium">{integrationInformer.cdnPart}</span>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  disabled={!selectedProject || selectedProject.is_archived}
+                  onClick={() => openNewRunDialog()}
+                >
+                  New run
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!selectedProject || runsList.length === 0}
+                  onClick={() => setSwitchRunOpen(true)}
+                >
+                  Switch run
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!selectedRun || workspace?.display_phase === "Closed"}
+                  onClick={() => setCloseRunOpen(true)}
+                >
+                  Close run
+                </Button>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                disabled={!selectedProject || selectedProject.is_archived}
-                onClick={() => openNewRunDialog()}
-              >
-                New run
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={!selectedProject || runsList.length === 0}
-                onClick={() => setSwitchRunOpen(true)}
-              >
-                Switch run
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={!selectedRun || workspace?.display_phase === "Closed"}
-                onClick={() => setCloseRunOpen(true)}
-              >
-                Close run
-              </Button>
-            </div>
+            <Card
+              className={cn(
+                "min-h-0 min-w-0 w-full shrink-0 rounded-2xl border-2 shadow-none lg:w-80",
+                totalPerformance24hUi.cardClass,
+              )}
+            >
+              <CardHeader className="pb-3">
+                <CardTitle>Total performance</CardTitle>
+                <p className={cn("mt-1 text-xs font-medium leading-snug", totalPerformance24hUi.captionClass)}>
+                  {totalPerformance24hUi.label}
+                </p>
+              </CardHeader>
+              <CardContent className="min-w-0">
+                <ul className="space-y-2 break-words text-sm">
+                  <li>
+                    Emails sent:{" "}
+                    <span className="font-medium">{totalPerformance?.emails_sent ?? 0}</span>
+                  </li>
+                  <li>
+                    Emails sent (24 hrs):{" "}
+                    <span className="font-medium">{totalPerformance?.emails_sent_24h ?? 0}</span>
+                  </li>
+                </ul>
+              </CardContent>
+            </Card>
           </div>
         </div>
 
         {error ? (
           <Card className="mb-6 border-2 border-destructive/50">
-            <CardContent className="p-4 text-sm text-destructive">{error}</CardContent>
+            <CardContent className="flex items-start gap-3 p-4">
+              <p className="min-w-0 flex-1 text-sm text-destructive">{error}</p>
+              <button
+                type="button"
+                className="shrink-0 rounded-md p-1 text-destructive opacity-80 hover:bg-destructive/10 hover:opacity-100"
+                aria-label="Dismiss"
+                onClick={() => setError("")}
+              >
+                <X className="h-4 w-4" aria-hidden />
+              </button>
+            </CardContent>
           </Card>
         ) : null}
 
@@ -2583,41 +3221,84 @@ export default function AiBizOsHumanUI() {
                           onClick={() => setSelectedProject(project)}
                           className="min-w-0 flex-1 rounded-lg text-left hover:opacity-90"
                         >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="font-medium">{project.name}</div>
-                            <Badge variant="secondary">#{project.id}</Badge>
-                          </div>
+                          <div className="font-medium">{project.name}</div>
                           <div className="mt-1 text-xs text-muted-foreground">{pretty(project.type)}</div>
+                          {selectedProject?.id === project.id ? (
+                            <div className="mt-2 border-l-2 border-primary/50 pl-2 text-left text-xs leading-snug">
+                              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                Run
+                              </div>
+                              {selectedRun != null && selectedRun.project_id !== project.id ? (
+                                <div className="mt-0.5 text-muted-foreground">Loading…</div>
+                              ) : selectedRun != null && selectedRun.project_id === project.id ? (
+                                <>
+                                  <div
+                                    className="mt-0.5 truncate font-medium text-foreground"
+                                    title={selectedRun.name?.trim() || `Run #${selectedRun.id}`}
+                                  >
+                                    {selectedRun.name?.trim() || `Run #${selectedRun.id}`}
+                                  </div>
+                                  {workspace?.display_phase && workspace?.id === selectedRun.id ? (
+                                    <div className="mt-0.5 text-muted-foreground">{workspace.display_phase}</div>
+                                  ) : null}
+                                </>
+                              ) : runsList.length > 0 &&
+                                !runsList.some((r) => r.project_id === project.id) ? (
+                                <div className="mt-0.5 text-muted-foreground">Loading…</div>
+                              ) : runsList.some((r) => r.project_id === project.id) && !selectedRun ? (
+                                <div className="mt-0.5 text-muted-foreground">Loading…</div>
+                              ) : (
+                                <div className="mt-0.5 font-medium text-muted-foreground">No runs yet</div>
+                              )}
+                            </div>
+                          ) : null}
                         </button>
-                        {projectView === "active" ? (
+                        <div className="flex shrink-0 items-start gap-0.5">
                           <Button
+                            type="button"
                             size="sm"
                             variant="ghost"
                             className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
-                            aria-label="Archive project"
-                            title="Archive"
+                            aria-label="Rename project"
+                            title="Rename project"
                             onClick={(e) => {
+                              e.preventDefault();
                               e.stopPropagation();
-                              void archiveProject(project.id);
+                              openRenameProject(project);
                             }}
                           >
-                            <Archive className="h-4 w-4" aria-hidden />
+                            <Settings className="h-4 w-4" aria-hidden />
                           </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
-                            aria-label="Restore project"
-                            title="Restore"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void restoreProject(project.id);
-                            }}
-                          >
-                            <ArchiveRestore className="h-4 w-4" aria-hidden />
-                          </Button>
-                        )}
+                          {projectView === "active" ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
+                              aria-label="Archive project"
+                              title="Archive"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void archiveProject(project.id);
+                              }}
+                            >
+                              <Archive className="h-4 w-4" aria-hidden />
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
+                              aria-label="Restore project"
+                              title="Restore"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void restoreProject(project.id);
+                              }}
+                            >
+                              <ArchiveRestore className="h-4 w-4" aria-hidden />
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -2754,11 +3435,15 @@ export default function AiBizOsHumanUI() {
                         <span className="font-medium">{workspace.performance?.emails_sent ?? 0}</span>
                       </li>
                       <li>
+                        Emails sent (24 hrs):{" "}
+                        <span className="font-medium">{workspace.performance?.emails_sent_24h ?? 0}</span>
+                      </li>
+                      <li>
                         Replies:{" "}
                         <span className="font-medium">{workspace.performance?.replies ?? 0}</span>
                       </li>
                       <li>
-                        Active threads:{" "}
+                        Active:{" "}
                         <span className="font-medium">{workspace.performance?.active_threads ?? 0}</span>
                       </li>
                       <li>
@@ -2774,16 +3459,8 @@ export default function AiBizOsHumanUI() {
                         <span className="font-medium">{workspace.performance?.dead_mailboxes ?? 0}</span>
                       </li>
                       <li>
-                        Reminders (active):{" "}
-                        <span className="font-medium">{workspace.performance?.reminders_active ?? 0}</span>
-                      </li>
-                      <li>
-                        Reminders due:{" "}
-                        <span className="font-medium">{workspace.performance?.reminders_due ?? 0}</span>
-                      </li>
-                      <li>
-                        Packets sent:{" "}
-                        <span className="font-medium">{workspace.performance?.packets_sent ?? 0}</span>
+                        Bounced:{" "}
+                        <span className="font-medium">{workspace.performance?.bounced ?? 0}</span>
                       </li>
                     </ul>
                     {workspace.conversations ? (
@@ -2804,18 +3481,25 @@ export default function AiBizOsHumanUI() {
             ) : null}
 
             <div className="flex flex-wrap gap-1 rounded-2xl border-2 border-border bg-muted/20 p-1">
-              {visibleMainNavItems.map((item) => (
-                <Button
-                  key={item.value}
-                  type="button"
-                  size="sm"
-                  variant={mainNav === item.value ? "secondary" : "ghost"}
-                  className="rounded-xl"
-                  onClick={() => setMainNav(item.value)}
-                >
-                  {item.label}
-                </Button>
-              ))}
+              {visibleMainNavItems.map((item) => {
+                const active = mainNav === item.value;
+                return (
+                  <Button
+                    key={item.value}
+                    type="button"
+                    size="sm"
+                    variant={active ? "default" : "ghost"}
+                    className={cn(
+                      "rounded-xl",
+                      !active &&
+                        "border-2 border-transparent shadow-none hover:border-primary hover:bg-transparent",
+                    )}
+                    onClick={() => setMainNav(item.value)}
+                  >
+                    {item.label}
+                  </Button>
+                );
+              })}
             </div>
 
             {mainNav === "runs" ? (
@@ -2844,7 +3528,13 @@ export default function AiBizOsHumanUI() {
                     </p>
                   ) : (
                     runsList.map((r) => (
-                      <Card key={r.id} className="rounded-2xl border-2 border-border shadow-none">
+                      <Card
+                        key={r.id}
+                        className={cn(
+                          "rounded-2xl border-2 shadow-none transition",
+                          selectedRun?.id === r.id ? "border-primary bg-primary/5" : "border-border",
+                        )}
+                      >
                         <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
                           <div className="space-y-1 text-sm">
                             <div className="font-semibold">{r.name}</div>
@@ -2855,7 +3545,13 @@ export default function AiBizOsHumanUI() {
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-2">
-                            <Button type="button" size="sm" variant="outline" onClick={() => void openRunById(r.id)}>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={openRunEditLoading}
+                              onClick={() => void openRunEditDialog(r)}
+                            >
                               Open
                             </Button>
                             <Button
@@ -3245,6 +3941,8 @@ export default function AiBizOsHumanUI() {
               <CardContent>
                 {mainNav === "contacts" ? (
                   <div className="space-y-6">
+                    {contactsRunHydrated ? (
+                    <>
                     {approveContactsContinueCta ? (
                       <div className="flex max-w-xl flex-col gap-1">
                         <Button
@@ -3327,7 +4025,7 @@ export default function AiBizOsHumanUI() {
                             )}
                             onClick={() => setContactReviewTab("pending")}
                           >
-                            Pending ({contactsByReviewTab.pending.length})
+                            Pending ({displayContactReviewCounts.pending})
                           </Button>
                           <Button
                             type="button"
@@ -3343,7 +4041,7 @@ export default function AiBizOsHumanUI() {
                             )}
                             onClick={() => setContactReviewTab("approved")}
                           >
-                            Approved ({contactsByReviewTab.approved.length})
+                            Approved ({displayContactReviewCounts.approved})
                           </Button>
                           <Button
                             type="button"
@@ -3359,7 +4057,7 @@ export default function AiBizOsHumanUI() {
                             )}
                             onClick={() => setContactReviewTab("rejected")}
                           >
-                            Rejected ({contactsByReviewTab.rejected.length})
+                            Rejected ({displayContactReviewCounts.rejected})
                           </Button>
                           <Button
                             type="button"
@@ -3375,7 +4073,7 @@ export default function AiBizOsHumanUI() {
                             )}
                             onClick={() => setContactReviewTab("bounced")}
                           >
-                            Bounced ({contactsByReviewTab.bounced.length})
+                            Bounced ({displayContactReviewCounts.bounced})
                           </Button>
                           <Button
                             type="button"
@@ -3391,7 +4089,7 @@ export default function AiBizOsHumanUI() {
                             )}
                             onClick={() => setContactReviewTab("dead_mailbox")}
                           >
-                            Dead mailbox ({contactsByReviewTab.dead_mailbox.length})
+                            Dead mailbox ({displayContactReviewCounts.dead_mailbox})
                           </Button>
                           <Button
                             type="button"
@@ -3407,7 +4105,7 @@ export default function AiBizOsHumanUI() {
                             )}
                             onClick={() => setContactReviewTab("no_email")}
                           >
-                            No email ({contactsByReviewTab.no_email.length})
+                            No email ({displayContactReviewCounts.no_email})
                           </Button>
                         </div>
 
@@ -3478,91 +4176,345 @@ export default function AiBizOsHumanUI() {
                         No contacts for this run yet.
                       </div>
                     ) : null}
+                    </>
+                    ) : selectedRun?.id ? (
+                      <div className="space-y-3">
+                        <div
+                          className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+                          role="tablist"
+                          aria-label="Contact review category"
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "pending"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "pending"
+                                ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
+                                : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("pending")}
+                          >
+                            Pending ({displayContactReviewCounts.pending})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "approved"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "approved"
+                                ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
+                                : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("approved")}
+                          >
+                            Approved ({displayContactReviewCounts.approved})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "rejected"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "rejected"
+                                ? "border-neutral-500 bg-neutral-600 text-white hover:bg-neutral-600 dark:border-neutral-400 dark:bg-neutral-600 dark:hover:bg-neutral-600"
+                                : "border-neutral-600/50 bg-neutral-600/15 text-neutral-900 hover:bg-neutral-600/25 dark:border-neutral-500/45 dark:bg-neutral-900/35 dark:text-neutral-100 dark:hover:bg-neutral-900/50",
+                            )}
+                            onClick={() => setContactReviewTab("rejected")}
+                          >
+                            Rejected ({displayContactReviewCounts.rejected})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "bounced"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "bounced"
+                                ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
+                                : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("bounced")}
+                          >
+                            Bounced ({displayContactReviewCounts.bounced})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "dead_mailbox"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "dead_mailbox"
+                                ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
+                                : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
+                            )}
+                            onClick={() => setContactReviewTab("dead_mailbox")}
+                          >
+                            Dead mailbox ({displayContactReviewCounts.dead_mailbox})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={contactReviewTab === "no_email"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              contactReviewTab === "no_email"
+                                ? "border-zinc-500 bg-zinc-600 text-white hover:bg-zinc-600 dark:border-zinc-400 dark:bg-zinc-600 dark:hover:bg-zinc-600"
+                                : "border-zinc-600/50 bg-zinc-600/15 text-zinc-900 hover:bg-zinc-600/25 dark:border-zinc-500/45 dark:bg-zinc-950/40 dark:text-zinc-100 dark:hover:bg-zinc-950/55",
+                            )}
+                            onClick={() => setContactReviewTab("no_email")}
+                          >
+                            No email ({displayContactReviewCounts.no_email})
+                          </Button>
+                        </div>
+                        {reviewContactsSnapModeVal === "loading" &&
+                        contactsPanelLiteFiltered.length > 0 ? (
+                          <>
+                            <p className="text-xs text-muted-foreground" role="status">
+                              Showing cached contacts — refreshing…
+                            </p>
+                            <div className="max-h-[min(60vh,480px)] space-y-2 overflow-y-auto rounded-xl border border-border p-2">
+                              {contactsPanelLiteFiltered.map((c) => (
+                                <div
+                                  key={c.id}
+                                  className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2 text-sm"
+                                >
+                                  <div className="font-medium">{c.company || "—"}</div>
+                                  <div className="text-muted-foreground">
+                                    {c.name || "—"} · {c.email || "—"}
+                                  </div>
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    <Badge variant="secondary" className="text-[10px] font-normal">
+                                      {c.review_status || "—"}
+                                    </Badge>
+                                    {c.email_health ? (
+                                      <Badge variant="outline" className="text-[10px] font-normal">
+                                        {c.email_health}
+                                      </Badge>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <SnapshotCardsPlaceholder
+                            mode={reviewContactsSnapModeVal}
+                            kind="Contact"
+                          />
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          type="button"
-                          className="gap-1.5"
-                          onClick={() => void sendAllApproved()}
-                          disabled={!selectedRun || approvedDrafts === 0 || sendAllApprovedBusy}
-                          aria-busy={sendAllApprovedBusy}
-                        >
-                          {sendAllApprovedBusy ? (
-                            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-                          ) : !gmailSendReady ? (
-                            <CircleX
-                              className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
-                              aria-hidden
-                            />
-                          ) : null}
-                          Send all approved
-                        </Button>
-                      </div>
-                      <div
-                        className="flex flex-wrap items-center gap-x-5 gap-y-2"
-                        role="group"
-                        aria-label="Show drafts by review status"
+                    {contactsRunHydrated ? (
+                    <>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        className="gap-1.5"
+                        onClick={() => void sendAllApproved()}
+                        disabled={!selectedRun || approvedDrafts === 0 || sendAllApprovedBusy}
+                        aria-busy={sendAllApprovedBusy}
                       >
-                        <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
-                            checked={draftShowApproved}
-                            onChange={(e) => setDraftShowApproved(e.target.checked)}
+                        {sendAllApprovedBusy ? (
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                        ) : !gmailSendReady ? (
+                          <CircleX
+                            className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
+                            aria-hidden
                           />
-                          Approved
-                        </label>
-                        <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
-                            checked={draftShowPendingReview}
-                            onChange={(e) => setDraftShowPendingReview(e.target.checked)}
-                          />
-                          Pending review
-                        </label>
-                      </div>
+                        ) : null}
+                        Send all approved
+                      </Button>
                     </div>
                     {drafts.length > 0 ? (
-                      <>
-                        {showDraftsPendingSection ? (
-                          <div className="space-y-3">
-                            <div className="text-sm font-medium">Pending ({draftsPending.length})</div>
-                            <div className="grid gap-3">{draftsPending.map((d) => renderDraftCard(d))}</div>
-                          </div>
-                        ) : null}
+                      <div className="space-y-3">
+                        <div
+                          className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+                          role="tablist"
+                          aria-label="Draft review category"
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={draftReviewTab === "pending"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              draftReviewTab === "pending"
+                                ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
+                                : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
+                            )}
+                            onClick={() => setDraftReviewTab("pending")}
+                          >
+                            Pending review ({displayDraftReviewCounts.pendingReview})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={draftReviewTab === "approved"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              draftReviewTab === "approved"
+                                ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
+                                : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
+                            )}
+                            onClick={() => setDraftReviewTab("approved")}
+                          >
+                            Approved ({displayDraftReviewCounts.approved})
+                          </Button>
+                        </div>
 
-                        {showDraftsApprovedSection ? (
+                        {draftReviewTab === "pending" ? (
+                          <>
+                            {draftsPending.length > 0 ? (
+                              <div className="space-y-3">
+                                <div className="text-sm font-medium">Pending ({draftsPending.length})</div>
+                                <div className="grid gap-3">{draftsPending.map((d) => renderDraftCard(d))}</div>
+                              </div>
+                            ) : null}
+                            {draftsRejectedList.length > 0 ? (
+                              <details className="group rounded-2xl border-2 border-border">
+                                <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
+                                  <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
+                                  Rejected ({draftsRejectedList.length})
+                                </summary>
+                                <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
+                                  {draftsRejectedList.map((d) => renderDraftCard(d))}
+                                </div>
+                              </details>
+                            ) : null}
+                            {draftsPending.length === 0 && draftsRejectedList.length === 0 ? (
+                              <div className="text-sm text-muted-foreground">
+                                No drafts in pending review for this search — try Approved or clear search.
+                              </div>
+                            ) : null}
+                          </>
+                        ) : draftsApprovedList.length > 0 ? (
                           <div className="space-y-3">
                             <div className="text-sm font-medium">Approved ({draftsApprovedList.length})</div>
                             <div className="grid gap-3">{draftsApprovedList.map((d) => renderDraftCard(d))}</div>
                           </div>
-                        ) : null}
-
-                        {draftShowPendingReview && draftsRejectedList.length > 0 ? (
-                          <details className="group rounded-2xl border-2 border-border">
-                            <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
-                              <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
-                              Rejected ({draftsRejectedList.length})
-                            </summary>
-                            <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
-                              {draftsRejectedList.map((d) => renderDraftCard(d))}
-                            </div>
-                          </details>
-                        ) : null}
-                      </>
+                        ) : (
+                          <div className="text-sm text-muted-foreground">
+                            No approved drafts for this search — try Pending review or clear search.
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <div className="text-sm text-muted-foreground">No drafts yet.</div>
                     )}
-
-                    {drafts.length > 0 && filteredDrafts.length === 0 ? (
-                      <div className="text-sm text-muted-foreground">
-                        {!draftShowApproved && !draftShowPendingReview
-                          ? "Turn on at least one option: Approved or Pending review."
-                          : "No drafts match the current search or selected options."}
+                    </>
+                    ) : selectedRun?.id ? (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            className="gap-1.5"
+                            onClick={() => void sendAllApproved()}
+                            disabled={!selectedRun || approvedDrafts === 0 || sendAllApprovedBusy}
+                            aria-busy={sendAllApprovedBusy}
+                          >
+                            {sendAllApprovedBusy ? (
+                              <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                            ) : !gmailSendReady ? (
+                              <CircleX
+                                className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500"
+                                aria-hidden
+                              />
+                            ) : null}
+                            Send all approved
+                          </Button>
+                        </div>
+                        <div
+                          className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+                          role="tablist"
+                          aria-label="Draft review category"
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={draftReviewTab === "pending"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              draftReviewTab === "pending"
+                                ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
+                                : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
+                            )}
+                            onClick={() => setDraftReviewTab("pending")}
+                          >
+                            Pending review ({displayDraftReviewCounts.pendingReview})
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            role="tab"
+                            aria-selected={draftReviewTab === "approved"}
+                            className={cn(
+                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              draftReviewTab === "approved"
+                                ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
+                                : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
+                            )}
+                            onClick={() => setDraftReviewTab("approved")}
+                          >
+                            Approved ({displayDraftReviewCounts.approved})
+                          </Button>
+                        </div>
+                        {reviewDraftsSnapModeVal === "loading" && draftsPanelLiteFiltered.length > 0 ? (
+                          <>
+                            <p className="text-xs text-muted-foreground" role="status">
+                              Showing cached drafts — refreshing…
+                            </p>
+                            <div className="max-h-[min(60vh,480px)] space-y-2 overflow-y-auto rounded-xl border border-border p-2">
+                              {draftsPanelLiteFiltered.map((d) => (
+                                <div
+                                  key={d.id}
+                                  className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2 text-sm"
+                                >
+                                  <div className="font-medium">{d.company || "Untitled"}</div>
+                                  <div className="text-muted-foreground">{d.to_email || "—"}</div>
+                                  <div className="mt-0.5 line-clamp-2">{d.subject || "—"}</div>
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    <Badge variant="secondary" className="text-[10px] font-normal">
+                                      {d.review_status}
+                                    </Badge>
+                                    <Badge variant="outline" className="text-[10px] font-normal">
+                                      {d.tracking_status || d.status}
+                                    </Badge>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <SnapshotCardsPlaceholder
+                            mode={reviewDraftsSnapModeVal}
+                            kind="Draft"
+                          />
+                        )}
                       </div>
                     ) : null}
                   </div>
@@ -3768,6 +4720,7 @@ export default function AiBizOsHumanUI() {
                 contextJson={selectedRun.context_json ?? {}}
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
+                onActiveTabChange={(tab) => setMainNav(trackingTabToMainNav(tab))}
                 onRunWorkspaceRefresh={() => void loadRunDetails(selectedRun.id)}
                 cdnR2UploadReady={setupIntegration?.cdn_r2_upload_ready === true}
               />
@@ -3786,18 +4739,14 @@ export default function AiBizOsHumanUI() {
       <Dialog open={newRunOpen} onOpenChange={setNewRunOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>
-              {newRunBaseline && newRunMatchesBaseline ? "Run" : "New run"}
-            </DialogTitle>
+            <DialogTitle>{newRunBaseline ? "Edit run" : "New run"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
             <p className="text-xs text-muted-foreground">
               This brief drives company search, contact roles, and the master email for the whole run.
-              {newRunBaseline && newRunMatchesBaseline
-                ? " Same details as this run — continue here, or change something to start a new wave."
-                : newRunBaseline
-                  ? " Changes turn this into a new wave (name updates with “ · next” unless you edit it yourself)."
-                  : null}
+              {newRunBaseline
+                ? " Keep the same run name and use Update run for notes, segment, or brief. Change the run name to use Create run (new wave)."
+                : null}
             </p>
             <div>
               <div className="mb-1 text-xs text-muted-foreground">
@@ -3851,12 +4800,113 @@ export default function AiBizOsHumanUI() {
               </p>
             </div>
           </div>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button type="button" variant="outline" onClick={() => setNewRunOpen(false)}>
+          <DialogFooter className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={newRunDialogBusy}
+              onClick={() => setNewRunOpen(false)}
+            >
               Cancel
             </Button>
-            <Button type="button" onClick={() => void submitNewRunDialog()} disabled={!canSubmitNewRun}>
-              {newRunBaseline && newRunMatchesBaseline ? "Continue" : "Create run"}
+            {newRunBaseline ? (
+              <>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={!canUpdateRun || newRunDialogBusy}
+                  onClick={() => void updateExistingRun()}
+                >
+                  {newRunUpdateInFlight ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  ) : null}
+                  Update run
+                </Button>
+                <Button
+                  type="button"
+                  disabled={!canCreateRunInDialog || newRunDialogBusy}
+                  onClick={() => void createNewRun()}
+                >
+                  {newRunCreateInFlight ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  ) : null}
+                  Create run
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                disabled={!canSubmitNewRun || newRunDialogBusy}
+                onClick={() => void createNewRun()}
+              >
+                {newRunCreateInFlight ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
+                Create run
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={renameProjectOpen}
+        onOpenChange={(open) => {
+          setRenameProjectOpen(open);
+          if (!open) {
+            setRenameProjectId(null);
+            setRenameProjectNameField("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename project</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 py-1">
+            <label className="text-sm font-medium text-foreground" htmlFor="rename-project-name">
+              Project name
+            </label>
+            <Input
+              id="rename-project-name"
+              value={renameProjectNameField}
+              onChange={(e) => setRenameProjectNameField(e.target.value)}
+              placeholder="Project name"
+              disabled={renameProjectSaving}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitRenameProject();
+                }
+              }}
+            />
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={renameProjectSaving}
+              onClick={() => {
+                setRenameProjectOpen(false);
+                setRenameProjectId(null);
+                setRenameProjectNameField("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={renameProjectSaving || !renameProjectNameField.trim()}
+              onClick={() => void submitRenameProject()}
+            >
+              {renameProjectSaving ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  Renaming…
+                </>
+              ) : (
+                "Rename"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3877,9 +4927,7 @@ export default function AiBizOsHumanUI() {
                     type="button"
                     aria-current={isCurrent ? "true" : undefined}
                     className={`w-full rounded-2xl border-2 p-3 text-left text-sm transition-colors hover:bg-muted/50 ${
-                      isCurrent
-                        ? "border-primary bg-primary/10 ring-2 ring-primary/25 dark:bg-primary/15"
-                        : "border-border"
+                      isCurrent ? "border-primary bg-primary/5" : "border-border"
                     }`}
                     onClick={() => void openRunById(r.id)}
                   >
@@ -4037,7 +5085,10 @@ export default function AiBizOsHumanUI() {
             type="button"
             className="fixed inset-0 bg-black/50"
             aria-label="Close"
-            onClick={() => setPromptSetupOpen(false)}
+            disabled={promptSetupSaving}
+            onClick={() => {
+              if (!promptSetupSaving) setPromptSetupOpen(false);
+            }}
           />
           <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Prompt setup</h2>
@@ -4057,10 +5108,18 @@ export default function AiBizOsHumanUI() {
               />
             </div>
             <div className="mt-6 flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setPromptSetupOpen(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={promptSetupSaving}
+                onClick={() => setPromptSetupOpen(false)}
+              >
                 Cancel
               </Button>
-              <Button type="button" onClick={() => void savePromptSetup()}>
+              <Button type="button" disabled={promptSetupSaving} onClick={() => void savePromptSetup()}>
+                {promptSetupSaving ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
                 Save
               </Button>
             </div>
@@ -4143,10 +5202,18 @@ export default function AiBizOsHumanUI() {
             ) : null}
             {gmailSetupErr ? (
               <div
-                className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
                 role="alert"
               >
-                {gmailSetupErr}
+                <p className="min-w-0 flex-1">{gmailSetupErr}</p>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md p-1 opacity-80 hover:bg-destructive/15 hover:opacity-100"
+                  aria-label="Dismiss"
+                  onClick={() => setGmailSetupErr("")}
+                >
+                  <X className="h-4 w-4" aria-hidden />
+                </button>
               </div>
             ) : null}
             {setupIntegration?.env_write_blocked_reason ? (

@@ -378,13 +378,27 @@ def resolve_outbound_from_mime(access_token: str) -> tuple[str, str]:
     return hdr, o
 
 
-def _build_mime_raw(*, from_addr: str, to_addr: str, subject: str, body_html: str) -> str:
-    """RFC 5322 + SMTP policy; Gmail is picky about MIME structure and line endings."""
+def _build_mime_raw(
+    *,
+    from_addr: str,
+    to_addr: str,
+    subject: str,
+    body_html: str,
+    reply_to_mailbox: str | None = None,
+) -> str:
+    """RFC 5322 + SMTP policy; Gmail is picky about MIME structure and line endings.
+
+    ``reply_to_mailbox``: bare email for ``Reply-To:``. With «Send mail as» aliases, Gmail can
+    still deliver bounces / some auto-replies to the OAuth primary; an explicit Reply-To aimed at
+    the same mailbox as the visible sender steers normal replies and many auto-responders correctly.
+    """
     subj = _sanitize_rfc_subject(subject)
     plain = html_to_plain_text_for_mime(body_html) or re.sub(r"<[^>]+>", "", body_html) or ""
     msg = EmailMessage()
     msg["Subject"] = subj
     msg["From"] = from_addr
+    if reply_to_mailbox and "@" in reply_to_mailbox:
+        msg["Reply-To"] = reply_to_mailbox.strip()
     msg["To"] = to_addr
     msg.set_content(plain, subtype="plain", charset="utf-8")
     msg.add_alternative(body_html, subtype="html", charset="utf-8")
@@ -399,12 +413,14 @@ def gmail_send_message(
     to_addr: str,
     subject: str,
     body_html: str,
+    reply_to_mailbox: str | None = None,
 ) -> dict[str, Any]:
     raw = _build_mime_raw(
         from_addr=from_addr,
         to_addr=to_addr,
         subject=subject,
         body_html=body_html,
+        reply_to_mailbox=reply_to_mailbox,
     )
     with httpx.Client(timeout=60.0) as client:
         r = client.post(
@@ -545,10 +561,11 @@ def verify_gmail_roundtrip_with_code(code: str, redirect_uri: str) -> None:
         raise GmailOAuthError("No access_token from Google (cannot run verification)")
 
     profile = gmail_profile_email(access)
-    from_hdr, _addr = resolve_outbound_from_mime(access)
+    from_hdr, from_mailbox = resolve_outbound_from_mime(access)
     gmail_send_message(
         access,
         from_addr=from_hdr,
+        reply_to_mailbox=from_mailbox,
         to_addr=profile,
         subject=VERIFY_SUBJECT,
         body_html=f"<p>{VERIFY_BODY_TEXT}</p>",
@@ -587,6 +604,8 @@ def send_mime_gmail(
     msg = EmailMessage()
     msg["Subject"] = subj
     msg["From"] = from_hdr
+    if from_addr and "@" in from_addr:
+        msg["Reply-To"] = from_addr.strip()
     msg["To"] = to_email.strip()
     plain = html_to_plain_text_for_mime(body_html) or re.sub(r"<[^>]+>", "", body_html) or ""
     msg.set_content(plain, subtype="plain", charset="utf-8")
@@ -637,10 +656,11 @@ def send_mime_gmail(
 
 def send_html_via_gmail(*, to_email: str, subject: str, body_html: str) -> dict[str, Any]:
     access = refresh_access_token()
-    from_hdr, from_addr = resolve_outbound_from_mime(access)
+    from_hdr, from_mailbox = resolve_outbound_from_mime(access)
     data = gmail_send_message(
         access,
         from_addr=from_hdr,
+        reply_to_mailbox=from_mailbox,
         to_addr=to_email.strip(),
         subject=subject,
         body_html=body_html,
@@ -658,7 +678,7 @@ def send_html_via_gmail(*, to_email: str, subject: str, body_html: str) -> dict[
         "thread_id": data.get("threadId") or mid,
         "provider": "gmail",
         "accepted": True,
-        "from_email": from_addr,
+        "from_email": from_mailbox,
         "to_email": to_email,
         "subject": _sanitize_rfc_subject(subject),
         "rfc_message_id": rfc_mid,

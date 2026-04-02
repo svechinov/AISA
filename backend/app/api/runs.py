@@ -9,6 +9,7 @@ from app.repositories.run_repo import (
     get_run,
     list_runs_by_project,
     update_run_human_ui_preferences,
+    update_run_outreach_fields,
     update_run_prompt_setup_text,
     update_run_signature,
 )
@@ -24,6 +25,7 @@ from app.schemas.run import (
     RunCardRead,
     RunCompaniesRead,
     RunHumanUiPatch,
+    RunOutreachPatch,
     RunPromptSetupPatch,
     RunRead,
     RunSignaturePatch,
@@ -33,6 +35,7 @@ from app.schemas.run import (
 from app.services.orchestrator import continue_workflow_after_review, run_workflow
 from app.services.replacement_draft_service import generate_replacement_drafts
 from app.services.replacement_send_service import send_approved_replacement_drafts
+from app.services.run_deletion_service import delete_run_cascade
 from app.services.run_restart_service import restart_run_workflow
 from app.services.retry_company_find_service import (
     continue_find_for_pending_companies,
@@ -116,6 +119,57 @@ def continue_company_find_route(run_id: int, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return RetryCompanyFindResult(**data)
+
+
+@router.patch("/{run_id}/outreach", response_model=RunRead)
+def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session = Depends(get_db)):
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.closed_at is not None:
+        raise HTTPException(status_code=400, detail="Run is closed")
+
+    seg = (payload.segment or "").strip()
+    if not seg:
+        raise HTTPException(status_code=400, detail="Segment is required")
+
+    parsed = parse_outreach_brief_text(payload.outreach_brief)
+    inner = merge_inner_from_legacy_fields(
+        parsed,
+        product="",
+        target_entities="",
+        target_roles="",
+        outreach_goal="",
+        tone="Professional",
+        extra_context="",
+    )
+    if not inner.get("notes") and payload.notes:
+        inner["notes"] = payload.notes.strip()
+    if not (inner.get("goal") or inner.get("offer")):
+        legacy = (run.input_json or {}).get("goal") if isinstance(run.input_json, dict) else ""
+        if legacy:
+            inner["goal"] = str(legacy).strip()
+    if not (inner.get("goal") or inner.get("offer")):
+        raise HTTPException(
+            status_code=400,
+            detail="Outreach brief must include at least Offer or Goal (or input_json.goal).",
+        )
+
+    master = build_master_prompt_text(inner)
+    try:
+        updated = update_run_outreach_fields(
+            db,
+            run_id,
+            notes=payload.notes,
+            segment=seg,
+            inner=inner,
+            master_prompt=master,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not updated:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return updated
 
 
 @router.patch("/{run_id}/close", response_model=RunRead)
@@ -258,6 +312,13 @@ def patch_run_human_ui_route(run_id: int, payload: RunHumanUiPatch, db: Session 
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+@router.delete("/{run_id}", status_code=204)
+def delete_run_route(run_id: int, db: Session = Depends(get_db)):
+    """Permanently remove a run and all related rows (contacts, drafts, steps, etc.)."""
+    if not delete_run_cascade(db, run_id, commit=True):
+        raise HTTPException(status_code=404, detail="Run not found")
 
 
 @router.get("/{run_id}", response_model=RunRead)

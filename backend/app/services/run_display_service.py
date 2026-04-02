@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.models.contact import Contact
+from app.models.email_draft import EmailDraft
+from app.models.email_event import EmailEvent
+from app.models.reply_draft import ReplyDraft
+from app.models.email_thread import EmailThread
 from app.repositories.contact_repo import list_contacts_by_run
+from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
 from app.repositories.step_repo import get_step_by_run_and_name, list_steps_by_run
-from app.repositories.email_thread_repo import list_email_threads_by_run
+from app.repositories.email_thread_repo import (
+    list_email_threads_by_run,
+    resolve_thread_outbound_draft_id,
+)
 from app.repositories.run_repo import get_run
 from app.services.run_companies_status_service import _norm, _strip_url
 from app.services.run_summary_service import get_run_summary
@@ -21,6 +32,58 @@ from app.setup_milestones import (
 
 # Still approved/edited in DB, but not counted as “ready contacts” in setup summary.
 _UNDELIVERABLE_EMAIL_HEALTH = frozenset({"bounced", "dead_mailbox"})
+
+_PROMPT_SETUP_KEY = "prompt_setup_text"
+
+
+def prompt_setup_saved_from_context(context_json: dict | None) -> bool:
+    if not context_json:
+        return False
+    raw = context_json.get(_PROMPT_SETUP_KEY)
+    return isinstance(raw, str) and len(raw.strip()) > 0
+
+
+def signature_html_has_meaningful_content(html: str | None) -> bool:
+    """Match Human UI `runSignatureHasMeaningfulContent`: strip tags/styles, require non-empty text."""
+    raw = (html or "").strip()
+    if not raw:
+        return False
+    text = re.sub(r"<style[\s\S]*?</style>", " ", raw, flags=re.IGNORECASE)
+    text = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;|&#160;", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).replace("\u00a0", " ").strip()
+    return len(text) > 0
+
+
+def count_emails_sent_in_last_hours(db: Session, run_id: int, *, hours: int = 24) -> int:
+    """Outreach + reply drafts actually sent with ``sent_at`` in the last ``hours`` (UTC)."""
+    if hours < 1:
+        return 0
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    n_out = (
+        db.query(func.count())
+        .select_from(EmailDraft)
+        .filter(
+            EmailDraft.run_id == run_id,
+            EmailDraft.status == "sent",
+            EmailDraft.sent_at.isnot(None),
+            EmailDraft.sent_at >= cutoff,
+        )
+        .scalar()
+    )
+    n_reply = (
+        db.query(func.count())
+        .select_from(ReplyDraft)
+        .filter(
+            ReplyDraft.run_id == run_id,
+            ReplyDraft.status == "sent",
+            ReplyDraft.sent_at.isnot(None),
+            ReplyDraft.sent_at >= cutoff,
+        )
+        .scalar()
+    )
+    return int(n_out or 0) + int(n_reply or 0)
 
 
 def _count_contacts_approved_reachable(db: Session, run_id: int) -> int:
@@ -139,6 +202,47 @@ def _count_db_distinct_companies_validated_with_email(db: Session, run_id: int) 
     return len(keys)
 
 
+def _thread_is_bounced_or_dead_mailbox_row(
+    db: Session,
+    thread: EmailThread,
+    contacts: dict[int, Contact],
+    drafts: dict[int, EmailDraft],
+) -> bool:
+    """Matches Human UI Threads tab: bounced / dead mailbox from draft + contact.email_health."""
+    contact = contacts.get(thread.contact_id)
+    eff = resolve_thread_outbound_draft_id(db, thread)
+    linked = drafts.get(int(eff)) if eff is not None else None
+
+    if linked is not None:
+        ts = (linked.tracking_status or "").strip().lower()
+        st = (linked.status or "").strip().lower()
+        draft_lifecycle = ts if ts else st
+        if draft_lifecycle == "dead_mailbox":
+            return True
+        if ts == "bounced":
+            return True
+
+    if contact is not None:
+        eh = (contact.email_health or "").strip().lower()
+        if eh == "dead_mailbox":
+            return True
+        if eh == "bounced":
+            return True
+    return False
+
+
+def _active_threads_count_for_performance(db: Session, run_id: int) -> int:
+    """Threads not in Bounced / Dead mailbox buckets (same as TrackingView threadBucketCounts.active)."""
+    threads = list_email_threads_by_run(db, run_id)
+    contacts = {c.id: c for c in list_contacts_by_run(db, run_id)}
+    drafts = {d.id: d for d in list_email_drafts_by_run(db, run_id)}
+    return sum(
+        1
+        for t in threads
+        if not _thread_is_bounced_or_dead_mailbox_row(db, t, contacts, drafts)
+    )
+
+
 def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int, int]:
     """Due = scheduled/snoozed with remind_at <= now. Active = scheduled, triggered, or snoozed."""
     due = sum(
@@ -187,8 +291,7 @@ def get_run_display_phase(db: Session, run) -> str:
 
 def get_conversations_snapshot(db: Session, run_id: int) -> dict:
     summary = get_run_summary(db, run_id)
-    threads = list_email_threads_by_run(db, run_id)
-    active_threads = len([t for t in threads if (t.status or "").lower() == "open"])
+    active_threads = _active_threads_count_for_performance(db, run_id)
     reminders = list_reminders_by_run(db, run_id)
     now = datetime.utcnow()
     reminders_due, reminders_active = _reminder_due_and_active_counts(reminders, now)
@@ -201,25 +304,75 @@ def get_conversations_snapshot(db: Session, run_id: int) -> dict:
     }
 
 
+def get_total_performance_global(db: Session) -> dict:
+    """All projects/runs: outreach + reply sends. Outreach uses max(drafts marked sent, distinct sent events)."""
+    n_out_draft = (
+        db.query(func.count()).select_from(EmailDraft).filter(EmailDraft.status == "sent").scalar()
+    )
+    n_out_draft = int(n_out_draft or 0)
+    n_out_ev = (
+        db.query(func.count(func.distinct(EmailEvent.draft_id)))
+        .select_from(EmailEvent)
+        .filter(EmailEvent.event_type == "sent")
+        .scalar()
+    )
+    n_out_ev = int(n_out_ev or 0)
+    n_outreach_all = max(n_out_draft, n_out_ev)
+
+    n_reply_all = db.query(func.count()).select_from(ReplyDraft).filter(ReplyDraft.status == "sent").scalar()
+    n_reply_all = int(n_reply_all or 0)
+    emails_sent = n_outreach_all + n_reply_all
+
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    n_out_24_draft = (
+        db.query(func.count())
+        .select_from(EmailDraft)
+        .filter(
+            EmailDraft.status == "sent",
+            EmailDraft.sent_at.isnot(None),
+            EmailDraft.sent_at >= cutoff,
+        )
+        .scalar()
+    )
+    n_out_24_draft = int(n_out_24_draft or 0)
+    n_out_24_ev = (
+        db.query(func.count(func.distinct(EmailEvent.draft_id)))
+        .select_from(EmailEvent)
+        .filter(EmailEvent.event_type == "sent", EmailEvent.created_at >= cutoff)
+        .scalar()
+    )
+    n_out_24_ev = int(n_out_24_ev or 0)
+    n_outreach_24h = max(n_out_24_draft, n_out_24_ev)
+
+    n_reply_24 = (
+        db.query(func.count())
+        .select_from(ReplyDraft)
+        .filter(
+            ReplyDraft.status == "sent",
+            ReplyDraft.sent_at.isnot(None),
+            ReplyDraft.sent_at >= cutoff,
+        )
+        .scalar()
+    )
+    n_reply_24 = int(n_reply_24 or 0)
+    emails_sent_24h = n_outreach_24h + n_reply_24
+    return {"emails_sent": emails_sent, "emails_sent_24h": emails_sent_24h}
+
+
 def get_run_performance_rows(db: Session, run_id: int) -> dict:
     """Counters for Run performance card; omit keys with no data yet where appropriate."""
     summary = get_run_summary(db, run_id)
-    threads = list_email_threads_by_run(db, run_id)
-    active_threads = len([t for t in threads if (t.status or "").lower() == "open"])
-    reminders = list_reminders_by_run(db, run_id)
-    now = datetime.utcnow()
-    reminders_due, reminders_active = _reminder_due_and_active_counts(reminders, now)
+    active_threads = _active_threads_count_for_performance(db, run_id)
 
     return {
         "emails_sent": summary["drafts_sent"],
+        "emails_sent_24h": count_emails_sent_in_last_hours(db, run_id, hours=24),
         "replies": summary["events_replied"],
         "active_threads": active_threads,
         "interested": summary["threads_interested"],
         "need_more_info": summary["threads_need_info"],
         "dead_mailboxes": summary["events_dead_mailbox"],
-        "packets_sent": summary["asset_packets_sent"],
-        "reminders_active": reminders_active,
-        "reminders_due": reminders_due,
+        "bounced": summary["events_bounced"],
     }
 
 
@@ -280,8 +433,7 @@ def get_setup_state_message(db: Session, run) -> str:
 
 def enrich_run_for_card(db: Session, run) -> dict:
     summary = get_run_summary(db, run.id)
-    threads = list_email_threads_by_run(db, run.id)
-    active_threads = len([t for t in threads if (t.status or "").lower() == "open"])
+    active_threads = _active_threads_count_for_performance(db, run.id)
     companies = _live_company_count(db, run.id)
     contacts_found = max(_live_contact_count(db, run.id), summary["contacts_found"])
 
@@ -308,6 +460,8 @@ def enrich_run_for_card(db: Session, run) -> dict:
         "active_threads": active_threads,
         "updated_at": updated_at,
         "created_at": run.created_at,
+        "prompt_setup_saved": prompt_setup_saved_from_context(run.context_json),
+        "sender_signature_configured": signature_html_has_meaningful_content(run.sender_signature_html),
     }
 
 

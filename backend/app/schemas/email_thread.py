@@ -3,11 +3,20 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class ThreadDeliveryLlmAnalyzeResponse(BaseModel):
+    delivery_issue: str
+    confidence: str
+    reason: str
+    error: str | None = None
+
+
 class EmailThreadRead(BaseModel):
     id: int
     run_id: int
     contact_id: int
     draft_id: int | None
+    # When draft_id is null, backend fills this from Gmail thread / message correlation (import-first rows).
+    effective_draft_id: int | None = None
     subject: str
     provider_thread_id: str | None
     status: str

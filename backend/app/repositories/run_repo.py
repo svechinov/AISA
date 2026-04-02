@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.run import Run
+from app.services.run_context_service import wrap_context
 
 
 def create_run(
@@ -165,6 +166,42 @@ def update_run_status(db: Session, run: Run, status: str):
         run.finished_at = datetime.utcnow()
     else:
         run.finished_at = None
+
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def update_run_outreach_fields(
+    db: Session,
+    run_id: int,
+    *,
+    notes: str | None,
+    segment: str,
+    inner: dict[str, str],
+    master_prompt: str,
+) -> Run | None:
+    """Refresh context.context, master_prompt, segment, notes; keep prompt_setup_text and _human_ui."""
+    run = get_run(db, run_id)
+    if not run:
+        return None
+    if run.closed_at is not None:
+        raise ValueError("Cannot update outreach fields on a closed run")
+
+    wrapped = wrap_context(inner)
+    ctx = dict(run.context_json or {})
+    ctx["context"] = wrapped["context"]
+
+    run.context_json = ctx
+    run.notes = (notes or "").strip() or None
+    run.segment = (segment or "").strip()
+    run.master_prompt = master_prompt
+
+    ij = dict(run.input_json or {})
+    if inner.get("goal"):
+        ij["goal"] = inner["goal"]
+    run.input_json = ij
 
     db.add(run)
     db.commit()

@@ -8,8 +8,9 @@ from app.repositories.project_repo import (
     get_project,
     list_projects,
     restore_project,
+    update_project_name,
 )
-from app.schemas.project import ProjectCreate, ProjectRead
+from app.schemas.project import ProjectCreate, ProjectPatch, ProjectRead
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -32,6 +33,19 @@ def _archive_existing_project(db: Session, project_id: int) -> ProjectRead:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return archive_project(db, project)
+
+
+@router.patch("/{project_id}", response_model=ProjectRead)
+def patch_project_route(project_id: int, payload: ProjectPatch, db: Session = Depends(get_db)):
+    project = get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name is required")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail="Project name is too long")
+    return update_project_name(db, project, name=name)
 
 
 @router.post("/{project_id}/archive", response_model=ProjectRead)

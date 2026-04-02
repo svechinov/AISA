@@ -28,21 +28,31 @@ const CDN_OPTIONS = [
 
 function buildEnvSnippet(llmRows, cdnProvider, cdnKey) {
   const priority = llmRows.filter((r) => r.apiKey.trim()).map((r) => r.id);
+  const keyById = Object.fromEntries(llmRows.map((r) => [r.id, r.apiKey.trim()]));
+
   const lines = [
     "# AI Biz OS — paste into backend/.env (never commit this file)",
+    "ALLOW_SETUP_ENV_WRITE=true",
+    "",
     `LLM_PROVIDER_PRIORITY=${priority.join(",")}`,
+    `ANTHROPIC_API_KEY=${keyById.claude ?? ""}`,
+    `OPENAI_API_KEY=${keyById.openai ?? ""}`,
+    `PERPLEXITY_API_KEY=${keyById.perplexity ?? ""}`,
+    `XAI_API_KEY=${keyById.grok ?? ""}`,
+    "",
+    `CDN_PROVIDER=${cdnProvider}`,
+    `CDN_API_KEY=${cdnKey.trim()}`,
+    "CDN_R2_BUCKET=",
+    "CDN_ACCOUNT_ID=",
+    "CDN_R2_ACCESS_KEY_ID=",
+    "CDN_R2_SECRET_ACCESS_KEY=",
+    "CDN_R2_PUBLIC_BASE_URL=",
+    "",
+    "GOOGLE_CLIENT_ID=",
+    "GOOGLE_CLIENT_SECRET=",
+    "GOOGLE_REFRESH_TOKEN=",
+    "GMAIL_SEND_AS_EMAIL=",
   ];
-  for (const row of llmRows) {
-    const envMap = {
-      claude: "ANTHROPIC_API_KEY",
-      openai: "OPENAI_API_KEY",
-      perplexity: "PERPLEXITY_API_KEY",
-      grok: "XAI_API_KEY",
-    };
-    lines.push(`${envMap[row.id]}=${row.apiKey.trim()}`);
-  }
-  lines.push(`CDN_PROVIDER=${cdnProvider}`);
-  lines.push(`CDN_API_KEY=${cdnKey.trim()}`);
   return `${lines.join("\n")}\n`;
 }
 

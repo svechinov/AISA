@@ -34,13 +34,28 @@ import {
   Mails,
   Pencil,
   Reply,
+  RefreshCw,
   Send,
   Upload,
   Loader2,
+  X,
 } from "lucide-react";
 import DOMPurify from "dompurify";
 import { assetIsCdnUpload } from "@/lib/assetCdn";
 import { cn } from "@/lib/utils";
+import {
+  snapshotMergeWriteInnerTabs,
+  snapshotMergeWriteRunPanelLite,
+  snapshotReadInnerTabCounts,
+  snapshotReadRunPanelLite,
+} from "@/lib/humanUiSnapshot";
+import {
+  buildEventsPanelLite,
+  buildThreadPanelLiteRows,
+  filterEventsPanelLiteByTab,
+  filterThreadPanelLiteByTab,
+  sortThreadPanelLiteRows,
+} from "@/lib/runPanelLite";
 
 /** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
 function threadMessageBodyLooksLikeHtml(s) {
@@ -88,6 +103,147 @@ function threadClassificationBadgeClass(label) {
   return "";
 }
 
+/** Backend may leave `draft_id` null on import-first threads; `effective_draft_id` resolves the outreach draft. */
+function threadOutboundDraftId(t) {
+  if (t == null) return null;
+  const id = t.effective_draft_id ?? t.draft_id;
+  return id != null ? id : null;
+}
+
+function threadDeliveryLlmIssueLabel(issue) {
+  const i = String(issue || "").toLowerCase();
+  if (i === "bounce") return "Bounced (delivery failure)";
+  if (i === "dead_mailbox") return "Dead mailbox";
+  if (i === "none") return "No delivery issue";
+  if (i === "unclear") return "Unclear";
+  return issue || "—";
+}
+
+/** Maps LLM `delivery_issue` to manual mark kind for POST mark-bounced / mark-dead-mailbox. */
+function llmDeliveryIssueToManualMarkKind(issue) {
+  const i = String(issue || "").toLowerCase();
+  if (i === "bounce" || i === "bounced" || i === "soft_bounce") return "bounced";
+  if (i === "dead_mailbox" || i === "hard_bounce" || i === "invalid_mailbox" || i === "user_unknown") {
+    return "dead_mailbox";
+  }
+  return null;
+}
+
+/** Snapshot-only for Events/Threads sub-tabs: all bucket counts zero → empty; no snapshot or any >0 → loading. */
+function trackingAbdSnapMode(snap) {
+  if (!snap || typeof snap !== "object") return "loading";
+  const a = Number(snap.active) || 0;
+  const b = Number(snap.bounced) || 0;
+  const d = Number(snap.dead_mailbox) || 0;
+  return a + b + d === 0 ? "empty" : "loading";
+}
+
+function TrackingCardsPlaceholder({ mode, kind }) {
+  if (mode === "empty") {
+    return (
+      <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
+        No {kind} data for this run.
+      </div>
+    );
+  }
+  return (
+    <div
+      className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      <Clock className="h-8 w-8 shrink-0 animate-spin text-primary" aria-hidden />
+      <p>{kind} data is loading…</p>
+    </div>
+  );
+}
+
+/** Cached thread row while full TrackingView load is in flight (open thread disabled until sync). */
+function ThreadCardFromLite({ row }) {
+  const isThreadDeadMailbox = row.is_dead_mailbox;
+  const isThreadBounced = row.is_bounced && !isThreadDeadMailbox;
+  const showInboundBadge = row.needs_inbound && !isThreadBounced && !isThreadDeadMailbox;
+  const label = row.classification;
+  const hasRem = row.has_reminder && row.remind_at;
+  return (
+    <div
+      className={
+        isThreadDeadMailbox
+          ? "flex flex-col gap-3 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
+          : isThreadBounced
+            ? "flex flex-col gap-3 rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-5 dark:border-amber-600/40 dark:bg-amber-950/25 sm:flex-row sm:items-center sm:justify-between"
+            : "flex flex-col gap-3 rounded-2xl border-2 border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+      }
+    >
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          {isThreadDeadMailbox ? (
+            <CircleAlert className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400" aria-hidden />
+          ) : isThreadBounced ? (
+            <MailWarning className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+          ) : null}
+          <div className="font-medium">{row.company || `Contact #${row.contact_id}`}</div>
+          {isThreadBounced && !isThreadDeadMailbox ? (
+            <Badge
+              variant="outline"
+              className="gap-1 border-amber-600/55 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/35 dark:text-amber-100"
+              title="Outbound delivery failed (bounce)"
+            >
+              <MailWarning className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+              Bounced
+            </Badge>
+          ) : null}
+          {showInboundBadge ? (
+            <Badge
+              variant="outline"
+              className="gap-1 border-green-600/50 bg-green-600/15 font-normal text-green-800 dark:border-green-600/45 dark:bg-green-950/45 dark:text-green-300"
+              title="Last message in this thread is inbound — needs your attention"
+            >
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-400" aria-hidden />
+              Inbound
+            </Badge>
+          ) : null}
+          {hasRem ? (
+            <Badge
+              variant="outline"
+              className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
+              title={`Reminder: ${new Date(row.remind_at).toLocaleString()}`}
+            >
+              <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
+              Remind later
+            </Badge>
+          ) : null}
+          {isThreadDeadMailbox ? (
+            <Badge variant="destructive" className="font-normal text-xs">
+              Dead mailbox
+            </Badge>
+          ) : null}
+          {label ? (
+            <Badge variant="default" className={`font-normal ${threadClassificationBadgeClass(label)}`}>
+              {THREAD_CLASS_LABELS[label] || label}
+            </Badge>
+          ) : null}
+        </div>
+        <div className="mt-1 text-sm text-muted-foreground">
+          {row.contact_name || "—"} · {row.subject || "No subject"}
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <Badge variant="secondary">{row.status}</Badge>
+          <span>
+            Out {row.msg_out} · In {row.msg_in}
+          </span>
+          {row.last_message_at ? (
+            <span>Last: {new Date(row.last_message_at).toLocaleString()}</span>
+          ) : null}
+        </div>
+      </div>
+      <Button type="button" variant="outline" disabled title="Open thread after data sync completes">
+        Open thread
+      </Button>
+    </div>
+  );
+}
+
 export default function TrackingView({
   runId,
   runSignatureHtml = "",
@@ -109,6 +265,11 @@ export default function TrackingView({
   const [threads, setThreads] = useState([]);
   const [runMessages, setRunMessages] = useState([]);
   const [threadModalId, setThreadModalId] = useState(null);
+  /** "bounced" | "dead_mailbox" — second-step confirm for irreversible delivery marking */
+  const [threadManualMarkConfirm, setThreadManualMarkConfirm] = useState(null);
+  const [threadMarkBusy, setThreadMarkBusy] = useState(false);
+  const [threadDeliveryLlmBusy, setThreadDeliveryLlmBusy] = useState(false);
+  const [threadDeliveryLlmResult, setThreadDeliveryLlmResult] = useState(null);
   const [threadRemindAtLocal, setThreadRemindAtLocal] = useState("");
   const [threadBucketTab, setThreadBucketTab] = useState("active");
   const [eventBucketTab, setEventBucketTab] = useState("active");
@@ -132,6 +293,7 @@ export default function TrackingView({
     draftAssets: [],
     addPick: "",
   });
+  const [createPacketBusy, setCreatePacketBusy] = useState(false);
   /** reply draft id → send-preview fields + attachment summary */
   const [replySendPreviewByDraftId, setReplySendPreviewByDraftId] = useState({});
   /** When false, send-preview block is collapsed even if data is cached */
@@ -139,6 +301,8 @@ export default function TrackingView({
   const [replyEditing, setReplyEditing] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  /** After first successful load for this run — thread/event sub-tab counts use live data, not snapshot. */
+  const [trackingCountsReady, setTrackingCountsReady] = useState(false);
   const [innerTab, setInnerTab] = useState("events");
 
   useEffect(() => {
@@ -166,6 +330,7 @@ export default function TrackingView({
     if (!runId) return;
     setLoading(true);
     setError("");
+    let ok = false;
     try {
       const [er, sr, dr, cr, tr, th, msg, rep, rem, ast, apk] = await Promise.all([
         fetch(`${API_BASE}/email-events/run/${runId}`),
@@ -207,14 +372,47 @@ export default function TrackingView({
       setAssets(Array.isArray(astData) ? astData : []);
       const apkData = apk.ok ? await apk.json() : [];
       setAssetPackets(Array.isArray(apkData) ? apkData : []);
+      try {
+        const threadsLite = sortThreadPanelLiteRows(
+          buildThreadPanelLiteRows(
+            Array.isArray(threadData) ? threadData : [],
+            Array.isArray(c) ? c : [],
+            Array.isArray(d) ? d : [],
+            Array.isArray(msgData) ? msgData : [],
+            Array.isArray(remData) ? remData : [],
+          ),
+        );
+        const eventsLite = buildEventsPanelLite(
+          Array.isArray(e) ? e : [],
+          Array.isArray(d) ? d : [],
+          Array.isArray(c) ? c : [],
+        );
+        snapshotMergeWriteRunPanelLite(runId, {
+          threads: threadsLite,
+          eventsGroups: eventsLite,
+        });
+      } catch {
+        /* lite snapshot is best-effort */
+      }
+      ok = true;
     } catch (err) {
-      setError(String(err?.message || err));
+      const msg = String(err?.message || err || "");
+      const transient =
+        /failed to fetch/i.test(msg) ||
+        /load failed|networkerror|network request failed|aborted|abort$/i.test(msg);
+      if (transient) {
+        console.warn("[TrackingView] refresh skipped (transient):", msg);
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
+      if (ok) setTrackingCountsReady(true);
     }
   }, [runId]);
 
   useEffect(() => {
+    setTrackingCountsReady(false);
     if (!runId) {
       setEvents([]);
       setSummary(null);
@@ -254,6 +452,10 @@ export default function TrackingView({
     d.setDate(d.getDate() + 3);
     d.setHours(9, 0, 0, 0);
     setThreadRemindAtLocal(toDatetimeLocalValue(d));
+  }, [threadModalId]);
+
+  useEffect(() => {
+    setThreadDeliveryLlmResult(null);
   }, [threadModalId]);
 
   const eventTone = (type) => {
@@ -306,7 +508,8 @@ export default function TrackingView({
   const isThreadDeadMailboxRow = useCallback(
     (t) => {
       const contact = contactById.get(t.contact_id);
-      const linkedDraft = t.draft_id != null ? draftById.get(t.draft_id) : undefined;
+      const did = threadOutboundDraftId(t);
+      const linkedDraft = did != null ? draftById.get(did) : undefined;
       const draftLifecycle = linkedDraft
         ? linkedDraft.tracking_status ?? linkedDraft.status
         : null;
@@ -318,7 +521,8 @@ export default function TrackingView({
   const isThreadBouncedRow = useCallback(
     (t) => {
       const contact = contactById.get(t.contact_id);
-      const linkedDraft = t.draft_id != null ? draftById.get(t.draft_id) : undefined;
+      const did = threadOutboundDraftId(t);
+      const linkedDraft = did != null ? draftById.get(did) : undefined;
       const tracking = linkedDraft ? linkedDraft.tracking_status : null;
       return tracking === "bounced" || contact?.email_health === "bounced";
     },
@@ -470,6 +674,50 @@ export default function TrackingView({
     return { active, bounced, dead_mailbox };
   }, [groupedEvents, eventGroupTabBucket]);
 
+  const innerTabSnap = useMemo(
+    () => (runId ? snapshotReadInnerTabCounts(runId) : null),
+    [runId],
+  );
+
+  const displayThreadBucketCounts = useMemo(() => {
+    if (trackingCountsReady) return threadBucketCounts;
+    return innerTabSnap?.threads ?? { active: 0, bounced: 0, dead_mailbox: 0 };
+  }, [trackingCountsReady, threadBucketCounts, innerTabSnap]);
+
+  const displayEventBucketCounts = useMemo(() => {
+    if (trackingCountsReady) return eventBucketCounts;
+    return innerTabSnap?.events ?? { active: 0, bounced: 0, dead_mailbox: 0 };
+  }, [trackingCountsReady, eventBucketCounts, innerTabSnap]);
+
+  useEffect(() => {
+    if (!runId || !trackingCountsReady) return;
+    snapshotMergeWriteInnerTabs(runId, { threads: threadBucketCounts, events: eventBucketCounts });
+  }, [runId, trackingCountsReady, threadBucketCounts, eventBucketCounts]);
+
+  const eventsTrackingListMode = useMemo(
+    () => trackingAbdSnapMode(innerTabSnap?.events),
+    [innerTabSnap],
+  );
+  const threadsTrackingListMode = useMemo(
+    () => trackingAbdSnapMode(innerTabSnap?.threads),
+    [innerTabSnap],
+  );
+
+  const runPanelLiteSnapshot = useMemo(
+    () => (runId ? snapshotReadRunPanelLite(runId) : null),
+    [runId, trackingCountsReady],
+  );
+
+  const filteredThreadPanelLiteRows = useMemo(
+    () => filterThreadPanelLiteByTab(runPanelLiteSnapshot?.threads || [], threadBucketTab),
+    [runPanelLiteSnapshot?.threads, threadBucketTab],
+  );
+
+  const filteredEventsPanelLiteRows = useMemo(
+    () => filterEventsPanelLiteByTab(runPanelLiteSnapshot?.eventsGroups || [], eventBucketTab),
+    [runPanelLiteSnapshot?.eventsGroups, eventBucketTab],
+  );
+
   const filteredGroupedEvents = useMemo(() => {
     return groupedEvents.filter((g) => eventGroupTabBucket(g) === eventBucketTab);
   }, [groupedEvents, eventBucketTab, eventGroupTabBucket]);
@@ -583,6 +831,69 @@ export default function TrackingView({
       onRunWorkspaceRefresh?.();
     } catch {
       setError("Could not save events panel state — check network.");
+    }
+  }
+
+  async function confirmThreadManualMark() {
+    if (!threadModalId || !threadManualMarkConfirm) return;
+    const kind = threadManualMarkConfirm;
+    setThreadMarkBusy(true);
+    setError("");
+    try {
+      const path =
+        kind === "bounced"
+          ? `/email-threads/${threadModalId}/mark-bounced`
+          : `/email-threads/${threadModalId}/mark-dead-mailbox`;
+      const res = await fetch(`${API_BASE}${path}`, { method: "POST" });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text || `Request failed (${res.status})`;
+        try {
+          const j = JSON.parse(text);
+          if (j.detail) msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+        } catch {
+          /* plain */
+        }
+        throw new Error(msg);
+      }
+      setThreadManualMarkConfirm(null);
+      setThreadDeliveryLlmResult(null);
+      setThreadModalId(null);
+      setThreadBucketTab(kind === "bounced" ? "bounced" : "dead_mailbox");
+      await load();
+      onRunWorkspaceRefresh?.();
+    } catch (e) {
+      setError(String(e?.message || e));
+      setThreadManualMarkConfirm(null);
+    } finally {
+      setThreadMarkBusy(false);
+    }
+  }
+
+  async function analyzeThreadDeliveryWithLlm() {
+    if (threadModalId == null) return;
+    setThreadDeliveryLlmBusy(true);
+    setThreadDeliveryLlmResult(null);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/email-threads/${threadModalId}/analyze-delivery-llm`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(
+          data?.detail != null
+            ? String(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))
+            : `Delivery analysis failed (${res.status})`,
+        );
+        return;
+      }
+      setThreadDeliveryLlmResult(data);
+    } catch {
+      setError("Delivery analysis failed — check network.");
+    } finally {
+      setThreadDeliveryLlmBusy(false);
     }
   }
 
@@ -921,6 +1232,7 @@ export default function TrackingView({
       setError("Enter a packet title.");
       return;
     }
+    setCreatePacketBusy(true);
     setError("");
     try {
       const res = await fetch(`${API_BASE}/asset-packets/run/${runId}/create`, {
@@ -937,6 +1249,8 @@ export default function TrackingView({
       await load();
     } catch {
       setError("Create packet failed.");
+    } finally {
+      setCreatePacketBusy(false);
     }
   }
 
@@ -1133,7 +1447,19 @@ export default function TrackingView({
         </div>
       ) : null}
 
-      {error ? <div className="text-sm text-destructive">{error}</div> : null}
+      {error ? (
+        <div className="flex items-start gap-2 rounded-xl border-2 border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <p className="min-w-0 flex-1">{error}</p>
+          <button
+            type="button"
+            className="shrink-0 rounded-md p-1 opacity-80 hover:bg-destructive/10 hover:opacity-100"
+            aria-label="Dismiss"
+            onClick={() => setError("")}
+          >
+            <X className="h-4 w-4" aria-hidden />
+          </button>
+        </div>
+      ) : null}
 
       {!singleTabMode && summary ? (
         <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
@@ -1291,7 +1617,7 @@ export default function TrackingView({
                   )}
                   onClick={() => setEventBucketTab("active")}
                 >
-                  Active ({eventBucketCounts.active})
+                  Active ({displayEventBucketCounts.active})
                 </Button>
                 <Button
                   type="button"
@@ -1307,7 +1633,7 @@ export default function TrackingView({
                   )}
                   onClick={() => setEventBucketTab("bounced")}
                 >
-                  Bounced ({eventBucketCounts.bounced})
+                  Bounced ({displayEventBucketCounts.bounced})
                 </Button>
                 <Button
                   type="button"
@@ -1323,9 +1649,10 @@ export default function TrackingView({
                   )}
                   onClick={() => setEventBucketTab("dead_mailbox")}
                 >
-                  Dead mailbox ({eventBucketCounts.dead_mailbox})
+                  Dead mailbox ({displayEventBucketCounts.dead_mailbox})
                 </Button>
               </div>
+              {trackingCountsReady ? (
               <div className="space-y-4">
                 {filteredGroupedEvents.map(({ draftId, draft, events: draftEvents }) => {
                   const chainEndsDeadMailbox =
@@ -1446,6 +1773,56 @@ export default function TrackingView({
                   </div>
                 ) : null}
               </div>
+              ) : eventsTrackingListMode === "loading" && filteredEventsPanelLiteRows.length > 0 ? (
+                <div className="space-y-4">
+                  <p className="text-xs text-muted-foreground" role="status">
+                    Showing cached events — refreshing from server…
+                  </p>
+                  {filteredEventsPanelLiteRows.map((g) => (
+                    <div
+                      key={g.draftId}
+                      className={
+                        g.chainEndsDeadMailbox
+                          ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
+                          : g.chainEndsBounced
+                            ? "rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-4 dark:border-amber-600/40 dark:bg-amber-950/25"
+                            : "rounded-2xl border-2 border-border bg-muted/25 p-4"
+                      }
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-base font-semibold leading-tight">
+                          {g.company || `Draft #${g.draftId}`}
+                        </div>
+                        {g.isReplacement ? (
+                          <Badge
+                            variant="default"
+                            className="bg-violet-600 font-normal hover:bg-violet-600"
+                          >
+                            Replacement draft
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 text-sm text-muted-foreground">{g.to_email || "No recipient"}</div>
+                      <div className="mt-1 text-sm">{g.subject || "No subject"}</div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        {g.eventCount} event{g.eventCount === 1 ? "" : "s"} — timeline loads after sync.
+                      </p>
+                    </div>
+                  ))}
+                  {runPanelLiteSnapshot?.eventsGroups?.length &&
+                  filteredEventsPanelLiteRows.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">
+                      {eventBucketTab === "active"
+                        ? "No active event groups in this tab (cached) — check other tabs."
+                        : eventBucketTab === "bounced"
+                          ? "No bounced groups in this tab (cached)."
+                          : "No dead mailbox groups in this tab (cached)."}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <TrackingCardsPlaceholder mode={eventsTrackingListMode} kind="Event" />
+              )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -1479,7 +1856,7 @@ export default function TrackingView({
                 )}
                 onClick={() => setThreadBucketTab("active")}
               >
-                Active ({threadBucketCounts.active})
+                Active ({displayThreadBucketCounts.active})
               </Button>
               <Button
                 type="button"
@@ -1495,7 +1872,7 @@ export default function TrackingView({
                 )}
                 onClick={() => setThreadBucketTab("bounced")}
               >
-                Bounced ({threadBucketCounts.bounced})
+                Bounced ({displayThreadBucketCounts.bounced})
               </Button>
               <Button
                 type="button"
@@ -1511,14 +1888,18 @@ export default function TrackingView({
                 )}
                 onClick={() => setThreadBucketTab("dead_mailbox")}
               >
-                Dead mailbox ({threadBucketCounts.dead_mailbox})
+                Dead mailbox ({displayThreadBucketCounts.dead_mailbox})
               </Button>
             </div>
+            {trackingCountsReady ? (
+            <>
             {sortedFilteredThreads.map((t) => {
               const contact = contactById.get(t.contact_id);
               const counts = messageCountsByThreadId.get(t.id) || { in: 0, out: 0 };
               const label = t.classification;
-              const linkedDraft = t.draft_id != null ? draftById.get(t.draft_id) : undefined;
+              const outboundDraftId = threadOutboundDraftId(t);
+              const linkedDraft =
+                outboundDraftId != null ? draftById.get(outboundDraftId) : undefined;
               const draftLifecycle = linkedDraft
                 ? linkedDraft.tracking_status ?? linkedDraft.status
                 : null;
@@ -1633,6 +2014,28 @@ export default function TrackingView({
                     : "No dead mailbox threads in this run."}
               </div>
             ) : null}
+            </>
+            ) : threadsTrackingListMode === "loading" && filteredThreadPanelLiteRows.length > 0 ? (
+              <>
+                <p className="text-xs text-muted-foreground" role="status">
+                  Showing cached threads — refreshing from server…
+                </p>
+                {filteredThreadPanelLiteRows.map((row) => (
+                  <ThreadCardFromLite key={row.id} row={row} />
+                ))}
+                {runPanelLiteSnapshot?.threads?.length && filteredThreadPanelLiteRows.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    {threadBucketTab === "active"
+                      ? "No threads in Active (cached) — check Bounced or Dead mailbox."
+                      : threadBucketTab === "bounced"
+                        ? "No bounced threads in this tab (cached)."
+                        : "No dead mailbox threads in this tab (cached)."}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <TrackingCardsPlaceholder mode={threadsTrackingListMode} kind="Thread" />
+            )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -2217,7 +2620,16 @@ export default function TrackingView({
                         ))}
                       </ul>
                     ) : null}
-                    <Button type="button" size="sm" onClick={() => void createRunPacket()}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={createPacketBusy}
+                      aria-busy={createPacketBusy}
+                      onClick={() => void createRunPacket()}
+                    >
+                      {createPacketBusy ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                      ) : null}
                       Create packet
                     </Button>
                   </div>
@@ -2673,9 +3085,9 @@ export default function TrackingView({
             aria-label="Close"
             onClick={() => setThreadModalId(null)}
           />
-          <div className="relative z-50 flex max-h-[85vh] w-full max-w-lg flex-col gap-4 rounded-2xl border-2 border-border bg-card p-5 shadow-lg">
+          <div className="relative z-50 flex max-h-[85vh] w-full max-w-5xl flex-col gap-4 rounded-2xl border-2 border-border bg-card p-5 shadow-lg">
             <div className="flex items-start justify-between gap-2">
-              <div>
+              <div className="min-w-0 flex-1">
                 <h3 className="text-lg font-semibold">Thread #{threadModalId}</h3>
                 {(() => {
                   const mt = threads.find((x) => x.id === threadModalId);
@@ -2698,10 +3110,146 @@ export default function TrackingView({
                   );
                 })()}
               </div>
-              <Button type="button" size="sm" variant="ghost" onClick={() => setThreadModalId(null)}>
-                Close
-              </Button>
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                {(() => {
+                  const mt = threads.find((x) => x.id === threadModalId);
+                  const noDraft = threadOutboundDraftId(mt) == null;
+                  const isBounced = mt ? isThreadBouncedRow(mt) : false;
+                  const isDead = mt ? isThreadDeadMailboxRow(mt) : false;
+                  return (
+                    <>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        disabled={threadDeliveryLlmBusy}
+                        title="Re-analyze thread with LLM (bounce vs dead mailbox vs none)"
+                        className="h-8 w-8 border-2 border-green-700/80 bg-green-600 text-white hover:bg-green-700 hover:text-white dark:border-green-500 dark:bg-green-600 dark:hover:bg-green-700"
+                        aria-label="Analyze delivery with LLM"
+                        onClick={() => void analyzeThreadDeliveryWithLlm()}
+                      >
+                        {threadDeliveryLlmBusy ? (
+                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                        ) : (
+                          <RefreshCw className="h-4 w-4" aria-hidden />
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        disabled={noDraft || isBounced}
+                        title={
+                          noDraft
+                            ? "No linked outbound draft"
+                            : isBounced
+                              ? "Already bounced"
+                              : "Mark thread as Bounced (irreversible)"
+                        }
+                        className="h-8 w-8 border-2 border-amber-600/80 bg-amber-500 text-white hover:bg-amber-600 hover:text-white dark:border-amber-500 dark:bg-amber-600 dark:hover:bg-amber-700"
+                        aria-label="Mark as bounced"
+                        onClick={() => setThreadManualMarkConfirm("bounced")}
+                      >
+                        <AlertTriangle className="h-4 w-4" aria-hidden />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        disabled={noDraft || isDead}
+                        title={
+                          noDraft
+                            ? "No linked outbound draft"
+                            : isDead
+                              ? "Already dead mailbox"
+                              : "Mark thread as Dead mailbox (irreversible)"
+                        }
+                        className="h-8 w-8 border-2 border-red-700/80 bg-red-600 text-white hover:bg-red-700 hover:text-white dark:border-red-600 dark:bg-red-700 dark:hover:bg-red-800"
+                        aria-label="Mark as dead mailbox"
+                        onClick={() => setThreadManualMarkConfirm("dead_mailbox")}
+                      >
+                        <AlertCircle className="h-4 w-4" aria-hidden />
+                      </Button>
+                    </>
+                  );
+                })()}
+                <Button type="button" size="sm" variant="ghost" onClick={() => setThreadModalId(null)}>
+                  Close
+                </Button>
+              </div>
             </div>
+            {threadDeliveryLlmResult ? (
+              <div className="rounded-lg border border-green-800/35 bg-green-950/25 px-3 py-2 text-sm dark:border-green-700/40 dark:bg-green-950/35">
+                {threadDeliveryLlmResult.error === "llm_not_configured" ? (
+                  <p className="text-amber-700 dark:text-amber-300">
+                    LLM is not configured on the server — add API keys in backend settings.
+                  </p>
+                ) : threadDeliveryLlmResult.error === "llm_failed" ? (
+                  <p className="text-amber-700 dark:text-amber-300">
+                    The model could not classify this thread — try again later.
+                  </p>
+                ) : (
+                  <>
+                    <p>
+                      <span className="font-semibold text-green-800 dark:text-green-200">LLM verdict: </span>
+                      <span>{threadDeliveryLlmIssueLabel(threadDeliveryLlmResult.delivery_issue)}</span>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · confidence: {threadDeliveryLlmResult.confidence || "—"}
+                      </span>
+                    </p>
+                    {threadDeliveryLlmResult.reason ? (
+                      <p className="mt-1 text-muted-foreground">{threadDeliveryLlmResult.reason}</p>
+                    ) : null}
+                    {(() => {
+                      const fixKind = llmDeliveryIssueToManualMarkKind(threadDeliveryLlmResult.delivery_issue);
+                      if (!fixKind || threadModalId == null) return null;
+                      const mt = threads.find((x) => x.id === threadModalId);
+                      const bounced = mt ? isThreadBouncedRow(mt) : false;
+                      const dead = mt ? isThreadDeadMailboxRow(mt) : false;
+                      let fixDisabled = threadMarkBusy;
+                      let fixTitle =
+                        fixKind === "bounced"
+                          ? "Confirm and mark as Bounced (same as header)"
+                          : "Confirm and mark as Dead mailbox (same as header)";
+                      if (fixKind === "bounced") {
+                        if (bounced) {
+                          fixDisabled = true;
+                          fixTitle = "Already bounced";
+                        } else if (dead) {
+                          fixDisabled = true;
+                          fixTitle = "Already dead mailbox";
+                        }
+                      } else if (fixKind === "dead_mailbox" && dead) {
+                        fixDisabled = true;
+                        fixTitle = "Already dead mailbox";
+                      }
+                      return (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={fixDisabled}
+                            title={fixTitle}
+                            className="border-2 border-green-800/60 bg-green-700 text-white hover:bg-green-800 hover:text-white dark:border-green-600 dark:bg-green-700 dark:hover:bg-green-800"
+                            onClick={() => {
+                              if (fixDisabled) return;
+                              setThreadDeliveryLlmResult(null);
+                              setThreadManualMarkConfirm(fixKind);
+                            }}
+                          >
+                            Fix
+                          </Button>
+                          <span className="text-xs text-muted-foreground">
+                            Opens confirmation — applies LLM suggestion to this thread.
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
+            ) : null}
             {(() => {
               const mt = threads.find((x) => x.id === threadModalId);
               if (!mt || !["need_more_info", "interested"].includes(mt.classification)) return null;
@@ -2723,7 +3271,6 @@ export default function TrackingView({
               const activeForThread = activeThreadReminderByThreadId.get(threadModalId);
               return (
                 <div className="space-y-2 border-b border-border pb-3">
-                  <div className="text-xs font-medium text-muted-foreground">Reminder</div>
                   {activeForThread ? (
                     <div className="space-y-2">
                       <p className="text-sm text-muted-foreground">
@@ -2813,6 +3360,49 @@ export default function TrackingView({
               {!runMessages.some((m) => m.thread_id === threadModalId) ? (
                 <div className="text-sm text-muted-foreground">No messages in this thread.</div>
               ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {threadManualMarkConfirm ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/60"
+            aria-label="Dismiss"
+            disabled={threadMarkBusy}
+            onClick={() => {
+              if (!threadMarkBusy) setThreadManualMarkConfirm(null);
+            }}
+          />
+          <div className="relative z-[61] w-full max-w-md rounded-2xl border-2 border-border bg-card p-6 shadow-lg">
+            <h4 className="text-base font-semibold">
+              {threadManualMarkConfirm === "bounced" ? "Mark as Bounced?" : "Mark as Dead mailbox?"}
+            </h4>
+            <p className="mt-3 text-sm text-muted-foreground leading-relaxed">
+              This thread will be labeled as{" "}
+              <strong className="text-foreground">
+                {threadManualMarkConfirm === "bounced" ? "Bounced" : "Dead mailbox"}
+              </strong>
+              . The linked outbound draft and contact delivery state will be updated.{" "}
+              <strong className="text-foreground">This cannot be undone</strong> from the UI.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={threadMarkBusy}
+                onClick={() => setThreadManualMarkConfirm(null)}
+              >
+                Cancel
+              </Button>
+              <Button type="button" disabled={threadMarkBusy} onClick={() => void confirmThreadManualMark()}>
+                {threadMarkBusy ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
+                Confirm
+              </Button>
             </div>
           </div>
         </div>

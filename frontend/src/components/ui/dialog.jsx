@@ -1,5 +1,6 @@
 import { createContext, useContext, useState } from "react";
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 
 const DialogCtx = createContext(null);
@@ -43,8 +44,10 @@ export function DialogTrigger({ asChild, children, ...props }) {
 export function DialogContent({ className, children }) {
   const { open, setOpen } = useContext(DialogCtx);
   if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <button
         type="button"
         className="fixed inset-0 bg-black/50"
@@ -53,13 +56,14 @@ export function DialogContent({ className, children }) {
       />
       <div
         className={cn(
-          "relative z-50 grid w-full max-w-lg gap-4 border bg-card p-6 shadow-lg sm:rounded-lg",
+          "relative z-[101] grid w-full max-w-lg gap-4 border bg-card p-6 shadow-lg sm:rounded-lg",
           className,
         )}
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

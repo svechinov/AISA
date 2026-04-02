@@ -18,16 +18,21 @@ def _empty_inner_context() -> dict[str, str]:
 
 
 def _line_label_and_rest(line: str) -> tuple[str | None, str]:
-    """Match 'Offer:', 'Target:', 'Target entities:', etc. (case-insensitive)."""
+    """Match 'Offer:', 'Target:', '**Goal:**', 'Professional Notes:', etc. (case-insensitive)."""
     s = line.strip()
+    if not s:
+        return None, ""
+    # Markdown-wrapped labels break prefix match; strip * for detection only.
+    s = s.replace("*", "").strip()
     if not s:
         return None, ""
     lower = s.lower()
     pairs: list[tuple[str, str]] = [
-        ("offer:", "offer"),
         ("target entities:", "target_entities"),
-        ("target:", "target_entities"),
+        ("professional notes:", "notes"),
         ("target roles:", "target_roles"),
+        ("offer:", "offer"),
+        ("target:", "target_entities"),
         ("roles:", "target_roles"),
         ("role:", "target_roles"),
         ("goal:", "goal"),
