@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
@@ -8,7 +8,15 @@ from app.repositories.contact_repo import (
     update_contact_fields,
     update_contact_review,
 )
-from app.schemas.contact import ContactEditUpdate, ContactRead, ContactReviewUpdate
+from app.schemas.contact import (
+    ContactEditUpdate,
+    ContactRead,
+    ContactReviewCountsRead,
+    ContactReviewUpdate,
+    ContactRunBucketResponse,
+    contact_read_for_run_list,
+)
+from app.services.contact_review_bucket import ALL_REVIEW_BUCKETS, filter_contacts_by_review_bucket, review_counts_from_contacts
 from app.schemas.email_draft import EmailDraftRead
 from app.workers.email_worker import (
     ensure_outreach_draft_for_contact,
@@ -29,9 +37,39 @@ def _background_ensure_outreach_draft(contact_id: int) -> None:
         db.close()
 
 
-@router.get("/run/{run_id}", response_model=list[ContactRead])
-def list_contacts_for_run(run_id: int, db: Session = Depends(get_db)):
-    return list_contacts_by_run(db, run_id)
+@router.get("/run/{run_id}", response_model=list[ContactRead] | ContactRunBucketResponse)
+def list_contacts_for_run(
+    run_id: int,
+    review_bucket: str | None = Query(
+        None,
+        description="If set (pending|approved|…|no_email), response is {review_counts, contacts} for that tab only; "
+        "omit for full list (TrackingView, scripts). DB still loads the full run once for dedupe + counts.",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    List contacts for one run only (`run_id` filter — not all projects).
+
+    Without `review_bucket`: JSON array of ContactRead (legacy).
+
+    With `review_bucket`: JSON object with `review_counts` for all tabs and `contacts` only for the
+    requested tab (smaller payload). Note: the repository still reads all contact rows for
+    this run to apply dedupe and compute accurate counts.
+    """
+    rows = list_contacts_by_run(db, run_id)
+    counts_dict = review_counts_from_contacts(rows)
+    if review_bucket is None:
+        return [contact_read_for_run_list(c) for c in rows]
+    if review_bucket not in ALL_REVIEW_BUCKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid review_bucket. Use one of: {', '.join(ALL_REVIEW_BUCKETS)}",
+        )
+    filtered = filter_contacts_by_review_bucket(rows, review_bucket)
+    return ContactRunBucketResponse(
+        review_counts=ContactReviewCountsRead(**counts_dict),
+        contacts=[contact_read_for_run_list(c) for c in filtered],
+    )
 
 
 @router.post("/{contact_id}/create-draft", response_model=EmailDraftRead)

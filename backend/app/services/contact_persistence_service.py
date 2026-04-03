@@ -10,6 +10,7 @@ from app.models.follow_up_task import FollowUpTask
 from app.models.reminder import Reminder
 from app.models.reply_draft import ReplyDraft
 from app.models.research_task import ResearchTask
+from app.services.personalization_service import sync_contact_personalization_row
 from app.utils.contact_identity import contact_identity_key_from_dict, contact_identity_key_from_row
 
 
@@ -134,6 +135,7 @@ def persist_validated_contacts(
                 hit.status = status
                 hit.confidence = base["confidence"]
                 hit.source_json = sj
+                sync_contact_personalization_row(db, hit)
                 db.add(hit)
                 return
 
@@ -150,6 +152,7 @@ def persist_validated_contacts(
                 hit_ne.status = status
                 hit_ne.confidence = base["confidence"]
                 hit_ne.source_json = sj
+                sync_contact_personalization_row(db, hit_ne)
                 db.add(hit_ne)
                 return
 
@@ -167,6 +170,7 @@ def persist_validated_contacts(
             review_status="pending",
             review_notes=None,
         )
+        sync_contact_personalization_row(db, row)
         db.add(row)
         db.flush()
         db.refresh(row)

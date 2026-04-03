@@ -1,6 +1,6 @@
 from sqlalchemy import inspect, text
 
-from app.db import Base, engine
+from app.db import Base, SessionLocal, engine
 from app.models.project import Project
 from app.models.run import Run
 from app.models.step import Step
@@ -314,6 +314,46 @@ def _ensure_email_threads_classification_columns() -> None:
             conn.execute(text("ALTER TABLE email_threads ADD COLUMN classification_reason VARCHAR(500)"))
 
 
+def _ensure_personalization_and_generation_meta_columns() -> None:
+    """contacts.personalization_json, runs.email_style_mode, email_drafts.generation_meta_json."""
+    insp = inspect(engine)
+    dialect = engine.dialect.name
+
+    if "contacts" in insp.get_table_names():
+        columns = {c["name"] for c in insp.get_columns("contacts")}
+        if "personalization_json" not in columns:
+            with engine.begin() as conn:
+                if dialect == "sqlite":
+                    conn.execute(
+                        text(
+                            "ALTER TABLE contacts ADD COLUMN personalization_json "
+                            "TEXT NOT NULL DEFAULT '{}'",
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE contacts ADD COLUMN personalization_json "
+                            "JSONB NOT NULL DEFAULT '{}'::jsonb",
+                        ),
+                    )
+
+    if "runs" in insp.get_table_names():
+        columns = {c["name"] for c in insp.get_columns("runs")}
+        if "email_style_mode" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE runs ADD COLUMN email_style_mode VARCHAR(32)"))
+
+    if "email_drafts" in insp.get_table_names():
+        columns = {c["name"] for c in insp.get_columns("email_drafts")}
+        if "generation_meta_json" not in columns:
+            with engine.begin() as conn:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE email_drafts ADD COLUMN generation_meta_json TEXT"))
+                else:
+                    conn.execute(text("ALTER TABLE email_drafts ADD COLUMN generation_meta_json JSONB"))
+
+
 def _ensure_run_scoped_performance_indexes() -> None:
     """Composite indexes for frequent run-scoped filters (workspace lite, display counts, list runs).
 
@@ -340,6 +380,22 @@ def _ensure_run_scoped_performance_indexes() -> None:
             conn.execute(text(f"CREATE INDEX IF NOT EXISTS {ix_name} ON {table} {columns}"))
 
 
+def _backfill_personalization_json() -> None:
+    """Existing rows after ADD COLUMN get default {}; fill rule-based personalization on startup."""
+    import logging
+
+    from app.services.personalization_service import backfill_empty_personalization_json
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        backfill_empty_personalization_json(db)
+    except Exception:
+        log.exception("personalization_json backfill failed")
+    finally:
+        db.close()
+
+
 def ensure_schema() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_runs_metadata_columns()
@@ -355,6 +411,8 @@ def ensure_schema() -> None:
     _ensure_assets_extended_columns()
     _ensure_drafts_attached_asset_ids_columns()
     _ensure_asset_packets_reply_draft_id_unique()
+    _ensure_personalization_and_generation_meta_columns()
+    _backfill_personalization_json()
     _ensure_run_scoped_performance_indexes()
 
 

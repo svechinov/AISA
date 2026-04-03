@@ -25,6 +25,7 @@ class EmailDraftRead(BaseModel):
     reviewed_at: datetime | None
     created_at: datetime
     attached_asset_ids: list[int] = Field(default_factory=list)
+    generation_meta_json: dict | None = None
 
     @field_validator("attached_asset_ids", mode="before")
     @classmethod

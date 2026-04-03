@@ -2,7 +2,7 @@
 
 Документ для следующей итерации разработки. Репозиторий: `ai-biz-os/` (backend + frontend + `infra/`).
 
-**Обновление:** март 2026 · актуальная версия фронтенда — **`frontend/package.json` v2.7.1** (см. §13.10; workspace-lite + индексы — §14.7.1; в тексте ниже для истории сохранены §12–13 под 2.1.4 / 2.4.0). Продуктовая линия «не только VOD» (§1–6) без изменений по смыслу. **Расширенный технический handoff для ИИ и команды:** **§14** (структура, дерево процессов, потоки данных, ускорение). История UI: **§12** → **§13**.
+**Обновление:** март–апрель 2026 · актуальная версия фронтенда — **`frontend/package.json` → `version`** (на момент последней правки handoff: **2.7.2**). **Максимально подробная передача последних инженерных изменений Human UI и загрузки данных:** **§15** (обязательно к прочтению перед правками `AiBizOsHumanUI.jsx`). Старые номера релизов в §12–13 оставлены как история. **§14.7.1** — workspace-lite и индексы; **§14.3** частично устарел как диаграмма — актуальная схема запросов при reload в **§15.3**. Продуктовая линия «не только VOD» (§1–6) без изменений по смыслу.
 
 **Заявленная цель владельца продукта:** система не должна восприниматься и работать как узкоспециализированный инструмент поиска VOD-площадок. Нужна **вертикально-независимая** логика аутриха: разные отрасли (страхование, фестивали, производство игрушек и т.д.) — **разные формулировки задач, роли контактов, шаблоны писем**, без жёсткой привязки к «видеоплатформам» в коде и UX.
 
@@ -496,6 +496,8 @@ ai-biz-os/
 
 ### 14.3 Дерево процессов и потоков выполнения (runtime)
 
+**Актуальная схема HTTP для Human UI после 2.7.x** — **§15.3** (ниже в этом файле `loadRunDetails` использует **workspace-lite**, списки контактов/черновиков — по разделу; дерево в этом подразделе оставлено как обзор и частично историческое).
+
 Ниже — логическое «дерево», а не обязательно отдельные OS-процессы на каждый узел.
 
 ```
@@ -630,8 +632,167 @@ ai-biz-os/
 
 - Нейтрализация VOD и сценарии — по-прежнему **§1–6, §10–11**.
 - Операторский UI, Gmail, вкладки — **§12–13** (версии релизов в тексте исторические; актуальный номер пакета — **`package.json`**).
-- Краткая шпаргалка файлов — **`HANDOFF CURSOR.md`** (обновлять при изменении схемы и критичных потоков).
+- Краткая шпаргалка файлов — **`HANDOFF CURSOR.md`** (обновлять при изменении схемы и критичных потоков §14).
+- **Актуальная схема загрузки Human UI после итераций 2.7.x** — **§15** (дополняет и в части диаграмм **заменяет** устаревшие формулировки §14.3 про «полный `/workspace` в каждом loadRunDetails»).
 
 ---
 
-*Версия документа: март 2026 — **§13.10** (2.7.1: глобальные Replies в Total performance, крупнее Project/Run в шапке); **§13.9** (2.7.0); **§14.7.1** (workspace-lite, индексы); §12–13 — исторические номера релизов; актуальный фронт — **`frontend/package.json`**. Синхронизируйте **`HANDOFF CURSOR.md`** при изменении схемы БД и потоков §14.*
+## 15. Максимальный технический handoff: Human UI (март–апрель 2026), версия фронта **2.7.2+**
+
+Раздел для следующего разработчика или ИИ-агента: **точное** описание того, как сейчас устроены запросы, state, гонки и исправления багов в **`frontend/src/pages/AiBizOsHumanUI.jsx`** (далее **Human UI**). Без этого легко снова ввести регрессии «кэш + refreshing…», «черновики исчезают после генерации», «после reload список не обновляется пока не сменишь вкладку».
+
+### 15.1 Где «источник правды» и версия
+
+| Что | Где смотреть |
+|-----|----------------|
+| Версия npm-пакета фронта | `frontend/package.json` → поле **`version`** (пример: **2.7.2**) |
+| Репозиторий на GitHub | `https://github.com/PavelMuntyan/AI-Biz-OS.git` |
+| Главный экран оператора | `frontend/src/pages/AiBizOsHumanUI.jsx` (~6000+ строк; основная логика загрузки run, контактов, черновиков, метрик) |
+| Снимки в `localStorage` для офлайн-оболочки | `frontend/src/lib/humanUiSnapshot.js` — `snapshotReadRunCards`, `snapshotWriteRunCards`, `snapshotMergeWriteRunPanelLite`, `snapshotReadInnerTabCounts`, … |
+| Трекинг (отдельный тяжёлый экран) | `frontend/src/components/TrackingView.jsx` — собственный `load()`, интервалы, разделение static vs live poll (см. историю коммитов вокруг производительности) |
+
+### 15.2 Цели последних изменений (продукт ↔ инженерия)
+
+1. **Не блокировать UI** длинным **`GET /runs/{id}/workspace`** при каждом заходе: этот эндпоинт в ответе отдаёт **`RunWorkspaceRead`**, который **расширяет полный `RunRead`** (в т.ч. тяжёлый `context_json` / master prompt) **плюс** агрегаты setup/performance — дорого на больших run.
+2. **Загружать списки по разделу**: на вкладке **Contacts** — в основном данные контактов; на **Drafts** — черновики; **не** тянуть оба списка одним эффектом без нужды (раньше дублировался жирный dual-fetch).
+3. **Устранить гонки**: параллельные `GET /contacts/run` и `GET /email-drafts/run` завершались в разном порядке → последний ответ со **старым** состоянием перезаписывал React state → «исчезли» черновики / неверные счётчики.
+4. **Не затирать уже пришедшие списки** при позднем старте **`loadRunDetails`** (см. **§15.5**).
+
+### 15.3 Актуальное дерево HTTP при выборе run / reload (Human UI)
+
+Упрощённо, **после** правок (устаревшая часть §14.3, где везде фигурировал полный `/workspace` в одном бандле с контактами, **не** отражает текущий код):
+
+```
+[Проект выбран, run выбран]
+  └─ Эффект проекта (selectedProject): GET /runs/project/:pid → setRunsList, setSelectedRun, snapshot
+       └─ await loadRunDetails(targetId, runRow)   // см. §15.4
+
+[Параллельно, после первого рендера с selectedRun.id]
+  └─ Эффект «раздел» (selectedRun.id, mainNav):
+       ├─ mainNav ∈ {contacts, contact-analyzer}
+       │    → refreshRunContactsOnly(rid)   → GET /contacts/run/:rid
+       └─ mainNav === "drafts"
+            → refreshRunDraftsOnly(rid)      → GET /email-drafts/run/:rid
+
+[Пока есть pending генерации исходящих черновиков LLM]
+  └─ Эффект poll: каждые 2.5s → refreshRunContactsAndDrafts(rid)
+       → параллельно GET /contacts/run + GET /email-drafts/run (нужны оба: детект появления draft по contact_id)
+
+[Метрики run без полного workspace]
+  └─ refreshRunMetricsOnly по интервалу (фаза run): GET /runs/:id/workspace-lite + GET /sending/global-performance
+```
+
+**Companies** (вкладка `mainNav === "companies"`): **отдельный** эффект — **`GET /runs/{id}/companies`** — не проходит через `loadRunDetails` и не смешивается с контактами/черновиками Human UI.
+
+### 15.4 Функция `loadRunDetails` — что именно запрашивается сейчас
+
+Файл: **`AiBizOsHumanUI.jsx`**, функция **`loadRunDetails(runId, runRowHint, options)`**.
+
+| Этап | HTTP | Назначение |
+|------|------|------------|
+| Синхронно в начале | (нет сети) | Обновление **`runLoadTargetRef`**, условная очистка списков при **смене run** или **`includeLists: true`** (см. §15.5) |
+| Параллельно | **`GET /runs/{rid}`** | Полный объект run (**`RunRead`**) — бриф, контекст, подпись и т.д. |
+| Параллельно | **`GET /steps/run/{rid}`** | Шаги pipeline |
+| Далее (после применения run+steps в state) | **`GET /runs/{rid}/workspace-lite`** | **Не** полный **`/workspace`** — только **`RunWorkspaceLiteRead`**: фаза, setup_summary, performance, conversations, hourly_sends_24h (см. `backend/app/api/runs.py`, `run_display_service.build_run_workspace_lite`) |
+| Если `options.includeLists === true` | + параллельно с lite в втором `Promise.all` | **`GET /contacts/run/{rid}`**, **`GET /email-drafts/run/{rid}`** (полный бандл при restart/continue/new run) |
+| После успешной сборки workspace | **fire-and-forget** | **`GET /sending/global-performance`** — не блокирует return `loadRunDetails` |
+
+**Сборка объекта `workspace` в React state:** хелпер **`workspaceFromLiteApi(lite, runId)`** (рядом с **`mergeWorkspaceLiteInto`** в том же файле): из ответа lite строится объект с полем **`id: rid`**, чтобы условия вида `workspace?.id === selectedRun.id` в шапке оставались истинными.
+
+**`snapshotWriteRunCards(rid, ws)`** вызывается с этим объектом — в snapshot попадают только поля, которые пишет **`humanUiSnapshot.js`** (display_phase, setup_summary, performance, …).
+
+### 15.5 Очистка state при `loadRunDetails` — критическое правило (регрессии)
+
+Переменная **`switchingRun`**:
+
+- **`true`** только если **`prevTarget != null`** и **`Number(prevTarget) !== rid`** — то есть реальный **переход на другой run**.
+- **`false`** при **`prevTarget == null`** (первый вызов `loadRunDetails` в сессии для данного старта эффекта).
+
+**Почему так:** эффект раздела (§15.3) может **уже** завершить **`GET /contacts/run`** и выставить **`contacts` + `contactsListReadyRunId`** **до** того, как асинхронный **`loadRunDetails`** (после `await` на список проектов) выполнит свою **синхронную** начальную очистку. Раньше при **`prevTarget == null`** списки **всегда** обнулялись → пользователь видел «cached … refreshing» до смены вкладки. Теперь при первом заходе **не** сбрасываются контакты/черновики/флаги готовности, если это не смена run и не **`includeLists`**.
+
+При **`includeLists: true`** (restart, continue, create run с полным бандлом) списки **по-прежнему** очищаются в отдельной ветке — ожидается полная перезагрузка списков с сервера.
+
+### 15.6 Три функции обновления списков и два счётчика гонок
+
+Все в **`AiBizOsHumanUI.jsx`**:
+
+| Функция | GET | Когда вызывается |
+|---------|-----|------------------|
+| **`refreshRunContactsOnly(runId)`** | только **`/contacts/run`** | Вход на **Contacts** или **Contact analyzer** |
+| **`refreshRunDraftsOnly(runId)`** | только **`/email-drafts/run`** | Вход на **Drafts** |
+| **`refreshRunContactsAndDrafts(runId)`** | оба параллельно | Poll при генерации исходящих; после approve контакта/review драфта/отправки и т.д., где нужны оба списка |
+
+**Защита от устаревших ответов:** два ref — **`contactsListFetchSeqRef`**, **`draftsListFetchSeqRef`**.
+
+- В **dual**-функции в начале: **`c = ++contactsListFetchSeqRef`**, **`d = ++draftsListFetchSeqRef`**; перед **`setContacts`/`setDrafts`** проверка **`c === current && d === current`**.
+- В **single**-функции инкрементируется только соответствующий ref.
+
+Так **старый** ответ «только контакты» не может перезаписать черновики после **нового** bundle-запроса и наоборот.
+
+### 15.7 Гидратация Review (когда показывается «настоящий» список vs кэш)
+
+- **`contactsReviewHydrated`**: на вкладках контактов true, если **`contactsListReadyRunId === Number(selectedRun.id)`** (после успешного GET контактов для этого run).
+- **`draftsReviewHydrated`**: на Drafts true, если **`draftsListReadyRunId === Number(selectedRun.id)`**.
+
+**`refreshRunContactsAndDrafts`** после успеха выставляет **оба** флага — иначе после approve оставалась «негидратированная» ветка UI.
+
+**Счётчики вкладок** (**Pending review**, **Approved**, …): **`mergeDraftReviewSnap` / `mergeContactReviewSnap`** — если live уже содержит данные (сумма > 0 для драфтов), **предпочитаются live** счётчики, чтобы stale snapshot из **`snapshotReadInnerTabCounts`** не затирал актуальные числа.
+
+### 15.8 Черновики: approve / PATCH и сравнение id
+
+**`reviewDraft(id, …)`** после **`PATCH /email-drafts/{id}/review`** обновляет массив через **`Number(d.id) === Number(id)`** — JSON может отдавать id как number или string; строгое **`===`** ломало merge.
+
+После успеха вызываются **`refreshRunContactsAndDrafts`**, **`refreshRunMetricsOnly`** — по согласованности с сервером.
+
+### 15.9 Плейсхолдеры «Generating email…»
+
+Состояние **`pendingOutboundDraftByContactId`**: ключи по **`Number(contactId)`**. Эффект при изменении **`drafts`** снимает pending, если **`drafts.some(d => Number(d.contact_id) === cid)`**.
+
+**`contactsAwaitingOutboundDraftPlaceholder`**: проверка **`pendingOutboundDraftByContactId[Number(c.id)]`** и множество **`draftContactIds`** через **`Number`** — единообразие типов.
+
+### 15.10 Что остаётся «тяжёлым» на reload
+
+- **`GET /runs/{id}`** по-прежнему возвращает **полный run** (включая большой **`context_json`** при длинном брифе). Облегчение этого — **отдельная** задача API (например **`RunCardRead`** / урезанный GET для дашборда).
+- **`GET /runs/{id}/workspace`** (полный) **намеренно не** вызывается в стандартном **`loadRunDetails`** после изменений §15 — если где-то в коде ещё ожидается полный workspace со **всеми** полями **`RunRead`**, встроенными в объект workspace, это нужно искать по репозиторию (**`grep /workspace`**).
+
+### 15.11 Матрица типичных симптомов → что проверить
+
+| Симптом | Вероятная причина | Куда смотреть |
+|---------|-------------------|----------------|
+| «Showing cached … — refreshing…» бесконечно | Не выставлен **`contactsListReadyRunId` / `draftsListReadyRunId`** после успешного GET | Эффект раздела, **`refreshRun*`** |
+| После reload контакты пустые до смены вкладки | Снова включили очистку списков при **`prevTarget == null`** в **`loadRunDetails`** | §15.5 |
+| Черновики пропали после генерации | Гонка ответов без dual-seq или перезапись **`setDrafts`** старым массивом | §15.6 |
+| Approve драфта — спиннер и нет изменений | **`d.id === id`** без **`Number()`** | §15.8 |
+| Долгий TTFB на run | Полный **`GET /runs/:id`** или БД | §15.10, профилирование backend |
+
+### 15.12 Константы таймаутов (фрагмент)
+
+В **`AiBizOsHumanUI.jsx`** (имена могут слегка отличаться — сверять по файлу):
+
+- **`API_TIMEOUT_MS`** — общий дефолт для `api()`.
+- **`POLL_METRICS_TIMEOUT_MS`** — refresh списков и метрик.
+- **`LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS`** — тяжёлые операции (restart и т.д.).
+
+### 15.13 Связь с backend (эндпоинты для handoff)
+
+| Метод | Путь | Схема / примечание |
+|-------|------|---------------------|
+| GET | `/runs/{run_id}` | `RunRead` |
+| GET | `/runs/{run_id}/workspace` | `RunWorkspaceRead` — **тяжёлый**, не используется в стандартном `loadRunDetails` после §15 |
+| GET | `/runs/{run_id}/workspace-lite` | `RunWorkspaceLiteRead` |
+| GET | `/runs/{run_id}/companies` | `RunCompaniesRead` |
+| GET | `/contacts/run/{run_id}` | список контактов |
+| GET | `/email-drafts/run/{run_id}` | список исходящих черновиков |
+| GET | `/sending/global-performance` | агрегаты по всем run |
+
+### 15.14 Чек-лист для следующего разработчика (после §15)
+
+- [ ] Прочитать **`workspaceFromLiteApi`**, **`mergeWorkspaceLiteInto`**, три **`refreshRun*`**.
+- [ ] Не возвращать **`GET /workspace`** в **`loadRunDetails`** без явной причины и замера.
+- [ ] Любой новый параллельный fetch контактов/черновиков — продумать **seq**-гарды.
+- [ ] После изменений — прогнать сценарии: **reload → Contacts**, **reload → Drafts**, **approve 5 контактов → генерация → Drafts**.
+- [ ] Обновить **`HANDOFF CURSOR.md`**, если менялись эндпоинты или схемы §15.13.
+
+---
+
+*Версия документа: март–апрель 2026 — **§15** (Human UI: workspace-lite в `loadRunDetails`, списки по разделам, dual-seq, гидратация, id-фиксы; фронт **2.7.2+** см. **`frontend/package.json`**); **§13.10 / §13.9** — исторические релизы; **§14.7.1** — workspace-lite на бэкенде и индексы. Диаграмма **§14.3** частично устарела — опираться на **§15.3**. Синхронизируйте **`HANDOFF CURSOR.md`** при изменении схемы БД, API и потоков §14–15.*

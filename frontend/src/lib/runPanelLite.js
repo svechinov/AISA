@@ -193,6 +193,14 @@ export function stripContactForPanelLite(c) {
       c.source_json && typeof c.source_json === "object"
         ? { source: c.source_json.source, replaces_contact_id: c.source_json.replaces_contact_id }
         : null,
+    personalization_json:
+      c.personalization_json && typeof c.personalization_json === "object"
+        ? {
+            why_this_company: c.personalization_json.why_this_company,
+            offer_fit: c.personalization_json.offer_fit,
+            role_angle: c.personalization_json.role_angle,
+          }
+        : null,
   };
 }
 
@@ -211,6 +219,15 @@ export function stripDraftForPanelLite(d) {
     review_notes: d.review_notes ?? null,
     error_message: d.error_message ?? null,
     attached_asset_ids: d.attached_asset_ids ?? null,
+    generation_meta_json:
+      d.generation_meta_json && typeof d.generation_meta_json === "object"
+        ? {
+            validation_score: d.generation_meta_json.validation_score,
+            style_mode: d.generation_meta_json.style_mode,
+            pipeline_source: d.generation_meta_json.pipeline_source,
+            is_valid: d.generation_meta_json.is_valid,
+          }
+        : null,
   };
 }
 

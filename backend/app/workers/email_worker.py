@@ -12,6 +12,10 @@ from app.repositories.email_draft_repo import (
 )
 from app.repositories.run_repo import get_run, update_run_master_email_variants
 from app.services.llm_gateway import generate_json
+from app.services.outreach_email_pipeline import (
+    build_template_fallback_meta,
+    compose_outreach_subject_body,
+)
 from app.services.outreach_personalize import (
     MASTER_VARIANT_COUNT,
     normalize_variants_payload,
@@ -19,7 +23,6 @@ from app.services.outreach_personalize import (
     select_variant_for_contact,
 )
 from app.services.prompt_builder import build_prompt
-from app.services.rules_service import get_effective_rules_from_run
 from app.services.run_context_service import get_prompt_setup_text
 
 logger = logging.getLogger(__name__)
@@ -70,74 +73,6 @@ FALLBACK_MASTER_VARIANTS: list[dict[str, str]] = [
 def _validated_fallback_variants() -> list[dict[str, str]]:
     wrapped = {"variants": FALLBACK_MASTER_VARIANTS}
     return normalize_variants_payload(wrapped)
-
-
-def _contact_role_for_prompt(contact: Contact) -> str:
-    r = (contact.role or "").strip()
-    if r:
-        return r
-    sj = contact.source_json or {}
-    if isinstance(sj, dict):
-        for k in ("role", "title", "job_title", "position"):
-            v = sj.get(k)
-            if v:
-                return str(v).strip()
-    return ""
-
-
-def _llm_single_outreach_email(
-    db: Session,
-    run_id: int,
-    contact: Contact,
-    campaign_brief: str,
-) -> tuple[str, str]:
-    """One subject/body via LLM; campaign_brief is Prompt setup text or equivalent run brief."""
-    role = _contact_role_for_prompt(contact)
-    try:
-        rules = get_effective_rules_from_run(db, run_id, "generate_emails")
-    except ValueError:
-        rules = []
-
-    task = (
-        f"{(campaign_brief or '').strip()}\n\n"
-        "Recipient — use only these facts for personalization; do not invent details:\n"
-        f"- Company: {contact.company or '—'}\n"
-        f"- Contact name: {contact.name or '—'}\n"
-        f"- Job title / role: {role or '—'}\n"
-        f"- Email: {contact.email or '—'}\n\n"
-        "Task:\n"
-        "Write one outbound email (subject + body) for this recipient, aligned with the campaign brief above.\n"
-        "Requirements:\n"
-        "- Subject: specific and professional\n"
-        "- Body: 5–10 sentences, clear value, consistent with the brief\n"
-        "- Address the recipient naturally using name and company where appropriate\n"
-        "- Include a brief salutation (e.g. Hi Name,) at the start of the body\n"
-        "- No markdown unless necessary\n\n"
-        "Return JSON only with keys subject and body (strings).\n"
-    )
-    prompt = build_prompt(
-        task=task,
-        data={
-            "recipient": {
-                "company": contact.company,
-                "name": contact.name,
-                "role": role,
-                "email": contact.email,
-            }
-        },
-        rules=rules,
-        output_schema={"subject": "string", "body": "string"},
-    )
-    out = generate_json(prompt, task_kind="single_outreach")
-    subject = (out.get("subject") or "").strip()
-    body = (out.get("body") or "").strip()
-    if not subject or not body:
-        raise ValueError("Model returned empty subject or body")
-    if len(body) < 120:
-        raise ValueError("Email body too short")
-    if len(body) > 12000:
-        raise ValueError("Email body too long")
-    return subject, body
 
 
 def _call_llm_for_master_variants(brief: str) -> list[dict[str, str]]:
@@ -225,6 +160,24 @@ def _variants_from_run(run) -> list[dict[str, str]]:
     return normalize_variants_payload(me)
 
 
+def _outreach_email_payload_dict(
+    contact: Contact,
+    subject: str,
+    body: str,
+    generation_meta_json: dict | None = None,
+) -> dict:
+    row = {
+        "contact_id": contact.id,
+        "company": contact.company,
+        "to": contact.email,
+        "subject": subject,
+        "body": body,
+    }
+    if generation_meta_json is not None:
+        row["generation_meta_json"] = generation_meta_json
+    return row
+
+
 def _compose_outreach_email_payload_for_contact(
     db: Session,
     run,
@@ -242,17 +195,17 @@ def _compose_outreach_email_payload_for_contact(
     prompt_saved = get_prompt_setup_text(run)
     if prompt_saved:
         try:
-            subject, body = _llm_single_outreach_email(db, run.id, contact, prompt_saved)
-            return {
-                "contact_id": contact.id,
-                "company": contact.company,
-                "to": contact.email,
-                "subject": subject,
-                "body": body,
-            }
+            subject, body, meta = compose_outreach_subject_body(
+                db,
+                run,
+                contact,
+                prompt_setup_text=prompt_saved,
+                master_variant=None,
+            )
+            return _outreach_email_payload_dict(contact, subject, body, meta)
         except Exception as exc:
             logger.warning(
-                "Prompt-based single outreach LLM failed run_id=%s contact_id=%s: %s",
+                "Prompt-setup outreach pipeline failed run_id=%s contact_id=%s: %s",
                 run.id,
                 contact.id,
                 exc,
@@ -272,20 +225,32 @@ def _compose_outreach_email_payload_for_contact(
         contact.id,
         variant_idx,
     )
+    try:
+        subject, body, meta = compose_outreach_subject_body(
+            db,
+            run,
+            contact,
+            prompt_setup_text=None,
+            master_variant=variant,
+        )
+        return _outreach_email_payload_dict(contact, subject, body, meta)
+    except Exception as exc:
+        logger.warning(
+            "Master-variant outreach pipeline failed run_id=%s contact_id=%s: %s — template fallback",
+            run.id,
+            contact.id,
+            exc,
+            exc_info=False,
+        )
+
     subject, body = personalize_outbound(
         run.id,
         contact,
         variant["subject"],
         variant["body"],
     )
-
-    return {
-        "contact_id": contact.id,
-        "company": contact.company,
-        "to": contact.email,
-        "subject": subject,
-        "body": body,
-    }
+    meta = build_template_fallback_meta(db, run, contact, subject, body)
+    return _outreach_email_payload_dict(contact, subject, body, meta)
 
 
 def build_outreach_email_entry(
@@ -333,8 +298,8 @@ def materialize_outreach_draft_for_sendable_contact(
 ) -> EmailDraft | None:
     """
     If the contact is approved/edited, valid, has email, and workflow supports drafts:
-    persist one personalized draft when missing — via Prompt setup LLM when that prompt is saved,
-    otherwise master variants + personalization (master is generated on first need).
+    persist one personalized draft when missing — unified reasoning→draft pipeline (personalization_json);
+    Prompt setup text or master variant as context; template personalize_outbound only as last resort.
     """
     from app.services.email_draft_persistence_service import persist_generated_emails
     from app.services.workflow_registry import WORKFLOWS
@@ -413,4 +378,5 @@ def regenerate_outbound_email_draft(db: Session, draft_id: int) -> EmailDraft:
         body=payload["body"],
         company=payload.get("company"),
         to_email=payload.get("to"),
+        generation_meta_json=payload.get("generation_meta_json"),
     )

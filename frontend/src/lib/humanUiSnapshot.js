@@ -338,3 +338,28 @@ export function snapshotEnsureRunSetupPrefsSeedFromRun(runId, runRow) {
     sender_signature_configured: d.sender_signature_configured,
   });
 }
+
+/** Global Total performance card (GET /sending/global-performance) — instant paint on reload. */
+export function snapshotReadTotalPerformance() {
+  const v = safeParse(storageGet(storageKey("totalPerformance")), null);
+  if (!v || v.schema !== SCHEMA) return null;
+  return {
+    emails_sent: Number(v.emails_sent) || 0,
+    emails_sent_24h: Number(v.emails_sent_24h) || 0,
+    replies: Number(v.replies) || 0,
+    savedAt: v.savedAt,
+  };
+}
+
+/** @param {{ emails_sent?: number, emails_sent_24h?: number, replies?: number }} tp */
+export function snapshotWriteTotalPerformance(tp) {
+  if (!tp || typeof tp !== "object") return;
+  const payload = {
+    schema: SCHEMA,
+    savedAt: Date.now(),
+    emails_sent: Number(tp.emails_sent) || 0,
+    emails_sent_24h: Number(tp.emails_sent_24h) || 0,
+    replies: Number(tp.replies) || 0,
+  };
+  storageSet(storageKey("totalPerformance"), JSON.stringify(payload));
+}

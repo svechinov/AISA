@@ -301,6 +301,32 @@ def generate_json(prompt: str, model: str = "stub", task_kind: str | None = None
         a, b, c = _stub_master_variant_a(), _stub_master_variant_b(), _stub_master_variant_c()
         return {"variants": [a, b, c]}
 
+    if task_kind in ("single_outreach", "outreach_reasoning", "outreach_draft"):
+        if _any_llm_key():
+            raw = _complete_with_fallback(prompt)
+            return _coerce_json_dict_from_text(raw)
+        if task_kind == "outreach_reasoning":
+            return {
+                "hook": (
+                    "Concrete fit between the recipient’s stated role and the campaign’s target profile."
+                ),
+                "angle": "short, bounded next step with a clear success signal",
+                "cta_type": "reply",
+                "key_point": "whether a brief scoping exchange is worth scheduling this week",
+            }
+        return {
+            "subject": "Quick note — relevant to your team",
+            "body": (
+                "Hi,\n\n"
+                "I’m reaching out because this aligns with your organization and the campaign we’re running — "
+                "not a generic blast.\n\n"
+                "If a short exchange or a one-page outline would help you decide, we can keep it lightweight "
+                "and specific to your context.\n\n"
+                "If the timing is off, a one-line pass is enough — we will not push repeated follow-ups.\n\n"
+                "Best regards"
+            ),
+        }
+
     prompt_lower = prompt.lower()
 
     if '"emails"' in prompt_lower or "outreach email" in prompt_lower:

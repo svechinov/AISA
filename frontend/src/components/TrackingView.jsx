@@ -739,34 +739,31 @@ export default function TrackingView({
     return { active, bounced, dead_mailbox };
   }, [groupedEvents, eventGroupTabBucket]);
 
-  const innerTabSnap = useMemo(
-    () => (runId ? snapshotReadInnerTabCounts(runId) : null),
-    [runId],
-  );
-
   const displayThreadBucketCounts = useMemo(() => {
     if (trackingCountsReady) return threadBucketCounts;
-    return innerTabSnap?.threads ?? { active: 0, bounced: 0, dead_mailbox: 0 };
-  }, [trackingCountsReady, threadBucketCounts, innerTabSnap]);
+    const snap = runId ? snapshotReadInnerTabCounts(runId)?.threads : null;
+    return snap ?? { active: 0, bounced: 0, dead_mailbox: 0 };
+  }, [trackingCountsReady, threadBucketCounts, runId]);
 
   const displayEventBucketCounts = useMemo(() => {
     if (trackingCountsReady) return eventBucketCounts;
-    return innerTabSnap?.events ?? { active: 0, bounced: 0, dead_mailbox: 0 };
-  }, [trackingCountsReady, eventBucketCounts, innerTabSnap]);
+    const snap = runId ? snapshotReadInnerTabCounts(runId)?.events : null;
+    return snap ?? { active: 0, bounced: 0, dead_mailbox: 0 };
+  }, [trackingCountsReady, eventBucketCounts, runId]);
 
   useEffect(() => {
     if (!runId || !trackingCountsReady) return;
     snapshotMergeWriteInnerTabs(runId, { threads: threadBucketCounts, events: eventBucketCounts });
   }, [runId, trackingCountsReady, threadBucketCounts, eventBucketCounts]);
 
-  const eventsTrackingListMode = useMemo(
-    () => trackingAbdSnapMode(innerTabSnap?.events),
-    [innerTabSnap],
-  );
-  const threadsTrackingListMode = useMemo(
-    () => trackingAbdSnapMode(innerTabSnap?.threads),
-    [innerTabSnap],
-  );
+  const eventsTrackingListMode = useMemo(() => {
+    const ev = runId ? snapshotReadInnerTabCounts(runId)?.events : null;
+    return trackingAbdSnapMode(ev);
+  }, [runId, trackingCountsReady, eventBucketCounts]);
+  const threadsTrackingListMode = useMemo(() => {
+    const th = runId ? snapshotReadInnerTabCounts(runId)?.threads : null;
+    return trackingAbdSnapMode(th);
+  }, [runId, trackingCountsReady, threadBucketCounts]);
 
   const runPanelLiteSnapshot = useMemo(
     () => (runId ? snapshotReadRunPanelLite(runId) : null),

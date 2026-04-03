@@ -31,3 +31,5 @@ class Run(Base):
     master_email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Rich-text (HTML) signature for this run; appended on send for outreach + reply drafts.
     sender_signature_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional voice for outbound generation: direct | warm | sharp | executive (used in later stages).
+    email_style_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)

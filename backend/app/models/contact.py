@@ -20,6 +20,8 @@ class Contact(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="new")
     confidence: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Rule-based / future LLM personalization for outreach copy (see personalization_service).
+    personalization_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     review_status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

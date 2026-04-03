@@ -62,6 +62,7 @@ class RunRead(BaseModel):
     master_email_subject: str | None = None
     master_email_body: str | None = None
     sender_signature_html: str | None = None
+    email_style_mode: str | None = None
 
     class Config:
         from_attributes = True
@@ -95,6 +96,12 @@ class RunHumanUiPatch(BaseModel):
 
     #: Merges into `_human_ui.event_chain_collapsed` — draft id (string) → collapsed (true = events hidden).
     event_chain_collapsed: dict[str, bool] | None = None
+
+
+class RunEmailStylePatch(BaseModel):
+    """Default outbound email voice when role does not imply another style (see email_style_service)."""
+
+    email_style_mode: str | None = None
 
 
 class RunOutreachPatch(BaseModel):

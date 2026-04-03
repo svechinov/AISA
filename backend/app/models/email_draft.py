@@ -34,3 +34,5 @@ class EmailDraft(Base):
 
     # Library asset ids to attach (order preserved).
     attached_asset_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # reasoning, validation_score, style_mode, etc. (populated in later pipeline stages).
+    generation_meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

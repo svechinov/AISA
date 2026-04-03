@@ -207,3 +207,17 @@ def update_run_outreach_fields(
     db.commit()
     db.refresh(run)
     return run
+
+
+def update_run_email_style_mode(db: Session, run_id: int, email_style_mode: str | None) -> Run | None:
+    run = get_run(db, run_id)
+    if not run:
+        return None
+    if run.closed_at is not None:
+        raise ValueError("Cannot update email style on a closed run")
+    m = (email_style_mode or "").strip().lower()
+    run.email_style_mode = m if m else None
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run

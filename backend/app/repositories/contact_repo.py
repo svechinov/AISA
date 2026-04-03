@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
+from app.services.personalization_service import sync_contact_personalization_row
 from app.utils.contact_identity import contact_identity_key_from_row
 
 
@@ -36,6 +37,7 @@ def create_contact(
         review_status=review_status,
         review_notes=review_notes,
     )
+    sync_contact_personalization_row(db, contact)
     db.add(contact)
     db.commit()
     db.refresh(contact)
@@ -232,6 +234,7 @@ def create_replacement_contact(
             "research_task_id": research_task_id,
         },
     )
+    sync_contact_personalization_row(db, contact)
     db.add(contact)
     db.commit()
     db.refresh(contact)
@@ -277,6 +280,8 @@ def bulk_create_contacts(
     commit: bool = True,
 ) -> list[Contact]:
     contacts = [Contact(**item) for item in contacts_data]
+    for c in contacts:
+        sync_contact_personalization_row(db, c)
     db.add_all(contacts)
     if commit:
         db.commit()
@@ -337,6 +342,7 @@ def update_contact_fields(
     contact.review_status = "edited"
     contact.reviewed_at = datetime.utcnow()
 
+    sync_contact_personalization_row(db, contact)
     db.add(contact)
     db.commit()
     db.refresh(contact)

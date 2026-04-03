@@ -57,6 +57,24 @@ def list_email_drafts_by_run(db: Session, run_id: int) -> list[EmailDraft]:
     )
 
 
+def list_outbound_draft_bodies_for_run_excluding_contact(
+    db: Session,
+    run_id: int,
+    exclude_contact_id: int,
+) -> list[str]:
+    """Bodies of other contacts' drafts in the same run — for dedup validation."""
+    rows = (
+        db.query(EmailDraft.body)
+        .filter(
+            EmailDraft.run_id == run_id,
+            EmailDraft.contact_id != exclude_contact_id,
+        )
+        .order_by(EmailDraft.id.asc())
+        .all()
+    )
+    return [r[0] for r in rows if r[0] and str(r[0]).strip()]
+
+
 def list_sendable_email_drafts_by_run(db: Session, run_id: int) -> list[EmailDraft]:
     """Approved/edited, sendable state, non-empty recipient; `failed` allows retry."""
     return (
@@ -128,12 +146,15 @@ def update_email_draft_outreach_regenerate(
     body: str,
     company: str | None,
     to_email: str | None,
+    generation_meta_json: dict | None = None,
 ) -> EmailDraft:
     """Replace subject/body after Regenerate; same row id. Review resets to pending so the user can Approve again."""
     draft.subject = subject
     draft.body = body
     draft.company = company
     draft.to_email = to_email
+    if generation_meta_json is not None:
+        draft.generation_meta_json = generation_meta_json
     draft.status = "draft"
     draft.tracking_status = "draft"
     draft.review_status = "pending"

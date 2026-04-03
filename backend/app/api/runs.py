@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -8,6 +10,7 @@ from app.repositories.run_repo import (
     create_run,
     get_run,
     list_runs_by_project,
+    update_run_email_style_mode,
     update_run_human_ui_preferences,
     update_run_outreach_fields,
     update_run_prompt_setup_text,
@@ -24,6 +27,7 @@ from app.schemas.run import (
     RetryCompanyFindResult,
     RunCardRead,
     RunCompaniesRead,
+    RunEmailStylePatch,
     RunHumanUiPatch,
     RunOutreachPatch,
     RunPromptSetupPatch,
@@ -45,6 +49,7 @@ from app.services.retry_company_find_service import (
     retry_find_for_collected_company,
 )
 from app.services.run_companies_status_service import get_run_companies_with_status
+from app.services.personalization_service import resync_personalization_for_run
 from app.services.run_display_service import (
     build_run_workspace_lite,
     enrich_run_for_card,
@@ -59,6 +64,7 @@ from app.services.run_display_service import (
 )
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+_log = logging.getLogger(__name__)
 
 
 def _workspace(db, run) -> RunWorkspaceRead:
@@ -180,6 +186,41 @@ def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session
             segment=seg,
             inner=inner,
             master_prompt=master,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not updated:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        n = resync_personalization_for_run(db, run_id)
+        if n:
+            _log.info("Resynced personalization_json for %s contact(s) after outreach PATCH", n)
+    except Exception:
+        _log.exception("resync_personalization_for_run failed after outreach PATCH")
+    return updated
+
+
+@router.patch("/{run_id}/email-style", response_model=RunRead)
+def patch_run_email_style_route(
+    run_id: int,
+    payload: RunEmailStylePatch,
+    db: Session = Depends(get_db),
+):
+    from app.services.email_style_service import VALID_EMAIL_STYLE_MODES
+
+    raw = payload.email_style_mode
+    if raw is not None and str(raw).strip() != "":
+        m = str(raw).strip().lower()
+        if m not in VALID_EMAIL_STYLE_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"email_style_mode must be one of: {', '.join(sorted(VALID_EMAIL_STYLE_MODES))}",
+            )
+    try:
+        updated = update_run_email_style_mode(
+            db,
+            run_id,
+            None if raw is None or str(raw).strip() == "" else str(raw).strip().lower(),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

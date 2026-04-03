@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.models.contact import Contact
 
 
 class ContactRead(BaseModel):
@@ -15,6 +17,7 @@ class ContactRead(BaseModel):
     status: str
     confidence: str | None
     source_json: dict
+    personalization_json: dict = Field(default_factory=dict)
     review_status: str
     review_notes: str | None
     reviewed_at: datetime | None
@@ -27,6 +30,90 @@ class ContactRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ContactReviewCountsRead(BaseModel):
+    """Per-tab counts for Review contacts (same buckets as contact_review_bucket service)."""
+
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+    bounced: int = 0
+    dead_mailbox: int = 0
+    no_email: int = 0
+
+
+class ContactRunBucketResponse(BaseModel):
+    """When GET /contacts/run/{id}?review_bucket=… — full tab counts + only that tab’s rows."""
+
+    review_counts: ContactReviewCountsRead
+    contacts: list[ContactRead]
+
+
+# Keys the dashboard needs from source_json for list views (avoid multi‑MB scraper blobs in GET /contacts/run).
+_SOURCE_JSON_LIST_KEYS = frozenset(
+    {
+        "source",
+        "replaces_contact_id",
+        "role",
+        "title",
+        "job_title",
+        "position",
+        "linkedin",
+    }
+)
+
+_PERSONALIZATION_LIST_KEYS = (
+    "why_this_company",
+    "offer_fit",
+    "role_angle",
+)
+
+
+def slim_source_json_for_list(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for k in _SOURCE_JSON_LIST_KEYS:
+        if k not in raw:
+            continue
+        v = raw[k]
+        if v is None:
+            continue
+        if isinstance(v, str) and len(v) > 2000:
+            v = v[:1999] + "…"
+        out[k] = v
+    return out
+
+
+def slim_personalization_json_for_list(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for k in _PERSONALIZATION_LIST_KEYS:
+        if k not in raw:
+            continue
+        v = raw[k]
+        if v is None:
+            continue
+        if isinstance(v, str) and len(v) > 12000:
+            v = v[:11999] + "…"
+        out[k] = v
+    return out
+
+
+def contact_read_for_run_list(contact: Contact) -> ContactRead:
+    """
+    Same shape as ContactRead for PATCH responses, but GET /contacts/run trims JSON blobs
+    so the UI list is not dominated by scraper / LLM payload size.
+    """
+    base = ContactRead.model_validate(contact)
+    return base.model_copy(
+        update={
+            "source_json": slim_source_json_for_list(base.source_json),
+            "personalization_json": slim_personalization_json_for_list(base.personalization_json),
+        }
+    )
 
 
 class ContactReviewUpdate(BaseModel):
