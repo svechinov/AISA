@@ -1,6 +1,5 @@
 from sqlalchemy.orm import Session
 
-from app.repositories.contact_repo import list_contacts_by_run
 from app.repositories.run_repo import get_run, update_run_status
 from app.repositories.run_company_repo import list_run_companies_sparse, sync_run_companies_from_dicts
 from app.repositories.step_repo import (
@@ -11,7 +10,10 @@ from app.repositories.step_repo import (
     mark_step_running,
     update_step_progress,
 )
-from app.services.contact_persistence_service import persist_validated_contacts
+from app.services.contact_persistence_service import (
+    contacts_raw_for_pipeline_dicts,
+    persist_validated_contacts,
+)
 from app.utils.contact_identity import contact_identity_key_from_dict
 from app.services.email_draft_persistence_service import persist_generated_emails
 from app.services.run_context_service import build_collect_companies_input_for_round
@@ -136,47 +138,11 @@ def _merge_contacts(existing: list[dict], new_items: list) -> list[dict]:
     return cleaned
 
 
-def _dicts_from_step_output(step, key: str) -> list[dict]:
-    if not step or not isinstance(step.output_json, dict):
-        return []
-    raw = step.output_json.get(key)
-    if not isinstance(raw, list):
-        return []
-    return [x for x in raw if isinstance(x, dict)]
-
-
-def _load_accumulating_setup_seed(db: Session, run_id: int) -> tuple[list[dict], list[dict], dict]:
-    """Restore in-memory setup state from step outputs and/or existing contacts (restart / extra rounds)."""
-    step_c = get_step_by_run_and_name(db, run_id, "collect_companies")
-    step_f = get_step_by_run_and_name(db, run_id, "find_contacts")
-    step_v = get_step_by_run_and_name(db, run_id, "validate_contacts")
-
+def _load_accumulating_setup_seed(db: Session, run_id: int) -> tuple[list[dict], list[dict]]:
+    """Restore in-memory setup state from run_companies + contacts table (not step JSON)."""
     raw_co = list_run_companies_sparse(db, run_id)
     companies = [x for x in raw_co if isinstance(x, dict)]
-    contacts = _dicts_from_step_output(step_f, "contacts")
-
-    last_validate: dict = {"valid_contacts": [], "invalid_contacts": []}
-    if step_v and isinstance(step_v.output_json, dict):
-        vc = step_v.output_json.get("valid_contacts")
-        ic = step_v.output_json.get("invalid_contacts")
-        if isinstance(vc, list):
-            last_validate["valid_contacts"] = [x for x in vc if isinstance(x, dict)]
-        if isinstance(ic, list):
-            last_validate["invalid_contacts"] = [x for x in ic if isinstance(x, dict)]
-
-    if not contacts:
-        for c in list_contacts_by_run(db, run_id):
-            row = {
-                "company": c.company,
-                "website": c.website,
-                "name": c.name,
-                "role": c.role,
-                "email": c.email,
-                "linkedin": c.linkedin,
-                "confidence": c.confidence,
-            }
-            sj = c.source_json if isinstance(c.source_json, dict) else {}
-            contacts.append({**sj, **{k: v for k, v in row.items() if v is not None}})
+    contacts = contacts_raw_for_pipeline_dicts(db, run_id)
 
     if not companies and contacts:
         seen: set[str] = set()
@@ -193,7 +159,7 @@ def _load_accumulating_setup_seed(db: Session, run_id: int) -> tuple[list[dict],
                 }
             )
 
-    return companies, contacts, last_validate
+    return companies, contacts
 
 
 def _ensure_step(db: Session, run_id: int, step_name: str):
@@ -214,7 +180,7 @@ def run_accumulating_setup_phase(db: Session, run_id: int, *, continuation: bool
     if not run:
         raise ValueError(f"Run {run_id} not found")
 
-    companies, contacts, last_validate = _load_accumulating_setup_seed(db, run_id)
+    companies, contacts = _load_accumulating_setup_seed(db, run_id)
 
     step_c = _ensure_step(db, run_id, "collect_companies")
     step_f = _ensure_step(db, run_id, "find_contacts")
@@ -224,6 +190,7 @@ def run_accumulating_setup_phase(db: Session, run_id: int, *, continuation: bool
     stall = 0
     round_idx = 0
     rounds_after_all_milestones = 0
+    last_validate: dict = {"valid_contacts": [], "invalid_contacts": []}
 
     while round_idx < SETUP_ACCUMULATION_MAX_ROUNDS:
         run = get_run(db, run_id)
@@ -253,7 +220,7 @@ def run_accumulating_setup_phase(db: Session, run_id: int, *, continuation: bool
             raise
         batch_f = out_f.get("contacts") if isinstance(out_f.get("contacts"), list) else []
         contacts = _merge_contacts(contacts, batch_f)
-        update_step_progress(db, step_f, {"contacts": contacts})
+        update_step_progress(db, step_f, {"contacts_count": len(contacts)})
 
         vin = {"contacts": contacts}
         mark_step_running(db, step_v, vin)
@@ -262,7 +229,14 @@ def run_accumulating_setup_phase(db: Session, run_id: int, *, continuation: bool
         except Exception as e:
             mark_step_failed(db, step_v, str(e))
             raise
-        update_step_progress(db, step_v, last_validate)
+        update_step_progress(
+            db,
+            step_v,
+            {
+                "valid_count": len(last_validate.get("valid_contacts") or []),
+                "invalid_count": len(last_validate.get("invalid_contacts") or []),
+            },
+        )
         persist_validated_contacts(db, run_id, last_validate)
 
         valid_n = len(last_validate.get("valid_contacts") or [])
@@ -296,8 +270,21 @@ def run_accumulating_setup_phase(db: Session, run_id: int, *, continuation: bool
 
     sync_run_companies_from_dicts(db, run_id, companies, commit=False)
     mark_step_completed(db, step_c, {})
-    mark_step_completed(db, step_f, {"contacts": contacts})
-    mark_step_completed(db, step_v, last_validate)
+    mark_step_completed(
+        db,
+        step_f,
+        {
+            "contacts_count": len(contacts),
+        },
+    )
+    mark_step_completed(
+        db,
+        step_v,
+        {
+            "valid_count": len(last_validate.get("valid_contacts") or []),
+            "invalid_count": len(last_validate.get("invalid_contacts") or []),
+        },
+    )
 
 
 def build_step_input(db: Session, run_id: int, step_name: str) -> dict:
@@ -322,7 +309,12 @@ def build_step_input(db: Session, run_id: int, step_name: str) -> dict:
     if previous_step_name == "collect_companies":
         return {}
 
-    return previous_step.output_json or {}
+    if previous_step_name == "find_contacts":
+        return {}
+
+    from app.utils.step_payload import effective_step_output_json
+
+    return effective_step_output_json(db, previous_step) or {}
 
 
 def execute_step(db: Session, run_id: int, step_name: str):
@@ -354,10 +346,25 @@ def execute_step(db: Session, run_id: int, step_name: str):
                 commit=False,
             )
             output = {}
+        if step_name == "find_contacts" and isinstance(output, dict):
+            batch = output.get("contacts") if isinstance(output.get("contacts"), list) else []
+            existing = contacts_raw_for_pipeline_dicts(db, run_id)
+            merged = _merge_contacts(existing, batch)
+            last_v = validate_contacts(db, run_id, run.workflow_name, {"contacts": merged})
+            persist_validated_contacts(db, run_id, last_v, commit=False)
+            output = {
+                "batch_size": len(batch),
+                "merged_total": len(merged),
+                "valid_count": len(last_v.get("valid_contacts") or []),
+                "invalid_count": len(last_v.get("invalid_contacts") or []),
+            }
+        if step_name == "validate_contacts" and isinstance(output, dict):
+            persist_validated_contacts(db, run_id, output, commit=False)
+            output = {
+                "valid_count": len(output.get("valid_contacts") or []),
+                "invalid_count": len(output.get("invalid_contacts") or []),
+            }
         mark_step_completed(db, step, output)
-
-        if step_name == "validate_contacts":
-            persist_validated_contacts(db, run_id, output)
 
         if step_name == "generate_emails":
             persist_generated_emails(db, run_id, output)

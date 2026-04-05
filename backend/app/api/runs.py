@@ -218,9 +218,13 @@ def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session
     if not inner.get("notes") and payload.notes:
         inner["notes"] = payload.notes.strip()
     if not (inner.get("goal") or inner.get("offer")):
-        legacy = (run.input_json or {}).get("goal") if isinstance(run.input_json, dict) else ""
+        legacy = ""
+        if getattr(run, "input_goal", None):
+            legacy = str(run.input_goal).strip()
+        elif isinstance(run.input_json, dict):
+            legacy = str(run.input_json.get("goal") or "").strip()
         if legacy:
-            inner["goal"] = str(legacy).strip()
+            inner["goal"] = legacy
     if not (inner.get("goal") or inner.get("offer")):
         raise HTTPException(
             status_code=400,

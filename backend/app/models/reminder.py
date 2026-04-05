@@ -23,6 +23,14 @@ class Reminder(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="scheduled")
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
 
+    #: Canonical: follow_up_task / thread / etc. (was source_json["source"])
+    source_kind: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    #: Snapshot from follow-up task (was source_json["task_type"])
+    task_type_snapshot: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    #: e.g. manual_scheduler (was output_json["triggered_by"])
+    output_triggered_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    #: Extras only; canonical keys merged at read via effective_* helpers
     source_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     output_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 

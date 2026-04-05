@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from app.utils.contact_source_payload import effective_contact_source_json
+
 VALID_EMAIL_STYLE_MODES = frozenset({"direct", "warm", "sharp", "executive"})
 
 STYLE_INSTRUCTIONS: dict[str, str] = {
@@ -15,11 +19,13 @@ STYLE_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def _role_lower(contact: Any) -> str:
+def _role_lower(db: Session, contact: Any) -> str:
     r = (getattr(contact, "role", None) or "").strip().lower()
     if r:
         return r
-    sj = getattr(contact, "source_json", None) or {}
+    sj = effective_contact_source_json(db, contact) if getattr(contact, "id", None) else {}
+    if not sj:
+        sj = getattr(contact, "source_json", None) or {}
     if isinstance(sj, dict):
         for k in ("role", "title", "job_title", "position"):
             v = sj.get(k)
@@ -42,11 +48,11 @@ def _infer_style_from_role(role_lower: str) -> str | None:
     return None
 
 
-def resolve_effective_email_style(run: Any, contact: Any) -> str:
+def resolve_effective_email_style(db: Session, run: Any, contact: Any) -> str:
     """
     Priority: role heuristic → run.email_style_mode → 'direct'.
     """
-    inferred = _infer_style_from_role(_role_lower(contact))
+    inferred = _infer_style_from_role(_role_lower(db, contact))
     if inferred:
         return inferred
     raw = getattr(run, "email_style_mode", None)

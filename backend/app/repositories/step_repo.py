@@ -1,9 +1,12 @@
 from datetime import datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.constants.entity_kv_scope import SCOPE_STEP_INPUT, SCOPE_STEP_OUTPUT
+from app.models.entity_json_kv import EntityJsonKV
 from app.models.step import Step
+from app.utils.step_payload import persist_step_input, persist_step_output
 
 
 def get_step_status_by_run_and_name(db: Session, run_id: int, step_name: str) -> str | None:
@@ -25,58 +28,19 @@ def _contact_lite_dict(ct: dict) -> dict:
 
 
 def get_find_contacts_for_matching(db: Session, run_id: int) -> tuple[list[dict], str]:
-    """
-    Contacts as name/website/email only.
+    """Contacts as name/website/email only — canonical ``contacts`` table (not step JSON)."""
+    from app.models.contact import Contact
 
-    On PostgreSQL we aggregate tiny json objects in SQL so we never deserialize the full
-    find_contacts output_json blob (can be huge per contact). Else ORM + shrink after full load.
-    """
-    dialect = db.get_bind().dialect.name
-    if dialect == "postgresql":
-        row = db.execute(
-            text(
-                """
-                SELECT COALESCE(
-                    (
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'name', elem->'name',
-                                'website', elem->'website',
-                                'email', elem->'email'
-                            )
-                        )
-                        FROM jsonb_array_elements(
-                            CASE
-                                WHEN s.output_json IS NULL THEN '[]'::jsonb
-                                WHEN jsonb_typeof((s.output_json::jsonb)->'contacts') = 'array'
-                                THEN (s.output_json::jsonb)->'contacts'
-                                ELSE '[]'::jsonb
-                            END
-                        ) AS elem
-                    ),
-                    '[]'::jsonb
-                )
-                FROM steps s
-                WHERE s.run_id = :run_id AND s.step_name = 'find_contacts'
-                LIMIT 1
-                """
-            ),
-            {"run_id": run_id},
-        ).scalar_one_or_none()
-        if row is None:
-            return [], "postgres_min_json"
-        if isinstance(row, list):
-            out = [x for x in row if isinstance(x, dict)]
-            return [_contact_lite_dict(x) for x in out], "postgres_min_json"
-        return [], "postgres_min_json"
-
-    step = get_step_by_run_and_name(db, run_id, "find_contacts")
-    if not step:
-        return [], "orm_full"
-    raw = (step.output_json or {}).get("contacts")
-    if not isinstance(raw, list):
-        return [], "orm_full"
-    return [_contact_lite_dict(ct) for ct in raw if isinstance(ct, dict)], "orm_full"
+    rows = (
+        db.query(Contact.name, Contact.website, Contact.email)
+        .filter(Contact.run_id == run_id)
+        .order_by(Contact.id.asc())
+        .all()
+    )
+    out: list[dict] = []
+    for name, website, email in rows:
+        out.append(_contact_lite_dict({"name": name, "website": website, "email": email}))
+    return out, "contacts_table"
 
 
 def create_step(
@@ -91,15 +55,18 @@ def create_step(
         run_id=run_id,
         step_name=step_name,
         status="pending",
-        input_json=input_json,
+        input_json={},
         output_json={},
     )
     db.add(step)
     if commit:
+        db.flush()
+        persist_step_input(db, step, input_json)
         db.commit()
         db.refresh(step)
     else:
         db.flush()
+        persist_step_input(db, step, input_json)
         db.refresh(step)
     return step
 
@@ -114,6 +81,12 @@ def list_steps_by_run(db: Session, run_id: int) -> list[Step]:
 
 
 def delete_steps_by_run(db: Session, run_id: int) -> int:
+    step_ids = [r[0] for r in db.query(Step.id).filter(Step.run_id == run_id).all()]
+    if step_ids:
+        db.query(EntityJsonKV).filter(
+            EntityJsonKV.scope.in_([SCOPE_STEP_INPUT, SCOPE_STEP_OUTPUT]),
+            EntityJsonKV.entity_id.in_(step_ids),
+        ).delete(synchronize_session=False)
     q = db.query(Step).filter(Step.run_id == run_id)
     n = q.count()
     q.delete(synchronize_session=False)
@@ -135,7 +108,7 @@ def get_step_by_run_and_name(db: Session, run_id: int, step_name: str) -> Step |
 
 def mark_step_running(db: Session, step: Step, input_json: dict) -> Step:
     step.status = "running"
-    step.input_json = input_json
+    persist_step_input(db, step, input_json)
     db.add(step)
     db.commit()
     db.refresh(step)
@@ -144,7 +117,7 @@ def mark_step_running(db: Session, step: Step, input_json: dict) -> Step:
 
 def update_step_progress(db: Session, step: Step, output_json: dict) -> Step:
     """Persist partial output while status stays running (multi-round setup)."""
-    step.output_json = output_json
+    persist_step_output(db, step, output_json)
     db.add(step)
     db.commit()
     db.refresh(step)
@@ -159,7 +132,7 @@ def mark_step_completed(
     commit: bool = True,
 ) -> Step:
     step.status = "completed"
-    step.output_json = output_json
+    persist_step_output(db, step, output_json)
     step.error_text = None
     step.finished_at = datetime.utcnow()
     db.add(step)

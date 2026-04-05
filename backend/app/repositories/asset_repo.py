@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset
+from app.utils.asset_metadata import persist_asset_metadata_dict
 
 
 def create_asset(
@@ -30,9 +31,11 @@ def create_asset(
         mime_type=mime_type,
         file_size_bytes=file_size_bytes,
         status=status,
-        metadata_json=metadata_json or {},
+        metadata_json={},
     )
     db.add(asset)
+    db.flush()
+    persist_asset_metadata_dict(db, asset, metadata_json or {})
     db.commit()
     db.refresh(asset)
     return asset

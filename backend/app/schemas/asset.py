@@ -1,6 +1,13 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from app.models.asset import Asset
 
 
 class AssetCreate(BaseModel):
@@ -36,3 +43,25 @@ class AssetRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+def build_asset_read(db: Session, asset: Asset) -> AssetRead:
+    from app.utils.asset_metadata import effective_asset_metadata_dict
+
+    meta = effective_asset_metadata_dict(db, asset)
+    return AssetRead(
+        id=asset.id,
+        asset_type=asset.asset_type,
+        name=asset.name,
+        description=asset.description,
+        url=asset.url,
+        file_path=asset.file_path,
+        download_url=asset.download_url,
+        storage_key=asset.storage_key,
+        filename=asset.filename,
+        mime_type=asset.mime_type,
+        file_size_bytes=asset.file_size_bytes,
+        status=asset.status,
+        metadata_json=meta,
+        created_at=asset.created_at,
+    )

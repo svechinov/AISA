@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.repositories.asset_repo import create_asset, list_assets
-from app.schemas.asset import AssetCreate, AssetRead
+from app.schemas.asset import AssetCreate, AssetRead, build_asset_read
 from app.services.cdn_upload_service import upload_bytes_to_project_cdn, upload_max_bytes
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -11,7 +11,8 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 
 @router.get("", response_model=list[AssetRead])
 def list_assets_route(db: Session = Depends(get_db)):
-    return list_assets(db, status=None)
+    rows = list_assets(db, status=None)
+    return [build_asset_read(db, a) for a in rows]
 
 
 @router.post("/upload", response_model=AssetRead)
@@ -38,7 +39,7 @@ def upload_asset_route(
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
-    return create_asset(
+    a = create_asset(
         db=db,
         asset_type=(asset_type or "other").strip() or "other",
         name=raw_name,
@@ -53,11 +54,12 @@ def upload_asset_route(
         status="active",
         metadata_json=meta.get("metadata_json") or {},
     )
+    return build_asset_read(db, a)
 
 
 @router.post("", response_model=AssetRead)
 def create_asset_route(payload: AssetCreate, db: Session = Depends(get_db)):
-    return create_asset(
+    a = create_asset(
         db=db,
         asset_type=payload.asset_type,
         name=payload.name,
@@ -72,3 +74,4 @@ def create_asset_route(payload: AssetCreate, db: Session = Depends(get_db)):
         status=payload.status,
         metadata_json=payload.metadata_json,
     )
+    return build_asset_read(db, a)

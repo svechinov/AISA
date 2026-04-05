@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -36,3 +36,17 @@ class EmailDraft(Base):
     attached_asset_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     # reasoning, validation_score, style_mode, etc. (populated in later pipeline stages).
     generation_meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Phase 1: canonical columns (kept in sync with generation_meta_json on write).
+    prompt_setup_text_used: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generation_style_mode: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    validation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_issues_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    generation_is_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    peer_similarity_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_retries: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pipeline_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    reasoning_hook: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reasoning_angle: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reasoning_cta_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reasoning_key_point: Mapped[str | None] = mapped_column(Text, nullable=True)

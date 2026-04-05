@@ -98,9 +98,9 @@ const API_BASE =
       ? "/api"
       : "http://127.0.0.1:8000";
 
-/** GET /email-drafts/run/:id with full `body` for Review Drafts (not only body_preview). */
+/** GET /email-drafts/run/:id — compact list (`body_preview` only; full `body` via GET /email-drafts/:id when editing). */
 function emailDraftsRunListPath(runId) {
-  return `/email-drafts/run/${runId}?include_body=1`;
+  return `/email-drafts/run/${runId}`;
 }
 
 /** Labels for GET /setup/status summary (dashboard informer). */
@@ -249,14 +249,11 @@ function SnapshotCardsPlaceholder({ mode, kind }) {
   }
   return (
     <div
-      className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
+      className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-10 text-center text-sm text-muted-foreground"
       role="status"
       aria-live="polite"
     >
-      <Clock className="h-8 w-8 shrink-0 animate-spin text-primary" aria-hidden />
-      <p>
-        {kind} data is loading…
-      </p>
+      <p>{kind} data is loading…</p>
     </div>
   );
 }
@@ -686,6 +683,35 @@ function contactRoleFromPayload(contact) {
   return String(sj.role ?? sj.title ?? sj.job_title ?? sj.position ?? "").trim();
 }
 
+/** Expand panel-lite snapshot row to a full contact-shaped object for display (GET /contacts/run not applied yet). */
+function contactRowFromPanelLitePreview(p, runId) {
+  if (!p || typeof p !== "object") return null;
+  return {
+    id: p.id,
+    run_id: runId ?? null,
+    company: p.company ?? null,
+    website: p.website ?? null,
+    name: p.name ?? null,
+    role: p.role ?? null,
+    email: p.email ?? null,
+    linkedin: p.linkedin ?? null,
+    status: p.status ?? "valid",
+    confidence: p.confidence ?? null,
+    source_json: p.source_json && typeof p.source_json === "object" ? p.source_json : {},
+    personalization_json:
+      p.personalization_json && typeof p.personalization_json === "object" ? p.personalization_json : {},
+    review_status: p.review_status ?? "pending",
+    review_notes: p.review_notes ?? null,
+    reviewed_at: p.reviewed_at ?? null,
+    email_health: p.email_health ?? "unknown",
+    last_contact_event_at: p.last_contact_event_at ?? null,
+    gmail_history_status: p.gmail_history_status ?? null,
+    gmail_history_checked_at: p.gmail_history_checked_at ?? null,
+    gmail_inbox_imported_at: p.gmail_inbox_imported_at ?? null,
+    created_at: p.created_at ?? new Date(0).toISOString(),
+  };
+}
+
 function StatusBadge({ value }) {
   return <Badge variant={statusTone[value] || "secondary"}>{pretty(value)}</Badge>;
 }
@@ -1002,11 +1028,27 @@ function trackingTabToMainNav(tab) {
   return map[t] || "events";
 }
 
+/**
+ * Human UI only uses parent `assetsLibrary` / `runAssetPackets` for Drafts (attachment chips) and
+ * Assets / Packets nav. Fetching them on every run switch competes with GET /runs, /workspace-lite,
+ * /contacts/run (browser HTTP/1.1 connection limits — see TrackingView «load assets first» comment).
+ */
+function mainNavNeedsParentAssetsFetch(nav) {
+  return nav === "drafts" || nav === "assets" || nav === "packets";
+}
+
+/** Which list GETs belong in `loadRunDetails` for the current nav (at most one of contacts vs drafts). */
+function listInclusionsForMainNav(nav) {
+  return {
+    includeContacts: nav === "contacts" || nav === "contact-analyzer",
+    includeDrafts: nav === "drafts",
+  };
+}
+
 export default function AiBizOsHumanUI() {
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
-  const [steps, setSteps] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1198,7 +1240,22 @@ export default function AiBizOsHumanUI() {
     draftsListReadyRunIdRef.current = draftsListReadyRunId;
   }, [contactsListReadyRunId, draftsListReadyRunId]);
 
-  const contactsVisible = useMemo(() => filterShadowNoEmailContacts(contacts), [contacts]);
+  const contactsVisible = useMemo(() => {
+    const rid = Number(selectedRun?.id);
+    let base = contacts;
+    if (
+      Number.isFinite(rid) &&
+      rid > 0 &&
+      contactsListReadyRunId !== rid &&
+      (!Array.isArray(contacts) || contacts.length === 0)
+    ) {
+      const snap = snapshotReadRunPanelLite(rid)?.contactsPreview;
+      if (Array.isArray(snap) && snap.length > 0) {
+        base = snap.map((p) => contactRowFromPanelLitePreview(p, rid)).filter(Boolean);
+      }
+    }
+    return filterShadowNoEmailContacts(base);
+  }, [contacts, contactsListReadyRunId, selectedRun?.id]);
 
   useEffect(() => {
     if (!selectedRun) setRunDetailsHydratedId(null);
@@ -1338,6 +1395,8 @@ export default function AiBizOsHumanUI() {
   const selectedRunIdRef = useRef(null);
   /** Keep in sync during render so async callbacks (e.g. Tracking onStaticAssetsSynced) see the current run before child useEffects run. */
   selectedRunIdRef.current = selectedRun?.id ?? null;
+  const mainNavRef = useRef(mainNav);
+  mainNavRef.current = mainNav;
   const selectedProjectRef = useRef(null);
   useEffect(() => {
     selectedProjectRef.current = selectedProject;
@@ -1595,23 +1654,31 @@ export default function AiBizOsHumanUI() {
   };
 
   /**
-   * Loads run + steps + workspace-lite (+ optional global performance). Full GET /workspace is not used here
-   * (heavy); Companies tab uses GET /runs/:id/companies; Contacts/Drafts lists load per section (see effect).
+   * Loads run + workspace-lite (+ optional global performance). Full GET /workspace is not used here
+   * (heavy); Companies tab uses GET /runs/:id/companies; section lists only when requested.
    * @param {object} [options]
-   * @param {boolean} [options.includeLists] — when true, also fetch contacts + outbound drafts in the same round-trip.
+   * @param {boolean} [options.includeLists] — legacy: both contacts + drafts lists.
+   * @param {boolean} [options.includeContacts] — GET /contacts/run (Review contacts / analyzer).
+   * @param {boolean} [options.includeDrafts] — GET /email-drafts/run (compact list, no full body).
    */
   const loadRunDetails = async (runId, runRowHint, options = {}) => {
     const rid = Number(runId);
     if (!Number.isFinite(rid) || rid <= 0) return null;
     /** Core-only and bundle both hit the same backend; 25s was too tight when POST /restart queues other GETs. */
     const requestTimeoutMs = options?.requestTimeoutMs ?? LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
-    const includeLists = options.includeLists === true;
+    /** `includeLists: true` = fetch both section lists (legacy). Otherwise use explicit flags only. */
+    const bundleLists = options.includeLists === true;
+    const includeContacts = bundleLists || options.includeContacts === true;
+    const includeDrafts = bundleLists || options.includeDrafts === true;
     const myGen = ++runDetailsLoadGenRef.current;
     setRunDetailsLoading(true);
+    const listParts = [];
+    if (includeContacts) listParts.push(`/contacts/run/${rid}`);
+    if (includeDrafts) listParts.push(`/email-drafts/run/${rid} (list, compact)`);
     appendActivityLog(
-      includeLists
-        ? `Run run_id=${rid}: GET /runs/${rid}, /steps/run/${rid}, /runs/${rid}/workspace-lite, /contacts/run/${rid}, /email-drafts/run/${rid}?include_body=1`
-        : `Run run_id=${rid}: GET /runs/${rid}, /steps/run/${rid}, /runs/${rid}/workspace-lite (no /contacts or /email-drafts in this request)`,
+      listParts.length
+        ? `Run run_id=${rid}: GET /runs/${rid}, /runs/${rid}/workspace-lite, ${listParts.join(", ")}`
+        : `Run run_id=${rid}: GET /runs/${rid}, /runs/${rid}/workspace-lite (no section lists in this request)`,
     );
     const prevTarget = runLoadTargetRef.current;
     runLoadTargetRef.current = rid;
@@ -1634,8 +1701,7 @@ export default function AiBizOsHumanUI() {
       setDraftsListFailedRunId(null);
       setContacts([]);
       setDrafts([]);
-      setSteps([]);
-    } else if (includeLists) {
+    } else if (includeContacts || includeDrafts) {
       contactsListReadyRunIdRef.current = null;
       draftsListReadyRunIdRef.current = null;
       setContactsListReadyRunId(null);
@@ -1645,7 +1711,6 @@ export default function AiBizOsHumanUI() {
       setDraftsListFailedRunId(null);
       setContacts([]);
       setDrafts([]);
-      setSteps([]);
     }
     setRunDetailsHydratedId((prev) => (Number(prev) === rid ? prev : null));
     const rowGuess = runRowHint ?? runsList.find((r) => Number(r.id) === rid);
@@ -1661,60 +1726,67 @@ export default function AiBizOsHumanUI() {
     }
     try {
       const wsLitePath = `/runs/${rid}/workspace-lite`;
-      /** Run + steps + workspace-lite (not full /workspace — avoids serializing full Run row). Full run fields come from GET /runs/:id above. */
+      /** Run + workspace-lite in parallel (not full /workspace — avoids serializing full Run row). Full run fields come from GET /runs/:id above. */
       const pRun = api(`/runs/${rid}`, { timeoutMs: requestTimeoutMs });
-      const pSteps = api(`/steps/run/${rid}`, { timeoutMs: requestTimeoutMs });
       const pWsLite = api(wsLitePath, { timeoutMs: requestTimeoutMs });
-      const pContacts = includeLists
+      const pContacts = includeContacts
         ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), `/contacts/run/${rid}`)
         : null;
-      const pDrafts = includeLists
+      const pDrafts = includeDrafts
         ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), emailDraftsRunListPath(rid))
         : null;
 
-      const [run, stepsData] = await Promise.all([pRun, pSteps]);
-      if (runLoadTargetRef.current !== rid) return null;
-      appendActivityLog("→ Run and steps received.");
-      setSelectedRun(run);
-      snapshotMergeRunSetupBodiesFromRun(rid, run);
-      setSteps(stepsData);
-
+      let run;
+      let wsLiteData;
       let contactsData = null;
       let draftsData = null;
-      let wsLiteData = null;
-      if (includeLists) {
-        const lists = await Promise.all([pWsLite, pContacts, pDrafts]);
-        if (runLoadTargetRef.current !== rid) return null;
-        wsLiteData = lists[0];
-        contactsData = lists[1];
-        draftsData = lists[2];
+      if (includeContacts && includeDrafts) {
+        [run, wsLiteData, contactsData, draftsData] = await Promise.all([pRun, pWsLite, pContacts, pDrafts]);
+      } else if (includeContacts) {
+        [run, wsLiteData, contactsData] = await Promise.all([pRun, pWsLite, pContacts]);
+      } else if (includeDrafts) {
+        [run, wsLiteData, draftsData] = await Promise.all([pRun, pWsLite, pDrafts]);
       } else {
-        wsLiteData = await pWsLite;
-        appendActivityLog("→ Workspace-lite received.");
+        [run, wsLiteData] = await Promise.all([pRun, pWsLite]);
       }
       if (runLoadTargetRef.current !== rid) return null;
+      appendActivityLog("→ Run and workspace-lite received.");
+      setSelectedRun(run);
+      snapshotMergeRunSetupBodiesFromRun(rid, run);
 
-      if (includeLists) {
+      if (includeContacts) {
         const cArr = Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData);
-        const dArr = Array.isArray(draftsData) ? draftsData : [];
-        appendActivityLog(`→ Contacts: ${cArr.length}, drafts: ${dArr.length}`);
+        appendActivityLog(`→ Contacts: ${cArr.length}`);
         setContacts(cArr);
-        setDrafts(dArr);
         contactsListReadyRunIdRef.current = rid;
-        draftsListReadyRunIdRef.current = rid;
         setContactsListReadyRunId(rid);
-        setDraftsListReadyRunId(rid);
         setContactsListFailedRunId(null);
+      }
+      if (includeDrafts) {
+        const dArr = Array.isArray(draftsData) ? draftsData : [];
+        appendActivityLog(`→ Drafts: ${dArr.length}`);
+        setDrafts(dArr);
+        draftsListReadyRunIdRef.current = rid;
+        setDraftsListReadyRunId(rid);
         setDraftsListFailedRunId(null);
+      }
+      if (includeContacts || includeDrafts) {
         try {
-          const cp = cArr
-            .slice(0, MAX_CONTACTS_PANEL_LITE)
-            .map(stripContactForPanelLite)
-            .filter(Boolean);
-          const dp = draftsForRunPanelLitePreview(draftsData)
-            .map(stripDraftForPanelLite)
-            .filter(Boolean);
-          snapshotMergeWriteRunPanelLite(rid, { contactsPreview: cp, draftsPreview: dp });
+          const partial = {};
+          if (includeContacts) {
+            const cArr = Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData);
+            partial.contactsPreview = cArr
+              .slice(0, MAX_CONTACTS_PANEL_LITE)
+              .map(stripContactForPanelLite)
+              .filter(Boolean);
+          }
+          if (includeDrafts) {
+            const dArr = Array.isArray(draftsData) ? draftsData : [];
+            partial.draftsPreview = draftsForRunPanelLitePreview(dArr)
+              .map(stripDraftForPanelLite)
+              .filter(Boolean);
+          }
+          snapshotMergeWriteRunPanelLite(rid, partial);
         } catch {
           /* panel lite is best-effort */
         }
@@ -1745,9 +1817,9 @@ export default function AiBizOsHumanUI() {
       if (runDetailsLoadGenRef.current !== myGen) return null;
       if (runLoadTargetRef.current === rid) {
         setRunDetailsHydratedId(null);
-        if (includeLists) {
-          setDraftsListFailedRunId(rid);
-          setContactsListFailedRunId(rid);
+        if (includeContacts || includeDrafts) {
+          if (includeContacts) setContactsListFailedRunId(rid);
+          if (includeDrafts) setDraftsListFailedRunId(rid);
         } else {
           /**
            * Core-only load does not fetch /email-drafts — if it fails while section GETs are still
@@ -1805,7 +1877,7 @@ export default function AiBizOsHumanUI() {
         rowHint && updated && typeof updated === "object"
           ? { ...rowHint, ...updated, project_id: Number(updated.project_id ?? pid) }
           : updated ?? rowHint;
-      void loadRunDetails(rid, hintForLoad, { includeLists: false });
+      void loadRunDetails(rid, hintForLoad);
     } catch (e) {
       const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
       appendActivityLog(`Run ${rid}: move to project ${pid} failed — ${msg}`, {
@@ -1820,7 +1892,7 @@ export default function AiBizOsHumanUI() {
 
   /**
    * Workspace-lite + Total performance only — updates Run setup counts, Run performance, hourly chart, sidebar cards.
-   * Does not reload contacts, drafts, or steps (avoids multi‑second full bundle on every tick).
+   * Does not reload contacts or drafts (avoids multi‑second full bundle on every tick).
    */
   const refreshRunMetricsOnly = useCallback((runId) => {
     if (!runId) return;
@@ -2023,7 +2095,7 @@ export default function AiBizOsHumanUI() {
       const seq = ++draftsListFetchSeqRef.current;
       draftsSectionFetchDepthRef.current += 1;
       setDraftsSectionFetchBusy(true);
-      appendActivityLog(`Drafts: GET ${emailDraftsRunListPath(runId)} (body field in list)`);
+      appendActivityLog(`Drafts: GET ${emailDraftsRunListPath(runId)} (compact list, body_preview)`);
       const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       try {
         const draftsData = await fetchAllPagedItems(
@@ -2290,6 +2362,15 @@ export default function AiBizOsHumanUI() {
       assetPacketsLoadedForRunIdRef.current = null;
       return;
     }
+    if (!mainNavNeedsParentAssetsFetch(mainNav)) {
+      assetsFetchGenerationRef.current += 1;
+      appendRunTraceLog("assets/packets effect: skipped (nav does not use parent assets — avoid starving /contacts)", {
+        runId: rid,
+        mainNav,
+        gen: assetsFetchGenerationRef.current,
+      });
+      return;
+    }
     const gen = ++assetsFetchGenerationRef.current;
     appendRunTraceLog("assets/packets effect: fetch start (parent)", {
       runId: rid,
@@ -2299,8 +2380,8 @@ export default function AiBizOsHumanUI() {
     void (async () => {
       try {
         const [assetsData, packetsData] = await Promise.all([
-          api(`/assets`),
-          api(`/asset-packets/run/${rid}`),
+          api(`/assets`, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+          api(`/asset-packets/run/${rid}`, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
         ]);
         if (gen !== assetsFetchGenerationRef.current) {
           appendRunTraceLog("assets/packets effect: discard (stale gen after await)", {
@@ -2344,7 +2425,7 @@ export default function AiBizOsHumanUI() {
         });
       }
     })();
-  }, [selectedRun?.id, appendRunTraceLog]);
+  }, [selectedRun?.id, mainNav, appendRunTraceLog]);
 
   useEffect(() => {
     if (mainNav === "assets") void loadSetupIntegration();
@@ -2544,19 +2625,17 @@ export default function AiBizOsHumanUI() {
           const cardSnap = snapshotReadRunCards(targetId);
           setSelectedRun(runRow);
           setWorkspace(snapshotMergeWorkspaceFromRunCards(cardSnap, runRow));
-          await loadRunDetails(targetId, runRow);
+          await loadRunDetails(targetId, runRow, { ...listInclusionsForMainNav(mainNav) });
         } else {
           const sr = selectedRunRef.current;
           const orphan = sr && Number(sr.project_id) !== Number(pid);
           if (orphan) {
             setSelectedRun(sr);
-            setSteps([]);
             setContacts([]);
             setDrafts([]);
-            void loadRunDetails(sr.id, sr, { includeLists: false });
+            void loadRunDetails(sr.id, sr);
           } else {
             setSelectedRun(null);
-            setSteps([]);
             setContacts([]);
             setDrafts([]);
             setWorkspace(null);
@@ -2574,7 +2653,7 @@ export default function AiBizOsHumanUI() {
       }
     })();
     return () => ac.abort();
-  }, [selectedProject, appendActivityLog]);
+  }, [selectedProject, appendActivityLog, mainNav]);
 
   useEffect(() => {
     const pid = selectedProject ? projectPk(selectedProject) : null;
@@ -2616,23 +2695,27 @@ export default function AiBizOsHumanUI() {
 
   /**
    * Per-section list load from DB. Depends on *ready run id* so we re-fetch when lists were cleared
-   * (e.g. loadRunDetails(..., { includeLists: true }) on the same run) while nav did not change.
+   * (e.g. loadRunDetails with `includeDrafts` on the same run) while nav did not change.
    */
   useEffect(() => {
     const rid = Number(selectedRun?.id);
     if (!Number.isFinite(rid) || rid <= 0) return;
     if (mainNav !== "drafts") return;
     if (draftsListReadyRunId === rid) return;
+    /** Avoid duplicating GETs while `loadRunDetails` already loads drafts for this run. */
+    if (runDetailsLoading) return;
     void refreshRunDraftsOnly(rid);
-  }, [selectedRun?.id, mainNav, draftsListReadyRunId, refreshRunDraftsOnly]);
+  }, [selectedRun?.id, mainNav, draftsListReadyRunId, refreshRunDraftsOnly, runDetailsLoading]);
 
   useEffect(() => {
     const rid = Number(selectedRun?.id);
     if (!Number.isFinite(rid) || rid <= 0) return;
     if (mainNav !== "contacts" && mainNav !== "contact-analyzer") return;
     if (contactsListReadyRunId === rid) return;
+    /** Avoid duplicating GETs while `loadRunDetails` already loads contacts for this run. */
+    if (runDetailsLoading) return;
     void refreshRunContactsOnly(rid);
-  }, [selectedRun?.id, mainNav, contactsListReadyRunId, refreshRunContactsOnly]);
+  }, [selectedRun?.id, mainNav, contactsListReadyRunId, refreshRunContactsOnly, runDetailsLoading]);
 
   /** Clear “generating draft” when a reviewable draft row appears for that contact (not `sent` — those are hidden from Review). */
   useEffect(() => {
@@ -2690,7 +2773,6 @@ export default function AiBizOsHumanUI() {
       await api(`/projects/${projectId}/archive`, { method: "POST" });
       if (selectedProject?.id === projectId) {
         setSelectedRun(null);
-        setSteps([]);
         setContacts([]);
         setDrafts([]);
       }
@@ -2845,7 +2927,7 @@ export default function AiBizOsHumanUI() {
           setUiError(setError, e);
         }
       }
-      await loadRunDetails(run.id, undefined, { includeLists: true });
+      await loadRunDetails(run.id, undefined, { ...listInclusionsForMainNav(mainNav) });
       if (styleToSave) {
         void refreshRunContactsAndDrafts(run.id);
       }
@@ -2978,7 +3060,7 @@ export default function AiBizOsHumanUI() {
       const ordered = orderRunsOpenFirst(runs);
       setRunsList(ordered);
       const nextOpen = ordered.find((r) => !r.closed_at);
-      await loadRunDetails(nextOpen ? nextOpen.id : closedId, undefined, { includeLists: true });
+      await loadRunDetails(nextOpen ? nextOpen.id : closedId, undefined, { ...listInclusionsForMainNav(mainNav) });
     } catch (e) {
       setUiError(setError, e);
     }
@@ -2986,7 +3068,7 @@ export default function AiBizOsHumanUI() {
 
   const openRunById = async (runId, runRowHint) => {
     setSwitchRunOpen(false);
-    await loadRunDetails(runId, runRowHint);
+    await loadRunDetails(runId, runRowHint, { ...listInclusionsForMainNav(mainNav) });
     if (selectedProject) {
       try {
         const pid = projectPk(selectedProject);
@@ -3041,7 +3123,7 @@ export default function AiBizOsHumanUI() {
           if (selectedRunIdRef.current === runId) {
             void loadRunDetails(runId, undefined, {
               requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
-              includeLists: true,
+              ...listInclusionsForMainNav(mainNavRef.current),
             });
           }
           void loadSetupIntegration();
@@ -3096,7 +3178,7 @@ export default function AiBizOsHumanUI() {
       setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
       void loadRunDetails(run.id, undefined, {
         requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
-        includeLists: true,
+        ...listInclusionsForMainNav(mainNav),
       }).catch((err) => setUiError(setError, err));
     } catch (e) {
       setUiError(setError, e);
@@ -4140,12 +4222,18 @@ export default function AiBizOsHumanUI() {
     );
   }, [displayContactReviewCounts]);
 
-  /** GET /contacts/run for this run not applied yet — list may be empty while tab counts still come from snapshot. */
+  /**
+   * Full GET /contacts/run not applied yet. Tab counts can still come from snapshot — misleading if we
+   * block the whole table; `contactsVisible` falls back to panel-lite preview rows when `contacts` is empty.
+   */
   const contactsReviewListLoading =
     mainNav === "contacts" &&
     selectedRun?.id != null &&
     contactsListReadyRunId !== Number(selectedRun.id) &&
-    contactsListFailedRunId !== Number(selectedRun.id);
+    contactsListFailedRunId !== Number(selectedRun.id) &&
+    contactsVisible.length === 0;
+
+  const contactsActionsReady = contactsListReadyRunId === Number(selectedRun?.id);
 
   /** Tab strip was gated on contactsVisible.length only, so snapshot counts could not show the row until fetch finished. */
   const showContactReviewTabStrip =
@@ -4459,7 +4547,8 @@ export default function AiBizOsHumanUI() {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={contactApproveBusyId === contact.id}
+                disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
+                title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
                 onClick={() =>
                   setEditingContact({
                     id: contact.id,
@@ -4477,8 +4566,9 @@ export default function AiBizOsHumanUI() {
                 {hasEmail ? (
                   <Button
                     size="sm"
-                    disabled={contactApproveBusyId === contact.id}
+                    disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
                     aria-busy={contactApproveBusyId === contact.id}
+                    title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
                     onClick={() => void approveContact(contact.id)}
                   >
                     {contactApproveBusyId === contact.id ? (
@@ -4491,7 +4581,8 @@ export default function AiBizOsHumanUI() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={contactApproveBusyId === contact.id}
+                    disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
+                    title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
                     onClick={() => reviewContact(contact.id, "rejected")}
                   >
                     Reject
@@ -4503,7 +4594,8 @@ export default function AiBizOsHumanUI() {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={contactApproveBusyId === contact.id}
+                disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
+                title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
                 onClick={() => reviewContact(contact.id, "rejected")}
               >
                 Reject
@@ -4512,8 +4604,9 @@ export default function AiBizOsHumanUI() {
             {isRejected && hasEmail ? (
               <Button
                 size="sm"
-                disabled={contactApproveBusyId === contact.id}
+                disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
                 aria-busy={contactApproveBusyId === contact.id}
+                title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
                 onClick={() => void approveContact(contact.id)}
               >
                 {contactApproveBusyId === contact.id ? (
@@ -4530,9 +4623,13 @@ export default function AiBizOsHumanUI() {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={!((contact.email || "").trim())}
+                disabled={!((contact.email || "").trim()) || !contactsActionsReady}
                 title={
-                  !(contact.email || "").trim() ? "Add an email to this contact first" : undefined
+                  !contactsActionsReady
+                    ? "Loading full contact list from server…"
+                    : !(contact.email || "").trim()
+                      ? "Add an email to this contact first"
+                      : undefined
                 }
                 onClick={() => void createDraftForContact(contact.id)}
               >
@@ -5052,15 +5149,13 @@ export default function AiBizOsHumanUI() {
     );
   };
 
+  /** Do not tie Activity spinner to routine GETs (run/contacts/drafts) — it only distracts; use inline placeholders. */
   const activityLogBusy =
     loading ||
-    runDetailsLoading ||
     openRunEditLoading ||
     companiesLoading ||
     analyzerLoading ||
     continueCompanyFindLoading ||
-    draftsSectionFetchBusy ||
-    contactsSectionFetchBusy ||
     Object.keys(restartsInFlight).length > 0;
   const showActivityLogPanel =
     !activityLogDismissed && (activityLogBusy || activityLogLines.length > 0);
@@ -6317,6 +6412,12 @@ export default function AiBizOsHumanUI() {
                           </Button>
                         </div>
 
+                        {!contactsActionsReady && contactsVisible.length > 0 ? (
+                          <p className="text-xs text-muted-foreground" role="status">
+                            Syncing full list from server — review actions stay off until the request finishes.
+                          </p>
+                        ) : null}
+
                         {contactsListFailedRunId === Number(selectedRun?.id) ? (
                           <div
                             className="flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
@@ -6336,14 +6437,9 @@ export default function AiBizOsHumanUI() {
                             </Button>
                           </div>
                         ) : contactsReviewListLoading ? (
-                          <div
-                            className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
-                            role="status"
-                            aria-live="polite"
-                          >
-                            <Loader2 className="h-8 w-8 shrink-0 animate-spin text-primary" aria-hidden />
-                            <p>Loading contacts…</p>
-                          </div>
+                          <p className="rounded-2xl border border-dashed border-muted-foreground/30 py-8 text-center text-sm text-muted-foreground" role="status">
+                            Loading contacts…
+                          </p>
                         ) : contactReviewTabGroups.length === 0 ? (
                           <div className="text-sm text-muted-foreground">
                             {contactReviewTab === "pending"
@@ -6622,7 +6718,7 @@ export default function AiBizOsHumanUI() {
                         </div>
                         {reviewDraftsSnapModeVal === "loading" && draftsPanelLiteFiltered.length > 0 ? (
                           <>
-                            {draftsSectionFetchBusy || runDetailsLoading ? (
+                            {draftsSectionFetchBusy ? (
                               <p className="text-xs text-muted-foreground" role="status">
                                 Showing cached preview — loading full list…
                               </p>

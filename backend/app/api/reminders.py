@@ -15,6 +15,7 @@ from app.schemas.reminder import (
     ReminderRead,
     ReminderSnoozeUpdate,
     ReminderStatusUpdate,
+    reminder_to_read,
 )
 from app.services.reminder_scheduler import trigger_due_reminders
 from app.services.reminder_service import create_reminder_for_follow_up_task
@@ -25,12 +26,12 @@ router = APIRouter(prefix="/reminders", tags=["reminders"])
 
 @router.get("/run/{run_id}", response_model=list[ReminderRead])
 def list_reminders_for_run(run_id: int, db: Session = Depends(get_db)):
-    return list_reminders_by_run(db, run_id)
+    return [reminder_to_read(r) for r in list_reminders_by_run(db, run_id)]
 
 
 @router.get("/follow-up-task/{follow_up_task_id}", response_model=list[ReminderRead])
 def list_reminders_for_follow_up_task(follow_up_task_id: int, db: Session = Depends(get_db)):
-    return list_reminders_by_follow_up_task(db, follow_up_task_id)
+    return [reminder_to_read(r) for r in list_reminders_by_follow_up_task(db, follow_up_task_id)]
 
 
 @router.post("/follow-up-task/{follow_up_task_id}/create")
@@ -78,12 +79,13 @@ def update_reminder_status_route(
     if payload.status not in {"scheduled", "triggered", "completed", "cancelled", "snoozed"}:
         raise HTTPException(status_code=400, detail="Invalid reminder status")
 
-    return update_reminder_status(
+    updated = update_reminder_status(
         db=db,
         reminder=reminder,
         status=payload.status,
         output_json=payload.output_json,
     )
+    return reminder_to_read(updated)
 
 
 @router.patch("/{reminder_id}/snooze", response_model=ReminderRead)
@@ -96,12 +98,13 @@ def snooze_reminder_route(
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
 
-    return snooze_reminder(
+    updated = snooze_reminder(
         db=db,
         reminder=reminder,
         remind_at=payload.remind_at,
         output_json=payload.output_json,
     )
+    return reminder_to_read(updated)
 
 
 @router.post("/trigger-due")

@@ -5,8 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.models.email_draft import EmailDraft
 from app.repositories.contact_repo import get_contact
+from app.utils.contact_source_payload import effective_contact_source_json
 from app.repositories.draft_attachment_repo import replace_email_draft_assets
 from app.utils.attached_asset_ids import normalize_attached_asset_ids
+from app.utils.email_draft_generation_meta import apply_generation_meta_to_draft
 
 
 def create_email_draft(
@@ -139,7 +141,7 @@ def list_sendable_replacement_email_drafts_by_run(db: Session, run_id: int) -> l
         contact = get_contact(db, draft.contact_id)
         if not contact:
             continue
-        source_json = contact.source_json or {}
+        source_json = effective_contact_source_json(db, contact)
         if source_json.get("source") == "replacement_search":
             result.append(draft)
 
@@ -183,7 +185,7 @@ def update_email_draft_outreach_regenerate(
     draft.company = company
     draft.to_email = to_email
     if generation_meta_json is not None:
-        draft.generation_meta_json = generation_meta_json
+        apply_generation_meta_to_draft(draft, generation_meta_json)
     draft.status = "draft"
     draft.tracking_status = "draft"
     draft.review_status = "pending"

@@ -20,6 +20,7 @@ def effective_attached_asset_ids_for_email_draft(db: Session, draft) -> list[int
 
 
 def effective_attached_asset_ids_for_reply_draft(db: Session, draft) -> list[int]:
+    """Prefer reply_draft_assets; fall back to JSON only if junction is empty (pre-migration rows)."""
     if count_reply_draft_assets(db, draft.id) > 0:
         return list_asset_ids_for_reply_draft(db, draft.id)
     return normalize_attached_asset_ids(draft.attached_asset_ids)

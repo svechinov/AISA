@@ -31,4 +31,5 @@ class ReplyDraft(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
+    #: Legacy; kept empty after migration — canonical ids are reply_draft_assets rows
     attached_asset_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

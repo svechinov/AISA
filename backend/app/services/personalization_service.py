@@ -13,6 +13,8 @@ from app.models.contact import Contact
 from app.repositories.project_repo import get_project
 from app.repositories.run_repo import get_run
 from app.services.run_context_service import get_effective_context
+from app.utils.contact_personalization_io import save_personalization_dict
+from app.utils.contact_source_payload import effective_contact_source_json
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ def _facts_from_source_json(source_json: dict | None) -> list[str]:
     return out
 
 
-def _base_facts(contact: Contact) -> list[str]:
+def _base_facts(contact: Contact, source_json: dict | None) -> list[str]:
     facts: list[str] = []
     company = _coalesce_str(contact.company)
     if company:
@@ -65,7 +67,7 @@ def _base_facts(contact: Contact) -> list[str]:
     if website:
         facts.append(f"Listed site: {website}.")
     name = _coalesce_str(contact.name)
-    role = _coalesce_str(contact.role) or _role_from_source_json(contact.source_json or {})
+    role = _coalesce_str(contact.role) or _role_from_source_json(source_json or {})
     if name and role:
         facts.append(f"Contact: {name} ({role}).")
     elif name:
@@ -84,14 +86,20 @@ def _role_from_source_json(sj: dict) -> str:
 
 
 def build_personalization(
+    db: Session,
     contact: Contact,
     run: Any | None,
     project: Any | None,
 ) -> dict[str, Any]:
     """
-    Build personalization_json for a contact. Uses only DB fields + source_json strings
-    (no web fetch, no LLM). Safe to call before contact.id exists (uses row fields only).
+    Build personalization payload for a contact. Uses only DB fields + source strings
+    (no web fetch, no LLM). Requires contact.id when using relational source_kv.
     """
+    sj: dict[str, Any] = {}
+    if getattr(contact, "id", None) is not None:
+        sj = effective_contact_source_json(db, contact)
+    else:
+        sj = dict(contact.source_json or {})
     ctx = get_effective_context(run) if run else {}
     offer = _coalesce_str(ctx.get("offer"))
     goal = _coalesce_str(ctx.get("goal"))
@@ -101,17 +109,17 @@ def build_personalization(
     notes = _coalesce_str(ctx.get("notes"))
 
     company = _coalesce_str(contact.company)
-    role = _coalesce_str(contact.role) or _role_from_source_json(contact.source_json or {})
+    role = _coalesce_str(contact.role) or _role_from_source_json(sj)
     proj_name = _coalesce_str(getattr(project, "name", None)) if project else ""
 
     company_facts: list[str] = []
     seen: set[str] = set()
-    for fact in _base_facts(contact):
+    for fact in _base_facts(contact, sj):
         key = fact.lower()
         if key not in seen:
             seen.add(key)
             company_facts.append(fact)
-    for fact in _facts_from_source_json(contact.source_json):
+    for fact in _facts_from_source_json(sj):
         key = fact.lower()
         if key not in seen:
             seen.add(key)
@@ -168,10 +176,15 @@ def build_personalization(
 
 
 def sync_contact_personalization_row(db: Session, contact: Contact) -> None:
-    """Recompute and assign contact.personalization_json (caller commits)."""
+    """Recompute and persist contact_personalization (+ facts); clears legacy personalization_json."""
     run = get_run(db, contact.run_id)
     project = get_project(db, run.project_id) if run else None
-    contact.personalization_json = build_personalization(contact, run, project)
+    d = build_personalization(db, contact, run, project)
+    if contact.id is None:
+        contact.personalization_json = d
+        return
+    save_personalization_dict(db, contact.id, d)
+    contact.personalization_json = {}
 
 
 def resync_personalization_for_run(db: Session, run_id: int) -> int:
@@ -238,7 +251,7 @@ def backfill_empty_personalization_json(db: Session, *, batch_size: int = 500) -
         for c in contacts:
             run = _cached_run(c.run_id)
             proj = _cached_proj(run.project_id) if run else None
-            c.personalization_json = build_personalization(c, run, proj)
+            sync_contact_personalization_row(db, c)
             db.add(c)
         db.commit()
         total += len(contacts)

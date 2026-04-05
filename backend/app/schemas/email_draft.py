@@ -6,6 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.utils.attached_asset_ids import normalize_attached_asset_ids
 from app.utils.draft_attached_assets import effective_attached_asset_ids_for_email_draft
+from app.utils.email_draft_generation_meta import (
+    effective_generation_meta_json,
+    effective_prompt_setup_text_used,
+)
 from app.utils.email_preview import email_body_preview_text
 
 
@@ -84,13 +88,7 @@ class PaginatedEmailDraftListResponse(BaseModel):
 
 
 def _prompt_setup_used_from_draft_row(d) -> str | None:
-    meta = getattr(d, "generation_meta_json", None)
-    if not isinstance(meta, dict):
-        return None
-    v = meta.get("prompt_setup_text_used")
-    if not isinstance(v, str) or not v.strip():
-        return None
-    return v.strip()
+    return effective_prompt_setup_text_used(d)
 
 
 def email_draft_to_list_read(
@@ -147,7 +145,7 @@ def email_draft_to_read(db: Session, d) -> EmailDraftRead:
         reviewed_at=d.reviewed_at,
         created_at=d.created_at,
         attached_asset_ids=effective_attached_asset_ids_for_email_draft(db, d),
-        generation_meta_json=d.generation_meta_json,
+        generation_meta_json=effective_generation_meta_json(d),
     )
 
 

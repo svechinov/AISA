@@ -10,7 +10,10 @@ from app.models.step import Step
 from app.repositories.run_repo import get_run
 from app.repositories.run_company_repo import get_company_dict_at_index, list_run_companies_sparse
 from app.repositories.step_repo import create_step, get_step_by_run_and_name, mark_step_completed
-from app.services.contact_persistence_service import persist_validated_contacts
+from app.services.contact_persistence_service import (
+    contacts_raw_for_pipeline_dicts,
+    persist_validated_contacts,
+)
 from app.services.orchestrator import _merge_contacts
 from app.services.run_companies_status_service import _contact_matches_company, _entity_keys
 from app.workers.contacts_worker import find_contacts, validate_contacts
@@ -64,11 +67,7 @@ def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
     if find_completed:
         raise ValueError("Find contacts step is already completed")
 
-    raw_contacts: list = []
-    if step_find and isinstance(step_find.output_json, dict):
-        rc = step_find.output_json.get("contacts")
-        if isinstance(rc, list):
-            raw_contacts = [x for x in rc if isinstance(x, dict)]
+    raw_contacts = contacts_raw_for_pipeline_dicts(db, run_id)
 
     pending_companies: list[dict] = []
     for co in raw_companies:
@@ -86,13 +85,26 @@ def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
     if not pending_companies:
         if not step_find:
             step_find = create_step(db, run_id, "find_contacts", {}, commit=True)
-        mark_step_completed(db, step_find, {"contacts": raw_contacts}, commit=True)
+        mark_step_completed(
+            db,
+            step_find,
+            {"contacts_count": len(raw_contacts)},
+            commit=True,
+        )
         vin = {"contacts": raw_contacts}
         last_validate = validate_contacts(db, run_id, run.workflow_name, vin)
         st_v = get_step_by_run_and_name(db, run_id, "validate_contacts")
         if not st_v:
             st_v = create_step(db, run_id, "validate_contacts", vin, commit=True)
-        mark_step_completed(db, st_v, last_validate, commit=True)
+        mark_step_completed(
+            db,
+            st_v,
+            {
+                "valid_count": len(last_validate.get("valid_contacts") or []),
+                "invalid_count": len(last_validate.get("invalid_contacts") or []),
+            },
+            commit=True,
+        )
         persist_validated_contacts(db, run_id, last_validate, commit=True)
         return {
             "contacts_before": len(raw_contacts),
@@ -189,7 +201,7 @@ def _merge_validate_persist_locked(
     use_row_lock: bool,
 ) -> dict:
     """
-    Read latest find_contacts output, merge batch, re-validate, persist.
+    Merge batch into contacts from DB, re-validate, persist (steps store counts only).
     When use_row_lock=True (Postgres, etc.), run in one transaction with FOR UPDATE.
     When False (SQLite under process lock), use normal commits after each repo call.
     """
@@ -212,22 +224,35 @@ def _merge_validate_persist_locked(
                 .with_for_update()
                 .first()
             )
-            out_f = step_find.output_json if isinstance(step_find.output_json, dict) else {}
-            existing = out_f.get("contacts")
-            if not isinstance(existing, list):
-                existing = []
+            existing = contacts_raw_for_pipeline_dicts(db, run_id)
             before = len(existing)
             merged = _merge_contacts(existing, batch)
             after = len(merged)
 
-            mark_step_completed(db, step_find, {"contacts": merged}, commit=False)
+            mark_step_completed(
+                db,
+                step_find,
+                {
+                    "contacts_count": after,
+                    "batch_size": len(batch),
+                },
+                commit=False,
+            )
 
             vin = {"contacts": merged}
             last_validate = validate_contacts(db, run_id, workflow_name, vin)
             st_v = step_validate
             if not st_v:
                 st_v = create_step(db, run_id, "validate_contacts", vin, commit=False)
-            mark_step_completed(db, st_v, last_validate, commit=False)
+            mark_step_completed(
+                db,
+                st_v,
+                {
+                    "valid_count": len(last_validate.get("valid_contacts") or []),
+                    "invalid_count": len(last_validate.get("invalid_contacts") or []),
+                },
+                commit=False,
+            )
             persist_validated_contacts(db, run_id, last_validate, commit=False)
             db.commit()
         except Exception:
@@ -243,22 +268,35 @@ def _merge_validate_persist_locked(
     step_find = get_step_by_run_and_name(db, run_id, "find_contacts")
     if not step_find:
         raise ValueError("Find contacts step missing")
-    out_f = step_find.output_json if isinstance(step_find.output_json, dict) else {}
-    existing = out_f.get("contacts")
-    if not isinstance(existing, list):
-        existing = []
+    existing = contacts_raw_for_pipeline_dicts(db, run_id)
     before = len(existing)
     merged = _merge_contacts(existing, batch)
     after = len(merged)
 
-    mark_step_completed(db, step_find, {"contacts": merged}, commit=True)
+    mark_step_completed(
+        db,
+        step_find,
+        {
+            "contacts_count": after,
+            "batch_size": len(batch),
+        },
+        commit=True,
+    )
 
     vin = {"contacts": merged}
     last_validate = validate_contacts(db, run_id, workflow_name, vin)
     st_v = get_step_by_run_and_name(db, run_id, "validate_contacts")
     if not st_v:
         st_v = create_step(db, run_id, "validate_contacts", vin, commit=True)
-    mark_step_completed(db, st_v, last_validate, commit=True)
+    mark_step_completed(
+        db,
+        st_v,
+        {
+            "valid_count": len(last_validate.get("valid_contacts") or []),
+            "invalid_count": len(last_validate.get("invalid_contacts") or []),
+        },
+        commit=True,
+    )
     persist_validated_contacts(db, run_id, last_validate, commit=True)
 
     return {

@@ -551,10 +551,13 @@ export default function TrackingView({
     setError("");
     let ok = false;
     try {
-      // Load assets/packets first so the Assets tab is not blocked by many parallel /run/* requests
-      // (browser HTTP/1.1 connection limits can delay starting GET /assets otherwise).
-      await fetchStaticAssets();
+      // Load run-scoped tracking first so Events/Threads can leave "cached — refreshing…" as soon as
+      // /email-events, /email-threads, etc. return. Assets/packets load after — if /assets hangs, we
+      // still must not block thread/event UI (previously fetchStaticAssets ran first and could stall
+      // the whole load before fetchLiveData ever ran).
       await fetchLiveData();
+      setTrackingCountsReady(true);
+      await fetchStaticAssets();
       ok = true;
     } catch (err) {
       const msg = String(err?.message || err || "");
@@ -568,7 +571,6 @@ export default function TrackingView({
       }
     } finally {
       setLoading(false);
-      if (ok) setTrackingCountsReady(true);
       if (ok) trace("load() finished OK", { runId });
     }
   }, [runId, fetchLiveData, fetchStaticAssets, trace]);

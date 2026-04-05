@@ -12,6 +12,33 @@ from app.models.reply_draft import ReplyDraft
 from app.models.research_task import ResearchTask
 from app.services.personalization_service import sync_contact_personalization_row
 from app.utils.contact_identity import contact_identity_key_from_dict, contact_identity_key_from_row
+from app.utils.contact_source_payload import effective_contact_source_json, persist_contact_source
+
+
+def contact_row_to_pipeline_dict(db: Session, c: Contact) -> dict:
+    """Shape expected by validate_contacts / _merge_contacts (matches orchestrator seed)."""
+    row = {
+        "company": c.company,
+        "website": c.website,
+        "name": c.name,
+        "role": c.role,
+        "email": c.email,
+        "linkedin": c.linkedin,
+        "confidence": c.confidence,
+    }
+    sj = effective_contact_source_json(db, c)
+    return {**sj, **{k: v for k, v in row.items() if v is not None}}
+
+
+def contacts_raw_for_pipeline_dicts(db: Session, run_id: int) -> list[dict]:
+    """All contact rows for the run (no UI dedupe) — canonical merge/validate seed."""
+    rows = (
+        db.query(Contact)
+        .filter(Contact.run_id == run_id)
+        .order_by(Contact.id.asc())
+        .all()
+    )
+    return [contact_row_to_pipeline_dict(db, c) for c in rows]
 
 
 def _norm_email(contact: dict) -> str:
@@ -134,7 +161,8 @@ def persist_validated_contacts(
                 hit.linkedin = base["linkedin"]
                 hit.status = status
                 hit.confidence = base["confidence"]
-                hit.source_json = sj
+                hit.source_json = {}
+                persist_contact_source(db, hit, sj)
                 sync_contact_personalization_row(db, hit)
                 db.add(hit)
                 return
@@ -151,7 +179,8 @@ def persist_validated_contacts(
                 hit_ne.linkedin = base["linkedin"]
                 hit_ne.status = status
                 hit_ne.confidence = base["confidence"]
-                hit_ne.source_json = sj
+                hit_ne.source_json = {}
+                persist_contact_source(db, hit_ne, sj)
                 sync_contact_personalization_row(db, hit_ne)
                 db.add(hit_ne)
                 return
@@ -166,13 +195,14 @@ def persist_validated_contacts(
             linkedin=base["linkedin"],
             status=status,
             confidence=base["confidence"],
-            source_json=sj,
+            source_json={},
             review_status="pending",
             review_notes=None,
         )
-        sync_contact_personalization_row(db, row)
         db.add(row)
         db.flush()
+        persist_contact_source(db, row, sj)
+        sync_contact_personalization_row(db, row)
         db.refresh(row)
         new_count += 1
         if em and "@" in em:

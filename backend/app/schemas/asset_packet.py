@@ -41,7 +41,7 @@ class AssetPacketRead(BaseModel):
             description=packet.description,
             status=packet.status,
             assets=get_ordered_asset_refs_for_packet(db, packet),
-            packet_json=packet_metadata_json_for_api(packet),
+            packet_json=packet_metadata_json_for_api(db, packet),
             created_at=packet.created_at,
         )
 

@@ -1,11 +1,12 @@
 from datetime import datetime
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
 from app.services.personalization_service import sync_contact_personalization_row
 from app.utils.contact_identity import contact_identity_key_from_row
+from app.utils.contact_source_payload import effective_contact_source_json, persist_contact_source
 
 
 def create_contact(
@@ -23,6 +24,7 @@ def create_contact(
     review_status: str = "pending",
     review_notes: str | None = None,
 ) -> Contact:
+    sj = source_json or {}
     contact = Contact(
         run_id=run_id,
         company=company,
@@ -33,12 +35,14 @@ def create_contact(
         linkedin=linkedin,
         status=status,
         confidence=confidence,
-        source_json=source_json or {},
+        source_json={},
         review_status=review_status,
         review_notes=review_notes,
     )
-    sync_contact_personalization_row(db, contact)
     db.add(contact)
+    db.flush()
+    persist_contact_source(db, contact, sj)
+    sync_contact_personalization_row(db, contact)
     db.commit()
     db.refresh(contact)
     return contact
@@ -47,14 +51,16 @@ def create_contact(
 _REVIEW_RANK = {"pending": 0, "rejected": 1, "approved": 2, "edited": 2}
 
 
-def list_contacts_by_run(db: Session, run_id: int) -> list[Contact]:
-    """One visible row per normalized email; legacy duplicates collapse (draft / review / id tie-break)."""
-    rows = (
-        db.query(Contact)
-        .filter(Contact.run_id == run_id)
-        .order_by(Contact.id.asc())
-        .all()
-    )
+def list_contacts_by_run(db: Session, run_id: int, *, load_json: bool = True) -> list[Contact]:
+    """One visible row per normalized email; legacy duplicates collapse (draft / review / id tie-break).
+
+    When ``load_json`` is False, ``source_json`` and ``personalization_json`` are deferred so the initial
+    query does not pull multi‑MB blobs. GET /contacts/run never hydrates them — list payloads use scalars only.
+    """
+    q = db.query(Contact).filter(Contact.run_id == run_id).order_by(Contact.id.asc())
+    if not load_json:
+        q = q.options(defer(Contact.source_json), defer(Contact.personalization_json))
+    rows = q.all()
     if not rows:
         return []
 
@@ -170,7 +176,7 @@ def list_approved_replacement_contacts_by_run(db: Session, run_id: int) -> list[
 
     result: list[Contact] = []
     for contact in contacts:
-        source_json = contact.source_json or {}
+        source_json = effective_contact_source_json(db, contact)
         if source_json.get("source") == "replacement_search":
             result.append(contact)
 
@@ -194,7 +200,7 @@ def find_replacement_contact_for_source(
     )
 
     for contact in contacts:
-        source_json = contact.source_json or {}
+        source_json = effective_contact_source_json(db, contact)
         if source_json.get("replaces_contact_id") == source_contact_id:
             return contact
 
@@ -215,6 +221,11 @@ def create_replacement_contact(
     confidence: str | None = None,
 ) -> Contact:
     """Always a new row; never updates the dead-mailbox source contact."""
+    sj = {
+        "source": "replacement_search",
+        "replaces_contact_id": source_contact_id,
+        "research_task_id": research_task_id,
+    }
     contact = Contact(
         run_id=run_id,
         company=company,
@@ -228,14 +239,12 @@ def create_replacement_contact(
         review_status="pending",
         review_notes=None,
         email_health="unknown",
-        source_json={
-            "source": "replacement_search",
-            "replaces_contact_id": source_contact_id,
-            "research_task_id": research_task_id,
-        },
+        source_json={},
     )
-    sync_contact_personalization_row(db, contact)
     db.add(contact)
+    db.flush()
+    persist_contact_source(db, contact, sj)
+    sync_contact_personalization_row(db, contact)
     db.commit()
     db.refresh(contact)
     return contact

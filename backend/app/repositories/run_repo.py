@@ -4,8 +4,18 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models.run import Run
 from app.models.run_setup import RunSetup
+from app.utils.run_relational_payload import (
+    inner_from_context_json_blob,
+    persist_run_context_extras_from_blob,
+    persist_run_input_from_blob,
+    replace_master_email_variants,
+    upsert_run_outreach_context_row,
+)
 from app.repositories.project_repo import get_project
-from app.services.run_context_service import wrap_context
+from app.repositories.run_human_ui_repo import (
+    delete_human_ui_from_context_json,
+    merge_event_chain_collapsed,
+)
 
 
 def create_run(
@@ -23,14 +33,20 @@ def create_run(
         project_id=project_id,
         workflow_name=workflow_name,
         status="pending",
-        input_json=input_json,
+        input_json={},
         name=name,
         notes=notes,
         segment=segment,
-        context_json=context_json or {},
+        context_json={},
         master_prompt=master_prompt,
     )
     db.add(run)
+    db.flush()
+    ctx = context_json or {}
+    inner = inner_from_context_json_blob(ctx)
+    upsert_run_outreach_context_row(db, run.id, inner)
+    persist_run_context_extras_from_blob(db, run.id, ctx)
+    persist_run_input_from_blob(db, run, input_json or {})
     db.commit()
     db.refresh(run)
     return run
@@ -39,7 +55,11 @@ def create_run(
 def get_run(db: Session, run_id: int) -> Run | None:
     return (
         db.query(Run)
-        .options(selectinload(Run.run_setup))
+        .options(
+            selectinload(Run.run_setup),
+            selectinload(Run.outreach_context),
+            selectinload(Run.master_email_variants),
+        )
         .filter(Run.id == run_id)
         .first()
     )
@@ -48,7 +68,11 @@ def get_run(db: Session, run_id: int) -> Run | None:
 def list_runs_by_project(db: Session, project_id: int) -> list[Run]:
     return (
         db.query(Run)
-        .options(selectinload(Run.run_setup))
+        .options(
+            selectinload(Run.run_setup),
+            selectinload(Run.outreach_context),
+            selectinload(Run.master_email_variants),
+        )
         .filter(Run.project_id == project_id)
         .order_by(Run.id.desc())
         .all()
@@ -90,11 +114,12 @@ def update_run_master_email_variants(
     run: Run,
     variants: list[dict[str, str]],
 ) -> Run:
-    """Persist canonical outreach: run.master_email = {\"variants\": [...]}."""
-    run.master_email = {"variants": list(variants)}
+    """Persist canonical outreach variants (relational + legacy columns for first variant)."""
+    replace_master_email_variants(db, run.id, list(variants))
+    run.master_email = None
     if variants:
-        run.master_email_subject = variants[0]["subject"]
-        run.master_email_body = variants[0]["body"]
+        run.master_email_subject = variants[0].get("subject")
+        run.master_email_body = variants[0].get("body")
     else:
         run.master_email_subject = None
         run.master_email_body = None
@@ -106,6 +131,13 @@ def update_run_master_email_variants(
 
 def get_run_master_email_parts(run: Run) -> tuple[str, str]:
     """First variant (or legacy flat master_email / columns) for non-send utilities."""
+    vs = getattr(run, "master_email_variants", None) or []
+    if vs:
+        first = sorted(vs, key=lambda x: x.position)[0]
+        s = (first.subject or "").strip()
+        b = (first.body or "").strip()
+        if s and b:
+            return s, b
     me = getattr(run, "master_email", None) or {}
     if isinstance(me, dict):
         vlist = me.get("variants")
@@ -156,7 +188,6 @@ def update_run_signature(db: Session, run_id: int, signature_html: str | None) -
 
 # Legacy key removed from context_json on save; canonical store is run_setups.prompt_setup_text.
 _PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
-_HUMAN_UI_JSON_KEY = "_human_ui"
 
 
 def update_run_human_ui_preferences(
@@ -165,21 +196,13 @@ def update_run_human_ui_preferences(
     *,
     event_chain_collapsed: dict[str, bool] | None = None,
 ) -> Run | None:
-    """Persist dashboard UI flags (per-draft event chain collapse, etc.)."""
+    """Persist dashboard UI flags in ``run_event_chain_collapse`` (not context_json blobs)."""
     run = get_run(db, run_id)
     if not run:
         return None
-    ctx = dict(run.context_json or {})
-    ui = dict(ctx.get(_HUMAN_UI_JSON_KEY) or {})
     if event_chain_collapsed is not None:
-        chain = dict(ui.get("event_chain_collapsed") or {})
-        for k, v in event_chain_collapsed.items():
-            sk = str(k).strip()
-            if not sk:
-                continue
-            chain[sk] = bool(v)
-        ui["event_chain_collapsed"] = chain
-    ctx[_HUMAN_UI_JSON_KEY] = ui
+        merge_event_chain_collapsed(db, run_id, event_chain_collapsed=event_chain_collapsed)
+    ctx = delete_human_ui_from_context_json(dict(run.context_json or {}))
     run.context_json = ctx
     db.add(run)
     db.commit()
@@ -241,11 +264,8 @@ def update_run_outreach_fields(
     if run.closed_at is not None:
         raise ValueError("Cannot update outreach fields on a closed run")
 
-    wrapped = wrap_context(inner)
-    ctx = dict(run.context_json or {})
-    ctx["context"] = wrapped["context"]
-
-    run.context_json = ctx
+    upsert_run_outreach_context_row(db, run.id, inner)
+    run.context_json = {}
     run.notes = (notes or "").strip() or None
     run.segment = (segment or "").strip()
     run.master_prompt = master_prompt
@@ -253,7 +273,8 @@ def update_run_outreach_fields(
     ij = dict(run.input_json or {})
     if inner.get("goal"):
         ij["goal"] = inner["goal"]
-    run.input_json = ij
+    persist_run_input_from_blob(db, run, ij)
+    run.input_json = {}
 
     db.add(run)
     db.commit()

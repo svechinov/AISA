@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, union_all
+from sqlalchemy import func, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
@@ -13,7 +13,6 @@ from app.models.email_draft import EmailDraft
 from app.models.email_event import EmailEvent
 from app.models.reply_draft import ReplyDraft
 from app.models.email_thread import EmailThread
-from app.repositories.contact_repo import list_contacts_by_run
 from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
 from app.repositories.step_repo import get_step_by_run_and_name, list_steps_by_run
@@ -22,7 +21,6 @@ from app.repositories.email_thread_repo import (
     list_email_threads_by_run,
 )
 from app.repositories.run_repo import get_run
-from app.services.run_companies_status_service import _norm, _strip_url
 from app.services.run_context_service import get_prompt_setup_text, get_sender_signature_html
 from app.services.run_summary_service import get_run_summary
 from app.setup_milestones import (
@@ -30,10 +28,6 @@ from app.setup_milestones import (
     SETUP_MILESTONE_CONTACTS,
     SETUP_MILESTONE_VALID_CONTACTS,
 )
-
-# Still approved/edited in DB, but not counted as “ready contacts” in setup summary.
-_UNDELIVERABLE_EMAIL_HEALTH = frozenset({"bounced", "dead_mailbox"})
-
 
 def signature_html_has_meaningful_content(html: str | None) -> bool:
     """Match Human UI `runSignatureHasMeaningfulContent`: strip tags/styles, require non-empty text."""
@@ -55,24 +49,12 @@ _DEFAULT_OUTREACH_BRIEF = (
 
 def _context_from_run_for_prompt_ui(run) -> dict | None:
     """Mirror AiBizOsHumanUI `contextFromRun` for Prompt setup editor default."""
-    cj = run.context_json
-    if not isinstance(cj, dict):
+    from app.services.run_context_service import get_effective_context
+
+    ctx = get_effective_context(run)
+    if not any(str(v or "").strip() for v in ctx.values()):
         return None
-    inner = cj.get("context")
-    use = inner if isinstance(inner, dict) else cj
-    ij = run.input_json if isinstance(run.input_json, dict) else {}
-    goal = (
-        str(use.get("goal") or use.get("outreach_goal") or "").strip()
-        or str(ij.get("goal") or "").strip()
-    )
-    return {
-        "offer": str(use.get("offer") or use.get("product") or "").strip(),
-        "target_entities": str(use.get("target_entities") or "").strip(),
-        "target_roles": str(use.get("target_roles") or "").strip(),
-        "goal": goal,
-        "tone": str(use.get("tone") or "Professional").strip() or "Professional",
-        "notes": str(use.get("notes") or use.get("extra_context") or "").strip(),
-    }
+    return ctx
 
 
 def _context_to_outreach_brief_text(ctx: dict | None) -> str:
@@ -175,47 +157,71 @@ def hourly_send_counts_24h_utc(db: Session, run_id: int) -> list[int]:
     return buckets
 
 
-def _setup_contact_metrics_from_deduped_list(contacts: list[Contact]) -> tuple[int, int, int, int]:
-    """From list_contacts_by_run output: approved_reachable, valid/invalid+email count, distinct companies, no_email."""
-    approved_reachable = 0
-    valid_invalid_with_email = 0
-    distinct_keys: set[str] = set()
-    no_email = 0
-    for c in contacts:
-        email = (c.email or "").strip()
-        if not email:
-            no_email += 1
-        else:
-            if c.status in ("valid", "invalid"):
-                valid_invalid_with_email += 1
-                if k := _canonical_company_key_from_orm_contact(c):
-                    distinct_keys.add(k)
-        if (
-            c.review_status in {"approved", "edited"}
-            and (c.email_health or "unknown") not in _UNDELIVERABLE_EMAIL_HEALTH
-        ):
-            approved_reachable += 1
-    return approved_reachable, valid_invalid_with_email, len(distinct_keys), no_email
-
-
-def _validate_step_email_and_distinct_company_counts(st) -> tuple[int | None, int | None]:
-    """Single pass over validate_contacts step JSON: (rows with email, distinct companies) or (None, None)."""
-    if not st or not isinstance(st.output_json, dict):
-        return None, None
-    v = st.output_json.get("valid_contacts")
-    i = st.output_json.get("invalid_contacts")
-    if not isinstance(v, list) or not isinstance(i, list):
-        return None, None
-    email_count = sum(1 for x in v if _contact_row_has_email(x)) + sum(
-        1 for x in i if _contact_row_has_email(x)
+def _live_validated_email_and_distinct_company_counts_sql(db: Session, run_id: int) -> tuple[int, int]:
+    """COUNT-only: valid/invalid rows with email + distinct company keys (no full ORM list)."""
+    email_count = int(
+        db.query(func.count())
+        .select_from(Contact)
+        .filter(
+            Contact.run_id == run_id,
+            Contact.status.in_(("valid", "invalid")),
+            Contact.email.isnot(None),
+            Contact.email != "",
+        )
+        .scalar()
+        or 0
     )
-    keys: set[str] = set()
-    for row in (*v, *i):
-        if not isinstance(row, dict) or not _contact_row_has_email(row):
-            continue
-        if k := _canonical_company_key_from_contact_row(row):
-            keys.add(k)
-    return email_count, len(keys)
+    distinct_expr = func.concat(
+        func.lower(func.trim(func.coalesce(Contact.company, ""))),
+        "\x1f",
+        func.lower(func.trim(func.coalesce(Contact.website, ""))),
+    )
+    distinct_count = int(
+        db.query(func.count(func.distinct(distinct_expr)))
+        .select_from(Contact)
+        .filter(
+            Contact.run_id == run_id,
+            Contact.status.in_(("valid", "invalid")),
+            Contact.email.isnot(None),
+            Contact.email != "",
+            or_(
+                func.trim(func.coalesce(Contact.company, "")) != "",
+                func.trim(func.coalesce(Contact.website, "")) != "",
+            ),
+        )
+        .scalar()
+        or 0
+    )
+    return email_count, distinct_count
+
+
+def _approved_reachable_and_no_email_counts_sql(db: Session, run_id: int) -> tuple[int, int]:
+    """Approved+reachable count and contacts with empty email (raw rows; no dedupe)."""
+    approved = int(
+        db.query(func.count())
+        .select_from(Contact)
+        .filter(
+            Contact.run_id == run_id,
+            Contact.review_status.in_(["approved", "edited"]),
+            or_(
+                Contact.email_health.is_(None),
+                Contact.email_health.notin_(["bounced", "dead_mailbox"]),
+            ),
+        )
+        .scalar()
+        or 0
+    )
+    no_email = int(
+        db.query(func.count())
+        .select_from(Contact)
+        .filter(
+            Contact.run_id == run_id,
+            or_(Contact.email.is_(None), Contact.email == ""),
+        )
+        .scalar()
+        or 0
+    )
+    return approved, no_email
 
 
 def _live_company_count(db: Session, run_id: int) -> int:
@@ -236,35 +242,14 @@ def _live_contact_count(db: Session, run_id: int) -> int:
     return int(n or 0)
 
 
-def _canonical_company_key_from_contact_row(c: dict) -> str | None:
-    """Stable key for counting distinct companies on contact dicts (find_contacts output)."""
-    if not isinstance(c, dict):
-        return None
-    co = _norm(c.get("company") or "")
-    w = _strip_url(c.get("website") or "")
-    if not co and not w:
-        return None
-    return f"{co}\x1f{w}"
-
-
-def _canonical_company_key_from_orm_contact(c) -> str | None:
-    co = _norm(c.company or "")
-    w = _strip_url(c.website or "")
-    if not co and not w:
-        return None
-    return f"{co}\x1f{w}"
-
-
 def _live_valid_contact_count(db: Session, run_id: int) -> int:
-    st = get_step_by_run_and_name(db, run_id, "validate_contacts")
-    if not st:
-        return 0
-    v = (st.output_json or {}).get("valid_contacts")
-    return len(v) if isinstance(v, list) else 0
-
-
-def _contact_row_has_email(row: dict) -> bool:
-    return isinstance(row, dict) and bool(str(row.get("email") or "").strip())
+    n = (
+        db.query(func.count())
+        .select_from(Contact)
+        .filter(Contact.run_id == run_id, Contact.status == "valid")
+        .scalar()
+    )
+    return int(n or 0)
 
 
 def _thread_is_bounced_or_dead_mailbox_row(
@@ -300,7 +285,10 @@ def _active_threads_count_for_performance(db: Session, run_id: int) -> int:
     threads = list_email_threads_by_run(db, run_id)
     if not threads:
         return 0
-    contacts = {c.id: c for c in list_contacts_by_run(db, run_id)}
+    contact_ids = {t.contact_id for t in threads if t.contact_id}
+    contacts: dict[int, Contact] = {}
+    if contact_ids:
+        contacts = {c.id: c for c in db.query(Contact).filter(Contact.id.in_(contact_ids)).all()}
     drafts_list = list_email_drafts_by_run(db, run_id)
     drafts = {d.id: d for d in drafts_list}
     eff_by_tid = bulk_resolve_thread_outbound_draft_ids(db, run_id, threads, contacts, drafts_list)
@@ -323,27 +311,22 @@ def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int
 
 
 def get_run_setup_summary(db: Session, run_id: int) -> dict:
-    """Live counts from step output_json (works while status is running) plus DB fallbacks."""
-    contacts = list_contacts_by_run(db, run_id)
+    """Setup contact/company counts from ``contacts`` / ``run_companies`` tables."""
     n_co = _live_company_count(db, run_id)
     n_fi = _live_contact_count(db, run_id)
-    contacts_found = max(n_fi, len(contacts))
-    st_validate = get_step_by_run_and_name(db, run_id, "validate_contacts")
-    step_validated_with_email, step_distinct_companies = _validate_step_email_and_distinct_company_counts(
-        st_validate
+    contacts_found = n_fi
+    contacts_validated, contacts_validated_distinct_companies = _live_validated_email_and_distinct_company_counts_sql(
+        db,
+        run_id,
     )
-    appr, db_validated_with_email, db_distinct_companies, contacts_with_no_email = (
-        _setup_contact_metrics_from_deduped_list(contacts)
-    )
-    contacts_validated = max(step_validated_with_email or 0, db_validated_with_email)
-    contacts_validated_distinct_companies = max(step_distinct_companies or 0, db_distinct_companies)
+    contacts_approved, contacts_with_no_email = _approved_reachable_and_no_email_counts_sql(db, run_id)
     return {
         "companies_collected": n_co,
         "contacts_found": contacts_found,
         "contacts_validated": contacts_validated,
         "contacts_validated_distinct_companies": contacts_validated_distinct_companies,
         "contacts_with_no_email": contacts_with_no_email,
-        "contacts_approved": appr,
+        "contacts_approved": contacts_approved,
     }
 
 

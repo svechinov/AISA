@@ -25,6 +25,12 @@ from app.models.reply_draft_asset import ReplyDraftAsset  # noqa: F401
 from app.models.email_attachment import EmailAttachment  # noqa: F401 — register email_attachments
 from app.models.run_setup import RunSetup  # noqa: F401 — register run_setups
 from app.models.run_company import RunCompany  # noqa: F401 — register run_companies
+from app.models.run_event_chain_collapse import RunEventChainCollapse  # noqa: F401 — register table
+from app.models.entity_json_kv import EntityJsonKV  # noqa: F401 — register entity_json_kv
+from app.models.run_outreach_context import RunOutreachContext  # noqa: F401
+from app.models.run_master_email_variant import RunMasterEmailVariant  # noqa: F401
+from app.models.contact_personalization import ContactPersonalization, ContactPersonalizationFact  # noqa: F401
+from app.models.template_variable import TemplateVariable  # noqa: F401
 
 
 def _ensure_contacts_gmail_history_columns() -> None:
@@ -149,6 +155,34 @@ def _ensure_assets_extended_columns() -> None:
                 conn.execute(text("ALTER TABLE assets ADD COLUMN file_size_bytes INTEGER"))
             else:
                 conn.execute(text("ALTER TABLE assets ADD COLUMN file_size_bytes BIGINT"))
+
+
+def _ensure_run_input_goal_column() -> None:
+    """Canonical goal string extracted from input_json.goal (relational path)."""
+    insp = inspect(engine)
+    if "runs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("runs")}
+    if "input_goal" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE runs ADD COLUMN input_goal TEXT"))
+
+
+def _run_domain_json_migration() -> None:
+    import logging
+
+    from app.migrate_domain_json import migrate_domain_json_to_relational
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        migrate_domain_json_to_relational(db)
+    except Exception:
+        log.exception("domain JSON migration failed")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _ensure_run_outreach_context_columns() -> None:
@@ -360,6 +394,220 @@ def _ensure_personalization_and_generation_meta_columns() -> None:
                     conn.execute(text("ALTER TABLE email_drafts ADD COLUMN generation_meta_json JSONB"))
 
 
+def _ensure_email_drafts_generation_meta_columns() -> None:
+    """Typed columns for outreach generation metadata (Phase 1)."""
+    insp = inspect(engine)
+    if "email_drafts" not in insp.get_table_names():
+        return
+    dialect = engine.dialect.name
+    columns = {c["name"] for c in insp.get_columns("email_drafts")}
+    with engine.begin() as conn:
+        if "prompt_setup_text_used" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN prompt_setup_text_used TEXT"))
+        if "generation_style_mode" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN generation_style_mode VARCHAR(80)"))
+        if "validation_score" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN validation_score REAL"))
+        if "validation_issues_json" not in columns:
+            if dialect == "sqlite":
+                conn.execute(text("ALTER TABLE email_drafts ADD COLUMN validation_issues_json TEXT"))
+            else:
+                conn.execute(text("ALTER TABLE email_drafts ADD COLUMN validation_issues_json JSONB"))
+        if "generation_is_valid" not in columns:
+            if dialect == "sqlite":
+                conn.execute(text("ALTER TABLE email_drafts ADD COLUMN generation_is_valid INTEGER"))
+            else:
+                conn.execute(text("ALTER TABLE email_drafts ADD COLUMN generation_is_valid BOOLEAN"))
+        if "peer_similarity_max" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN peer_similarity_max REAL"))
+        if "validation_retries" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN validation_retries INTEGER"))
+        if "pipeline_source" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN pipeline_source VARCHAR(80)"))
+        if "reasoning_hook" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_hook TEXT"))
+        if "reasoning_angle" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_angle TEXT"))
+        if "reasoning_cta_type" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_cta_type TEXT"))
+        if "reasoning_key_point" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_key_point TEXT"))
+
+
+def _backfill_email_drafts_generation_meta_columns_from_json() -> None:
+    """Copy generation_meta_json into typed columns for existing rows."""
+    import logging
+
+    from app.utils.email_draft_generation_meta import apply_generation_meta_to_draft
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        touched = 0
+        for d in db.query(EmailDraft).order_by(EmailDraft.id.asc()).all():
+            meta = d.generation_meta_json
+            if not isinstance(meta, dict) or not meta:
+                continue
+            if getattr(d, "pipeline_source", None) is not None:
+                continue
+            apply_generation_meta_to_draft(d, meta)
+            db.add(d)
+            touched += 1
+        db.commit()
+        if touched:
+            log.info("email_drafts: backfilled generation meta columns rows=%s", touched)
+    except Exception:
+        log.exception("backfill email_drafts generation meta columns failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _ensure_email_events_payload_columns() -> None:
+    """Typed columns for email_events payload (Phase 2); payload_json holds extras only."""
+    insp = inspect(engine)
+    if "email_events" not in insp.get_table_names():
+        return
+    dialect = engine.dialect.name
+    columns = {c["name"] for c in insp.get_columns("email_events")}
+    with engine.begin() as conn:
+        if "payload_source" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN payload_source VARCHAR(80)"))
+        if "gmail_message_id" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN gmail_message_id VARCHAR(255)"))
+        if "email_thread_id" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN email_thread_id INTEGER"))
+        if "reply_draft_id" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN reply_draft_id INTEGER"))
+        if "notification_excerpt" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN notification_excerpt TEXT"))
+        if "inbound_from_email" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN inbound_from_email VARCHAR(255)"))
+        if "inbound_to_email" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN inbound_to_email VARCHAR(255)"))
+        if "inbound_subject" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN inbound_subject VARCHAR(500)"))
+        if "llm_delivery_issue" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN llm_delivery_issue VARCHAR(50)"))
+        if "llm_reason" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN llm_reason TEXT"))
+        if "send_provider" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_provider VARCHAR(32)"))
+        if "send_provider_thread_id" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_provider_thread_id VARCHAR(255)"))
+        if "send_rfc_message_id" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_rfc_message_id VARCHAR(500)"))
+        if "send_to_email" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_to_email VARCHAR(255)"))
+        if "send_subject" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_subject VARCHAR(500)"))
+        if "send_from_email" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_from_email VARCHAR(255)"))
+        if "send_attachment_count" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN send_attachment_count INTEGER"))
+        if "reply_attachment_count" not in columns:
+            conn.execute(text("ALTER TABLE email_events ADD COLUMN reply_attachment_count INTEGER"))
+        if "reply_attached_asset_ids_json" not in columns:
+            if dialect == "sqlite":
+                conn.execute(text("ALTER TABLE email_events ADD COLUMN reply_attached_asset_ids_json TEXT"))
+            else:
+                conn.execute(text("ALTER TABLE email_events ADD COLUMN reply_attached_asset_ids_json JSONB"))
+
+
+def _backfill_email_events_payload_columns_from_json() -> None:
+    import logging
+
+    from app.utils.email_event_payload import apply_split_payload_to_event, should_skip_payload_backfill
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        touched = 0
+        for e in db.query(EmailEvent).order_by(EmailEvent.id.asc()).all():
+            merged = dict(e.payload_json or {})
+            if should_skip_payload_backfill(e, merged):
+                continue
+            apply_split_payload_to_event(e, merged, e.event_type)
+            db.add(e)
+            touched += 1
+        db.commit()
+        if touched:
+            log.info("email_events: backfilled payload columns rows=%s", touched)
+    except Exception:
+        log.exception("backfill email_events payload columns failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _ensure_reminders_typed_columns() -> None:
+    """Typed columns for reminders (Phase 3); source_json / output_json hold extras only."""
+    insp = inspect(engine)
+    if "reminders" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("reminders")}
+    with engine.begin() as conn:
+        if "source_kind" not in columns:
+            conn.execute(text("ALTER TABLE reminders ADD COLUMN source_kind VARCHAR(50)"))
+        if "task_type_snapshot" not in columns:
+            conn.execute(text("ALTER TABLE reminders ADD COLUMN task_type_snapshot VARCHAR(80)"))
+        if "output_triggered_by" not in columns:
+            conn.execute(text("ALTER TABLE reminders ADD COLUMN output_triggered_by VARCHAR(80)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_reminders_source_kind ON reminders (source_kind)"))
+
+
+def _normalize_reminders_typed_columns() -> None:
+    import logging
+
+    from app.utils.reminder_payload import normalize_reminder_typed_columns
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        touched = 0
+        for r in db.query(Reminder).order_by(Reminder.id.asc()).all():
+            if normalize_reminder_typed_columns(r):
+                db.add(r)
+                touched += 1
+        db.commit()
+        if touched:
+            log.info("reminders: normalized typed columns rows=%s", touched)
+    except Exception:
+        log.exception("normalize reminders typed columns failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _strip_email_drafts_generation_meta_json_blob() -> None:
+    """Clear legacy generation_meta_json where typed columns are authoritative."""
+    import logging
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = 0
+        for d in db.query(EmailDraft).filter(EmailDraft.pipeline_source.isnot(None)).all():
+            if d.generation_meta_json is None:
+                continue
+            d.generation_meta_json = None
+            flag_modified(d, "generation_meta_json")
+            db.add(d)
+            n += 1
+        if n:
+            db.commit()
+            log.info("email_drafts: cleared generation_meta_json blob rows=%s", n)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("strip email_drafts generation_meta_json failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _ensure_run_scoped_performance_indexes() -> None:
     """Composite indexes for frequent run-scoped filters (workspace lite, display counts, list runs).
 
@@ -536,6 +784,87 @@ def _backfill_asset_packet_assets_from_json() -> None:
         db.close()
 
 
+def _migrate_steps_trim_contacts_json_blob() -> None:
+    """Replace large find_contacts/validate_contacts output_json blobs with counts (canonical: contacts table)."""
+    import logging
+
+    from app.models.step import Step
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        for st in (
+            db.query(Step)
+            .filter(Step.step_name.in_(["find_contacts", "validate_contacts"]))
+            .all()
+        ):
+            oj = st.output_json if isinstance(st.output_json, dict) else {}
+            if not oj:
+                continue
+            changed = False
+            if st.step_name == "find_contacts" and "contacts" in oj:
+                raw = oj.get("contacts")
+                n = len(raw) if isinstance(raw, list) else 0
+                new_oj = {k: v for k, v in oj.items() if k != "contacts"}
+                new_oj["contacts_count"] = n
+                st.output_json = new_oj
+                changed = True
+            elif st.step_name == "validate_contacts" and (
+                "valid_contacts" in oj or "invalid_contacts" in oj
+            ):
+                vc = oj.get("valid_contacts")
+                ic = oj.get("invalid_contacts")
+                new_oj = {
+                    k: v for k, v in oj.items() if k not in ("valid_contacts", "invalid_contacts")
+                }
+                new_oj["valid_count"] = len(vc) if isinstance(vc, list) else 0
+                new_oj["invalid_count"] = len(ic) if isinstance(ic, list) else 0
+                st.output_json = new_oj
+                changed = True
+            if changed:
+                db.add(st)
+        db.commit()
+    except Exception:
+        log.exception("migrating steps: trim contacts JSON blob failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _backfill_run_event_chain_from_context_json() -> None:
+    """Move legacy context_json._human_ui.event_chain_collapsed into run_event_chain_collapse."""
+    import logging
+
+    from app.models.run import Run
+    from app.repositories.run_human_ui_repo import (
+        delete_human_ui_from_context_json,
+        merge_event_chain_collapsed,
+    )
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        for run in db.query(Run).all():
+            ctx = dict(run.context_json or {})
+            ui = ctx.get("_human_ui") or {}
+            chain = ui.get("event_chain_collapsed") if isinstance(ui, dict) else None
+            if not isinstance(chain, dict) or not chain:
+                continue
+            merge_event_chain_collapsed(
+                db,
+                run.id,
+                event_chain_collapsed={str(k): bool(v) for k, v in chain.items()},
+            )
+            run.context_json = delete_human_ui_from_context_json(ctx)
+            db.add(run)
+        db.commit()
+    except Exception:
+        log.exception("backfill run_event_chain_collapse from context_json failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _backfill_personalization_json() -> None:
     """Existing rows after ADD COLUMN get default {}; fill rule-based personalization on startup."""
     import logging
@@ -552,10 +881,144 @@ def _backfill_personalization_json() -> None:
         db.close()
 
 
+def _strip_template_variables_json_blob_columns() -> None:
+    """Clear templates.variables_json when template_variables rows exist (canonical store)."""
+    import logging
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = 0
+        for t in db.query(Template).order_by(Template.id.asc()).all():
+            if not dict(t.variables_json or {}):
+                continue
+            if not db.query(TemplateVariable).filter(TemplateVariable.template_id == t.id).first():
+                continue
+            t.variables_json = {}
+            flag_modified(t, "variables_json")
+            db.add(t)
+            n += 1
+        if n:
+            db.commit()
+            log.info("templates: cleared legacy variables_json rows=%s", n)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("strip templates variables_json failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _strip_asset_packet_packet_json_after_kv() -> None:
+    """Clear packet_json when entity_json_kv holds metadata (after packet_json.assets backfill)."""
+    import logging
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.constants.entity_kv_scope import SCOPE_ASSET_PACKET
+    from app.utils.entity_kv_storage import get_kv_dict
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = 0
+        for p in db.query(AssetPacket).order_by(AssetPacket.id.asc()).all():
+            if not get_kv_dict(db, SCOPE_ASSET_PACKET, p.id):
+                continue
+            if not dict(p.packet_json or {}):
+                continue
+            p.packet_json = {}
+            flag_modified(p, "packet_json")
+            db.add(p)
+            n += 1
+        if n:
+            db.commit()
+            log.info("asset_packets: cleared legacy packet_json rows=%s (KV canonical)", n)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("strip asset_packets packet_json failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _strip_asset_metadata_json_blob_if_kv() -> None:
+    """Clear assets.metadata_json when entity_json_kv scope asset_metadata is populated."""
+    import logging
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.constants.entity_kv_scope import SCOPE_ASSET_METADATA
+    from app.utils.entity_kv_storage import get_kv_dict
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = 0
+        for a in db.query(Asset).order_by(Asset.id.asc()).all():
+            if not get_kv_dict(db, SCOPE_ASSET_METADATA, a.id):
+                continue
+            if not dict(a.metadata_json or {}):
+                continue
+            a.metadata_json = {}
+            flag_modified(a, "metadata_json")
+            db.add(a)
+            n += 1
+        if n:
+            db.commit()
+            log.info("assets: cleared legacy metadata_json rows=%s (KV canonical)", n)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("strip assets metadata_json failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _strip_run_company_extra_json_if_kv() -> None:
+    """Clear run_companies.extra_json when entity_json_kv scope run_company_extra is populated."""
+    import logging
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.constants.entity_kv_scope import SCOPE_RUN_COMPANY_EXTRA
+    from app.utils.entity_kv_storage import get_kv_dict
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = 0
+        for rc in db.query(RunCompany).order_by(RunCompany.id.asc()).all():
+            if not get_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, rc.id):
+                continue
+            if not dict(rc.extra_json or {}):
+                continue
+            rc.extra_json = {}
+            flag_modified(rc, "extra_json")
+            db.add(rc)
+            n += 1
+        if n:
+            db.commit()
+            log.info("run_companies: cleared legacy extra_json rows=%s (KV canonical)", n)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("strip run_companies extra_json failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def ensure_schema() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_runs_metadata_columns()
     _ensure_run_outreach_context_columns()
+    _ensure_run_input_goal_column()
     _migrate_run_setups_from_legacy()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
@@ -569,10 +1032,24 @@ def ensure_schema() -> None:
     _ensure_drafts_attached_asset_ids_columns()
     _ensure_asset_packets_reply_draft_id_unique()
     _ensure_personalization_and_generation_meta_columns()
+    _ensure_email_drafts_generation_meta_columns()
+    _backfill_email_drafts_generation_meta_columns_from_json()
+    _ensure_email_events_payload_columns()
+    _backfill_email_events_payload_columns_from_json()
+    _ensure_reminders_typed_columns()
+    _normalize_reminders_typed_columns()
+    _run_domain_json_migration()
+    _strip_template_variables_json_blob_columns()
+    _strip_email_drafts_generation_meta_json_blob()
     _backfill_asset_packet_assets_from_json()
     _strip_assets_key_from_asset_packet_json()
+    _strip_asset_packet_packet_json_after_kv()
+    _strip_asset_metadata_json_blob_if_kv()
+    _strip_run_company_extra_json_if_kv()
     _backfill_draft_attached_assets_from_json()
     _backfill_personalization_json()
+    _migrate_steps_trim_contacts_json_blob()
+    _backfill_run_event_chain_from_context_json()
     _ensure_run_scoped_performance_indexes()
 
 

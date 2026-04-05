@@ -75,14 +75,41 @@ class RunRead(BaseModel):
 
 def run_read_from_orm(run: Any) -> RunRead:
     """Serialize Run with prompt/signature from run_setups (legacy columns may be cleared)."""
+    from sqlalchemy.orm import object_session
+
+    from app.repositories.run_human_ui_repo import get_event_chain_collapsed_map
     from app.services.run_context_service import get_prompt_setup_text, get_sender_signature_html
+    from app.utils.run_relational_payload import (
+        effective_context_json_for_api,
+        effective_input_json_for_api,
+        effective_master_email_for_api,
+    )
 
     rd = RunRead.model_validate(run)
     pt = get_prompt_setup_text(run)
+    sess = object_session(run)
+    if sess is not None:
+        ctx = effective_context_json_for_api(sess, run)
+        chain = get_event_chain_collapsed_map(sess, run.id)
+        if chain:
+            ui = dict(ctx.get("_human_ui") or {})
+            ui["event_chain_collapsed"] = chain
+            ctx["_human_ui"] = ui
+        return rd.model_copy(
+            update={
+                "sender_signature_html": get_sender_signature_html(run),
+                "prompt_setup_text": pt if pt else None,
+                "context_json": ctx,
+                "input_json": effective_input_json_for_api(sess, run),
+                "master_email": effective_master_email_for_api(sess, run),
+            },
+        )
+    ctx = dict(rd.context_json or {})
     return rd.model_copy(
         update={
             "sender_signature_html": get_sender_signature_html(run),
             "prompt_setup_text": pt if pt else None,
+            "context_json": ctx,
         },
     )
 

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.research_task import ResearchTask
 from app.repositories.contact_repo import get_contact
+from app.utils.research_task_payload import effective_research_input_json
 
 
 def find_replacement_candidate(db: Session, task: ResearchTask) -> dict | None:
@@ -16,7 +17,7 @@ def find_replacement_candidate(db: Session, task: ResearchTask) -> dict | None:
         return None
 
     company = task.company or (old_contact.company if old_contact else None)
-    inp = task.input_json or {}
+    inp = effective_research_input_json(db, task)
     website = inp.get("website") or (old_contact.website if old_contact else None)
     old_email = (
         (inp.get("previous_email") or (old_contact.email if old_contact else "") or "")

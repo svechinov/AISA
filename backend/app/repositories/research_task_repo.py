@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.research_task import ResearchTask
+from app.utils.research_task_payload import persist_research_input, persist_research_output
 
 
 def create_research_task(
@@ -23,10 +24,13 @@ def create_research_task(
         task_type=task_type,
         status=status,
         reason=reason,
-        input_json=input_json or {},
-        output_json=output_json or {},
+        input_json={},
+        output_json={},
     )
     db.add(task)
+    db.flush()
+    persist_research_input(db, task, input_json or {})
+    persist_research_output(db, task, output_json or {})
     db.commit()
     db.refresh(task)
     return task
@@ -46,7 +50,7 @@ def mark_research_task_running(db: Session, task: ResearchTask) -> ResearchTask:
 
 def mark_research_task_completed(db: Session, task: ResearchTask, output_json: dict) -> ResearchTask:
     task.status = "completed"
-    task.output_json = output_json
+    persist_research_output(db, task, output_json)
     task.finished_at = datetime.utcnow()
     db.add(task)
     db.commit()
@@ -56,7 +60,7 @@ def mark_research_task_completed(db: Session, task: ResearchTask, output_json: d
 
 def mark_research_task_no_result(db: Session, task: ResearchTask, output_json: dict) -> ResearchTask:
     task.status = "no_result"
-    task.output_json = output_json
+    persist_research_output(db, task, output_json)
     task.finished_at = datetime.utcnow()
     db.add(task)
     db.commit()
@@ -66,7 +70,7 @@ def mark_research_task_no_result(db: Session, task: ResearchTask, output_json: d
 
 def mark_research_task_failed(db: Session, task: ResearchTask, output_json: dict) -> ResearchTask:
     task.status = "failed"
-    task.output_json = output_json
+    persist_research_output(db, task, output_json)
     task.finished_at = datetime.utcnow()
     db.add(task)
     db.commit()

@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.models.email_event import EmailEvent
+from app.utils.email_event_payload import apply_split_payload_to_event
 
 
 def create_email_event(
@@ -19,9 +20,9 @@ def create_email_event(
         contact_id=contact_id,
         event_type=event_type,
         provider_message_id=provider_message_id,
-        payload_json=payload_json or {},
         error_message=error_message,
     )
+    apply_split_payload_to_event(event, payload_json or {}, event_type)
     db.add(event)
     db.commit()
     db.refresh(event)

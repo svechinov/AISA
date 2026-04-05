@@ -14,6 +14,8 @@ from app.services.email_style_service import resolve_effective_email_style, styl
 from app.services.email_validation_service import validate_outbound_email
 from app.services.llm_gateway import generate_json
 from app.services.personalization_service import sync_contact_personalization_row
+from app.utils.contact_personalization_io import get_personalization_dict
+from app.utils.contact_source_payload import effective_contact_source_json
 from app.services.prompt_builder import build_prompt
 from app.services.rules_service import get_effective_rules_from_run
 from app.services.run_context_service import build_master_prompt_text, get_effective_context
@@ -32,11 +34,11 @@ DRAFT_SCHEMA = {"subject": "string", "body": "string"}
 MAX_VALIDATION_RETRIES = 2
 
 
-def _contact_role_for_prompt(contact: Contact) -> str:
+def _contact_role_for_prompt(db: Session, contact: Contact) -> str:
     r = (contact.role or "").strip()
     if r:
         return r
-    sj = contact.source_json or {}
+    sj = effective_contact_source_json(db, contact)
     if isinstance(sj, dict):
         for k in ("role", "title", "job_title", "position"):
             v = sj.get(k)
@@ -45,8 +47,8 @@ def _contact_role_for_prompt(contact: Contact) -> str:
     return ""
 
 
-def _needs_personalization_sync(contact: Contact) -> bool:
-    pj = contact.personalization_json
+def _needs_personalization_sync(db: Session, contact: Contact) -> bool:
+    pj = get_personalization_dict(db, contact.id, contact.personalization_json)
     if pj is None or not isinstance(pj, dict):
         return True
     if len(pj) == 0:
@@ -57,7 +59,7 @@ def _needs_personalization_sync(contact: Contact) -> bool:
 
 
 def ensure_contact_personalization(db: Session, contact: Contact) -> None:
-    if _needs_personalization_sync(contact):
+    if _needs_personalization_sync(db, contact):
         sync_contact_personalization_row(db, contact)
         db.add(contact)
         db.flush()
@@ -70,8 +72,8 @@ def _rules(db: Session, run_id: int) -> list[str]:
         return []
 
 
-def _serialize_personalization(contact: Contact) -> dict[str, Any]:
-    pj = contact.personalization_json if isinstance(contact.personalization_json, dict) else {}
+def _serialize_personalization(db: Session, contact: Contact) -> dict[str, Any]:
+    pj = get_personalization_dict(db, contact.id, contact.personalization_json)
     return {
         "company_facts": pj.get("company_facts") or [],
         "role_angle": (pj.get("role_angle") or "").strip(),
@@ -102,9 +104,9 @@ def generate_email_reasoning(
     regenerate_hint: str = "",
 ) -> dict[str, str]:
     """Internal planning JSON — not the email itself."""
-    role = _contact_role_for_prompt(contact)
+    role = _contact_role_for_prompt(db, contact)
     brief = _run_brief_blocks(run)
-    pers = _serialize_personalization(contact)
+    pers = _serialize_personalization(db, contact)
     rules = _rules(db, run.id)
     style_block = style_prompt_fragment(style_mode)
 
@@ -176,8 +178,8 @@ def generate_email_draft(
     regenerate_hint: str = "",
 ) -> tuple[str, str]:
     """Final subject + body; must reflect personalization and reasoning."""
-    role = _contact_role_for_prompt(contact)
-    pers = _serialize_personalization(contact)
+    role = _contact_role_for_prompt(db, contact)
+    pers = _serialize_personalization(db, contact)
     rules = _rules(db, run.id)
     brief = _run_brief_blocks(run)
     style_block = style_prompt_fragment(style_mode)
@@ -317,9 +319,9 @@ def compose_outreach_subject_body(
     Returns (subject, body, generation_meta_json).
     """
     ensure_contact_personalization(db, contact)
-    style_mode = resolve_effective_email_style(run, contact)
+    style_mode = resolve_effective_email_style(db, run, contact)
     peer_bodies = list_outbound_draft_bodies_for_run_excluding_contact(db, run.id, contact.id)
-    pers = _serialize_personalization(contact)
+    pers = _serialize_personalization(db, contact)
 
     reg_hint = ""
     if (regenerate_from_body or "").strip() or (regenerate_from_subject or "").strip():
@@ -449,8 +451,8 @@ def build_template_fallback_meta(
     body: str,
 ) -> dict[str, Any]:
     """After personalize_outbound: still record style + validation snapshot."""
-    style_mode = resolve_effective_email_style(run, contact)
-    pers = _serialize_personalization(contact)
+    style_mode = resolve_effective_email_style(db, run, contact)
+    pers = _serialize_personalization(db, contact)
     peer_bodies = list_outbound_draft_bodies_for_run_excluding_contact(db, run.id, contact.id)
     val = validate_outbound_email(subject, body, pers, peer_bodies)
     return {

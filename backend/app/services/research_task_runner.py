@@ -12,6 +12,7 @@ from app.repositories.research_task_repo import (
     mark_research_task_running,
 )
 from app.services.replacement_worker import find_replacement_candidate
+from app.utils.research_task_payload import effective_research_output_json
 
 
 def run_replacement_task(db: Session, task_id: int) -> dict:
@@ -26,7 +27,9 @@ def run_replacement_task(db: Session, task_id: int) -> dict:
         return {
             "task_id": task.id,
             "status": "completed",
-            "replacement_contact_id": (task.output_json or {}).get("replacement_contact_id"),
+            "replacement_contact_id": (effective_research_output_json(db, task) or {}).get(
+                "replacement_contact_id"
+            ),
             "deduplicated": True,
             "message": "Task already completed",
         }

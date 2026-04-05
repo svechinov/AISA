@@ -103,7 +103,7 @@ def main() -> None:
                 .order_by(RunCompany.collect_index.asc())
                 .all()
             )
-            list_in = [run_company_orm_to_dict(r) for r in rows]
+            list_in = [run_company_orm_to_dict(db, r) for r in rows]
             new_list = annotate_companies_list_with_llm_flags(
                 list_in,
                 run_id=run.id,

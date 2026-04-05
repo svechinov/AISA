@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.follow_up_task import FollowUpTask
+from app.utils.follow_up_task_payload import persist_follow_up_output, persist_follow_up_source
 
 
 def create_follow_up_task(
@@ -29,10 +30,13 @@ def create_follow_up_task(
         priority=priority,
         due_at=due_at,
         status=status,
-        source_json=source_json or {},
-        output_json=output_json or {},
+        source_json={},
+        output_json={},
     )
     db.add(task)
+    db.flush()
+    persist_follow_up_source(db, task, source_json or {})
+    persist_follow_up_output(db, task, output_json or {})
     db.commit()
     db.refresh(task)
     return task
@@ -85,7 +89,7 @@ def update_follow_up_task_status(
 ) -> FollowUpTask:
     task.status = status
     if output_json is not None:
-        task.output_json = output_json
+        persist_follow_up_output(db, task, output_json)
 
     if status == "completed":
         task.completed_at = datetime.utcnow()

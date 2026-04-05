@@ -125,12 +125,28 @@ def merge_inner_from_legacy_fields(
 
 def get_effective_context(run) -> dict[str, str]:
     """Normalized inner context (offer, target_entities, …), including legacy rows."""
-    raw_outer = dict(run.context_json or {})
-    inner: dict[str, Any] = {}
+    oc = getattr(run, "outreach_context", None)
+    if oc is not None:
+        inner_oc = {
+            "offer": coalesce_str(oc.offer),
+            "target_entities": coalesce_str(oc.target_entities),
+            "target_roles": coalesce_str(oc.target_roles),
+            "goal": coalesce_str(oc.goal),
+            "tone": coalesce_str(oc.tone) or "Professional",
+            "notes": coalesce_str(oc.notes),
+        }
+        if any(coalesce_str(inner_oc.get(k)) for k in _CONTEXT_KEYS):
+            inner = inner_oc
+        else:
+            inner = {}
+    else:
+        inner = {}
 
-    ctx_nested = raw_outer.get("context")
-    if isinstance(ctx_nested, dict):
-        inner = {k: coalesce_str(ctx_nested.get(k, "")) for k in _CONTEXT_KEYS}
+    raw_outer = dict(run.context_json or {})
+    if not inner or not any(coalesce_str(inner.get(k)) for k in _CONTEXT_KEYS):
+        ctx_nested = raw_outer.get("context")
+        if isinstance(ctx_nested, dict):
+            inner = {k: coalesce_str(ctx_nested.get(k, "")) for k in _CONTEXT_KEYS}
 
     if not inner or not any(coalesce_str(inner.get(k)) for k in _CONTEXT_KEYS):
         inner = {
@@ -143,7 +159,9 @@ def get_effective_context(run) -> dict[str, str]:
         }
 
     if not inner.get("goal") and not inner.get("offer"):
-        legacy_goal = coalesce_str((run.input_json or {}).get("goal"))
+        legacy_goal = coalesce_str(getattr(run, "input_goal", None))
+        if not legacy_goal:
+            legacy_goal = coalesce_str((run.input_json or {}).get("goal"))
         if legacy_goal:
             inner["goal"] = legacy_goal
 

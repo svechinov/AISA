@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.models.template import Template
+from app.utils.template_variables_io import replace_template_variables_from_dict
 
 
 def create_template(
@@ -16,9 +17,11 @@ def create_template(
         template_type=template_type,
         name=name,
         content=content,
-        variables_json=variables_json,
+        variables_json={},
     )
     db.add(template)
+    db.flush()
+    replace_template_variables_from_dict(db, template.id, variables_json)
     db.commit()
     db.refresh(template)
     return template

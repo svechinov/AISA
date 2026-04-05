@@ -17,6 +17,7 @@ from app.repositories.asset_repo import get_asset, list_assets
 from app.repositories.contact_repo import get_contact
 from app.repositories.email_thread_repo import get_email_thread
 from app.repositories.run_repo import get_run
+from app.utils.asset_packet_metadata import effective_packet_metadata_dict, persist_packet_metadata_dict
 
 
 def _ref_dict_from_asset_row(asset) -> dict:
@@ -57,9 +58,9 @@ def get_ordered_asset_refs_for_packet(db: Session, packet: AssetPacket) -> list[
     return out
 
 
-def packet_metadata_json_for_api(packet: AssetPacket) -> dict:
+def packet_metadata_json_for_api(db: Session, packet: AssetPacket) -> dict:
     """Metadata only for API ``packet_json`` (no ``assets`` key — membership is ``AssetPacketRead.assets``)."""
-    return {k: v for k, v in (packet.packet_json or {}).items() if k != "assets"}
+    return effective_packet_metadata_dict(db, packet)
 
 
 def render_assets_block_for_email(assets: list[dict]) -> str:
@@ -130,8 +131,8 @@ def update_packet_assets(db: Session, packet_id: int, assets_payload: list[dict]
     validate_packet_assets_payload(db, assets_payload)
 
     replace_asset_packet_asset_rows(db, packet.id, assets_payload)
-    packet_json = {k: v for k, v in dict(packet.packet_json or {}).items() if k != "assets"}
-    packet.packet_json = packet_json
+    meta = effective_packet_metadata_dict(db, packet)
+    persist_packet_metadata_dict(db, packet, meta)
 
     db.add(packet)
     db.commit()
@@ -170,8 +171,7 @@ def clone_asset_packet(db: Session, packet_id: int) -> AssetPacket:
     base_title = (original.title or "").strip() or "Packet"
     new_title = f"{base_title} (copy)"
 
-    pj = deepcopy(original.packet_json or {})
-    pj.pop("assets", None)
+    pj = effective_packet_metadata_dict(db, original)
     new_packet = AssetPacket(
         run_id=original.run_id,
         thread_id=original.thread_id,
@@ -180,12 +180,13 @@ def clone_asset_packet(db: Session, packet_id: int) -> AssetPacket:
         title=new_title,
         description=original.description,
         status="draft",
-        packet_json=pj,
+        packet_json={},
         reply_draft_id=None,
     )
 
     db.add(new_packet)
     db.flush()
+    persist_packet_metadata_dict(db, new_packet, pj)
     copy_asset_packet_asset_rows(db, original.id, new_packet.id)
     db.commit()
     db.refresh(new_packet)

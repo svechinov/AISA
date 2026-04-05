@@ -3,6 +3,11 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.reminder import Reminder
+from app.utils.reminder_payload import (
+    apply_reminder_output_full,
+    split_reminder_output_for_storage,
+    split_reminder_source_for_storage,
+)
 
 
 def create_reminder(
@@ -92,7 +97,7 @@ def update_reminder_status(
 ) -> Reminder:
     reminder.status = status
     if output_json is not None:
-        reminder.output_json = output_json
+        apply_reminder_output_full(reminder, output_json)
 
     now = datetime.utcnow()
 
@@ -116,7 +121,7 @@ def snooze_reminder(
     reminder.status = "snoozed"
     reminder.remind_at = remind_at
     if output_json is not None:
-        reminder.output_json = output_json
+        apply_reminder_output_full(reminder, output_json)
     db.add(reminder)
     db.commit()
     db.refresh(reminder)

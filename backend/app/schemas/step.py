@@ -1,5 +1,8 @@
 from datetime import datetime
+
 from pydantic import BaseModel
+
+from sqlalchemy.orm import Session
 
 
 class StepRead(BaseModel):
@@ -16,3 +19,20 @@ class StepRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+def step_to_read(db: Session, step) -> StepRead:
+    from app.utils.step_payload import effective_step_input_json, effective_step_output_json
+
+    return StepRead(
+        id=step.id,
+        run_id=step.run_id,
+        step_name=step.step_name,
+        status=step.status,
+        input_json=effective_step_input_json(db, step),
+        output_json=effective_step_output_json(db, step),
+        error_text=step.error_text,
+        retry_count=step.retry_count,
+        created_at=step.created_at,
+        finished_at=step.finished_at,
+    )

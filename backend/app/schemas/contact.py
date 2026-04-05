@@ -74,69 +74,34 @@ def contact_matches_list_search(contact: Contact, q: str | None) -> bool:
     return False
 
 
-# Keys the dashboard needs from source_json for list views (avoid multi‑MB scraper blobs in GET /contacts/run).
-_SOURCE_JSON_LIST_KEYS = frozenset(
-    {
-        "source",
-        "replaces_contact_id",
-        "role",
-        "title",
-        "job_title",
-        "position",
-        "linkedin",
-    }
-)
-
-_PERSONALIZATION_LIST_KEYS = (
-    "why_this_company",
-    "offer_fit",
-    "role_angle",
-)
-
-
-def slim_source_json_for_list(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        return {}
-    out: dict = {}
-    for k in _SOURCE_JSON_LIST_KEYS:
-        if k not in raw:
-            continue
-        v = raw[k]
-        if v is None:
-            continue
-        if isinstance(v, str) and len(v) > 2000:
-            v = v[:1999] + "…"
-        out[k] = v
-    return out
-
-
-def slim_personalization_json_for_list(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        return {}
-    out: dict = {}
-    for k in _PERSONALIZATION_LIST_KEYS:
-        if k not in raw:
-            continue
-        v = raw[k]
-        if v is None:
-            continue
-        if isinstance(v, str) and len(v) > 12000:
-            v = v[:11999] + "…"
-        out[k] = v
-    return out
-
-
 def contact_read_for_run_list(contact: Contact) -> ContactRead:
     """
-    Same shape as ContactRead for PATCH responses, but GET /contacts/run trims JSON blobs
-    so the UI list is not dominated by scraper / LLM payload size.
+    GET /contacts/run list rows: same shape as ContactRead but **does not** read ``source_json`` /
+    ``personalization_json`` from the ORM (those columns stay deferred). Empty dicts keep payloads small
+    and avoid JSON parse + transfer; full blobs come from GET/PATCH /contacts/:id when needed.
     """
-    base = ContactRead.model_validate(contact)
-    return base.model_copy(
-        update={
-            "source_json": slim_source_json_for_list(base.source_json),
-            "personalization_json": slim_personalization_json_for_list(base.personalization_json),
-        }
+    return ContactRead(
+        id=contact.id,
+        run_id=contact.run_id,
+        company=contact.company,
+        website=contact.website,
+        name=contact.name,
+        role=contact.role,
+        email=contact.email,
+        linkedin=contact.linkedin,
+        status=contact.status,
+        confidence=contact.confidence,
+        source_json={},
+        personalization_json={},
+        review_status=contact.review_status,
+        review_notes=contact.review_notes,
+        reviewed_at=contact.reviewed_at,
+        email_health=contact.email_health,
+        last_contact_event_at=contact.last_contact_event_at,
+        gmail_history_status=contact.gmail_history_status,
+        gmail_history_checked_at=contact.gmail_history_checked_at,
+        gmail_inbox_imported_at=contact.gmail_inbox_imported_at,
+        created_at=contact.created_at,
     )
 
 

@@ -142,8 +142,9 @@ def main():
     emails = ge["output_json"]["emails"]
     assert emails, "no emails"
 
-    vc = next(s for s in steps if s["step_name"] == "validate_contacts")
-    contact = vc["output_json"]["valid_contacts"][0]
+    cl = req("GET", f"/contacts/run/{rid}")  # type: ignore
+    assert isinstance(cl, list) and cl, "no contacts from DB"
+    contact = cl[0]
     me = run_done.get("master_email") or {}
     variants = me.get("variants") if isinstance(me, dict) else None
     assert isinstance(variants, list) and len(variants) == 3, me
@@ -186,8 +187,9 @@ def main():
     steps2 = req("GET", f"/steps/run/{rid2}")  # type: ignore
     ge2 = next(s for s in steps2 if s["step_name"] == "generate_emails")
     emails2 = ge2["output_json"]["emails"]
-    vc2 = next(s for s in steps2 if s["step_name"] == "validate_contacts")
-    c2 = vc2["output_json"]["valid_contacts"][0]
+    cl2 = req("GET", f"/contacts/run/{rid2}")  # type: ignore
+    assert isinstance(cl2, list) and cl2, "no contacts from DB (run2)"
+    c2 = cl2[0]
     me2 = run_done2.get("master_email") or {}
     variants2 = me2.get("variants") if isinstance(me2, dict) else None
     assert isinstance(variants2, list) and len(variants2) == 3, me2

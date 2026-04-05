@@ -70,7 +70,7 @@ def list_contacts_for_run(
     With `review_bucket`: JSON object with `review_counts` for all tabs and `contacts` for the
     requested tab. When `limit` is set, `contacts` is a page and `total` is the filtered count.
     """
-    rows = list_contacts_by_run(db, run_id)
+    rows = list_contacts_by_run(db, run_id, load_json=False)
     counts_dict = review_counts_from_contacts(rows)
 
     if review_bucket is not None:

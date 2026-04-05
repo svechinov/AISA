@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.asset_packet_repo import list_asset_packets_by_run
 from app.repositories.contact_repo import list_contacts_by_run
+from app.utils.contact_source_payload import effective_contact_source_json
 from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.repositories.email_event_repo import list_email_events_by_run
 from app.repositories.email_message_repo import list_email_messages_by_run
@@ -48,7 +49,7 @@ def get_run_summary(db: Session, run_id: int) -> dict:
     replacement_contact_ids = {
         c.id
         for c in contacts
-        if (c.source_json or {}).get("source") == "replacement_search"
+        if effective_contact_source_json(db, c).get("source") == "replacement_search"
     }
 
     replacement_drafts = [d for d in drafts if d.contact_id in replacement_contact_ids]

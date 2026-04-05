@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run
 from app.repositories.run_company_repo import list_run_companies_sparse
+from app.services.contact_persistence_service import contacts_raw_for_pipeline_dicts
 from app.services.llm_gateway import generate_json
 from app.utils.contact_identity import contact_identity_key_from_dict
 from app.services.prompt_builder import build_prompt
@@ -50,6 +51,8 @@ def validate_contacts(db: Session, run_id: int, workflow_name: str, step_input: 
     contacts = step_input.get("contacts", [])
     if not isinstance(contacts, list):
         contacts = []
+    if not contacts:
+        contacts = contacts_raw_for_pipeline_dicts(db, run_id)
 
     # Same natural person (name + company + website) may appear with and without email in one LLM batch.
     # Do not emit invalid "no email" rows when that identity already has at least one email (order-independent).

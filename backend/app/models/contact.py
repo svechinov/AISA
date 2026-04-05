@@ -1,9 +1,14 @@
 from datetime import datetime
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import DateTime, ForeignKey, Integer, String, JSON, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+if TYPE_CHECKING:
+    from app.models.contact_personalization import ContactPersonalization
 
 
 class Contact(Base):
@@ -19,9 +24,17 @@ class Contact(Base):
     linkedin: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="new")
     confidence: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    #: Legacy; prefer entity_json_kv scope contact_source. Kept {} after migration.
     source_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    # Rule-based / future LLM personalization for outreach copy (see personalization_service).
+    #: Legacy; prefer contact_personalization + contact_personalization_facts. Kept {} after migration.
     personalization_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    personalization_row: Mapped["ContactPersonalization | None"] = relationship(
+        "ContactPersonalization",
+        back_populates="contact",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     review_status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

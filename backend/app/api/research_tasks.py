@@ -10,7 +10,7 @@ from app.repositories.research_task_repo import (
     get_research_task_by_id,
     list_research_tasks_by_run,
 )
-from app.schemas.research_task import ResearchTaskRead
+from app.schemas.research_task import ResearchTaskRead, research_task_to_read
 from app.services.research_task_input import build_find_replacement_input_json
 from app.services.research_task_runner import run_replacement_task
 
@@ -28,7 +28,7 @@ class ReplacementRerunResponse(BaseModel):
 
 @router.get("/run/{run_id}", response_model=list[ResearchTaskRead])
 def list_research_tasks_for_run(run_id: int, db: Session = Depends(get_db)):
-    return list_research_tasks_by_run(db, run_id)
+    return [research_task_to_read(db, t) for t in list_research_tasks_by_run(db, run_id)]
 
 
 @router.post("/run/{run_id}/find-replacement", response_model=ResearchTaskRead)
@@ -53,7 +53,7 @@ def create_find_replacement_for_contact(
 
     reason = f"email_health={contact.email_health}"
     input_json = build_find_replacement_input_json(contact)
-    return create_research_task(
+    task = create_research_task(
         db,
         run_id=run_id,
         task_type="find_replacement_email",
@@ -63,6 +63,7 @@ def create_find_replacement_for_contact(
         reason=reason,
         input_json=input_json,
     )
+    return research_task_to_read(db, task)
 
 
 @router.post("/{task_id}/rerun", response_model=ReplacementRerunResponse)
@@ -80,4 +81,4 @@ def rerun_research_task_route(task_id: int, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=500, detail="Task disappeared after run")
 
-    return ReplacementRerunResponse(run=run_payload, task=ResearchTaskRead.model_validate(task))
+    return ReplacementRerunResponse(run=run_payload, task=research_task_to_read(db, task))

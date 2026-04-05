@@ -8,7 +8,7 @@ from app.repositories.follow_up_task_repo import (
     list_follow_up_tasks_by_thread,
     update_follow_up_task_status as repo_update_follow_up_task_status,
 )
-from app.schemas.follow_up_task import FollowUpTaskRead, FollowUpTaskStatusUpdate
+from app.schemas.follow_up_task import FollowUpTaskRead, FollowUpTaskStatusUpdate, follow_up_task_to_read
 from app.services.follow_up_service import create_next_action_for_thread
 
 router = APIRouter(prefix="/follow-up-tasks", tags=["follow-up-tasks"])
@@ -16,12 +16,12 @@ router = APIRouter(prefix="/follow-up-tasks", tags=["follow-up-tasks"])
 
 @router.get("/run/{run_id}", response_model=list[FollowUpTaskRead])
 def list_follow_up_tasks_for_run(run_id: int, db: Session = Depends(get_db)):
-    return list_follow_up_tasks_by_run(db, run_id)
+    return [follow_up_task_to_read(db, t) for t in list_follow_up_tasks_by_run(db, run_id)]
 
 
 @router.get("/thread/{thread_id}", response_model=list[FollowUpTaskRead])
 def list_follow_up_tasks_for_thread(thread_id: int, db: Session = Depends(get_db)):
-    return list_follow_up_tasks_by_thread(db, thread_id)
+    return [follow_up_task_to_read(db, t) for t in list_follow_up_tasks_by_thread(db, thread_id)]
 
 
 @router.post("/thread/{thread_id}/create-next-action")
@@ -45,9 +45,10 @@ def update_follow_up_task_status_route(
     if payload.status not in {"open", "in_progress", "completed", "cancelled"}:
         raise HTTPException(status_code=400, detail="Invalid follow-up task status")
 
-    return repo_update_follow_up_task_status(
+    updated = repo_update_follow_up_task_status(
         db=db,
         task=task,
         status=payload.status,
         output_json=payload.output_json,
     )
+    return follow_up_task_to_read(db, updated)
