@@ -24,7 +24,11 @@ SEED_SPECS: list[dict] = [
         "scope": "step",
         "workflow_name": WF,
         "step_name": "collect_companies",
-        "content": "Return only company name and website. No explanations.",
+        "content": (
+            "Return only company name and website per row; no prose. "
+            "Never fabricate organizations: every row must be a real company the user could look up; "
+            "omit uncertain names instead of inventing them."
+        ),
     },
     {
         "scope": "step",

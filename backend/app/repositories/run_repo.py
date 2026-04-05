@@ -1,8 +1,10 @@
 from datetime import datetime
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.run import Run
+from app.models.run_setup import RunSetup
+from app.repositories.project_repo import get_project
 from app.services.run_context_service import wrap_context
 
 
@@ -35,16 +37,41 @@ def create_run(
 
 
 def get_run(db: Session, run_id: int) -> Run | None:
-    return db.query(Run).filter(Run.id == run_id).first()
+    return (
+        db.query(Run)
+        .options(selectinload(Run.run_setup))
+        .filter(Run.id == run_id)
+        .first()
+    )
 
 
 def list_runs_by_project(db: Session, project_id: int) -> list[Run]:
     return (
         db.query(Run)
+        .options(selectinload(Run.run_setup))
         .filter(Run.project_id == project_id)
         .order_by(Run.id.desc())
         .all()
     )
+
+
+def update_run_project(db: Session, run_id: int, project_id: int) -> Run | None:
+    """Reassign run to another project (e.g. after DB restore / id drift). Target project must exist and not be archived."""
+    run = get_run(db, run_id)
+    if not run:
+        return None
+    proj = get_project(db, project_id)
+    if not proj:
+        return None
+    if proj.is_archived:
+        raise ValueError("Cannot move a run to an archived project")
+    if run.project_id == project_id:
+        return run
+    run.project_id = project_id
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 def close_run(db: Session, run_id: int) -> Run | None:
@@ -98,18 +125,36 @@ def get_run_master_email_parts(run: Run) -> tuple[str, str]:
     return s2, b2
 
 
+def _prune_run_setup_if_empty(db: Session, row: RunSetup | None) -> None:
+    if row is None:
+        return
+    if not (row.prompt_setup_text or "").strip() and not (row.sender_signature_html or "").strip():
+        db.delete(row)
+
+
 def update_run_signature(db: Session, run_id: int, signature_html: str | None) -> Run | None:
     run = get_run(db, run_id)
     if not run:
         return None
-    run.sender_signature_html = signature_html
+    sig = (signature_html or "").strip() or None
+    row = db.query(RunSetup).filter(RunSetup.run_id == run_id).first()
+    if sig is None:
+        if row:
+            row.sender_signature_html = None
+            _prune_run_setup_if_empty(db, row)
+    else:
+        if row is None:
+            row = RunSetup(run_id=run_id)
+            db.add(row)
+        row.sender_signature_html = sig
+    run.sender_signature_html = None
     db.add(run)
     db.commit()
     db.refresh(run)
     return run
 
 
-# Stored in run.context_json; not read by get_effective_context (LLM brief uses nested `context` only).
+# Legacy key removed from context_json on save; canonical store is run_setups.prompt_setup_text.
 _PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
 _HUMAN_UI_JSON_KEY = "_human_ui"
 
@@ -143,15 +188,22 @@ def update_run_human_ui_preferences(
 
 
 def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: str) -> Run | None:
-    """Persist labeled outreach prompt text for the human UI; empty string removes the override."""
+    """Persist labeled outreach prompt text in run_setups; empty removes it. Legacy context_json key cleared."""
     run = get_run(db, run_id)
     if not run:
         return None
-    ctx = dict(run.context_json or {})
+    row = db.query(RunSetup).filter(RunSetup.run_id == run_id).first()
     if (prompt_setup_text or "").strip() == "":
-        ctx.pop(_PROMPT_SETUP_JSON_KEY, None)
+        if row:
+            row.prompt_setup_text = None
+            _prune_run_setup_if_empty(db, row)
     else:
-        ctx[_PROMPT_SETUP_JSON_KEY] = prompt_setup_text
+        if row is None:
+            row = RunSetup(run_id=run_id)
+            db.add(row)
+        row.prompt_setup_text = prompt_setup_text
+    ctx = dict(run.context_json or {})
+    ctx.pop(_PROMPT_SETUP_JSON_KEY, None)
     run.context_json = ctx
     db.add(run)
     db.commit()
@@ -182,7 +234,7 @@ def update_run_outreach_fields(
     inner: dict[str, str],
     master_prompt: str,
 ) -> Run | None:
-    """Refresh context.context, master_prompt, segment, notes; keep prompt_setup_text and _human_ui."""
+    """Refresh context.context, master_prompt, segment, notes; keep _human_ui (prompt lives in run_setups)."""
     run = get_run(db, run_id)
     if not run:
         return None

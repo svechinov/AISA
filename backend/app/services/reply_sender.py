@@ -18,12 +18,17 @@ from app.repositories.reply_draft_repo import (
     mark_reply_draft_sending,
 )
 from app.utils.attached_asset_ids import normalize_attached_asset_ids
+from app.utils.draft_attached_assets import effective_attached_asset_ids_for_reply_draft
 from app.services.asset_attachment_service import (
     finalize_sendable_attachments,
     materialize_attachment,
     resolve_sendable_attachments_for_asset_ids,
 )
-from app.services.asset_packet_service import lock_packet_after_send, render_assets_block_for_email
+from app.services.asset_packet_service import (
+    get_ordered_asset_refs_for_packet,
+    lock_packet_after_send,
+    render_assets_block_for_email,
+)
 from app.services.contact_gmail_history_service import mark_history_detected_after_outbound_send
 from app.services.email_provider import send_email_via_provider
 from app.services.outbound_email_body import (
@@ -31,6 +36,7 @@ from app.services.outbound_email_body import (
     append_signature_html_after,
     normalize_draft_body_for_email_html,
 )
+from app.services.run_context_service import get_sender_signature_html
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +81,13 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     validate_packet_for_reply_send(reply_draft, packet)
 
     run = get_run(db, reply_draft.run_id)
-    sig_html = getattr(run, "sender_signature_html", None) if run else None
+    sig_html = get_sender_signature_html(run) if run else None
 
-    draft_ids = normalize_attached_asset_ids(reply_draft.attached_asset_ids)
+    eff_reply_ids = effective_attached_asset_ids_for_reply_draft(db, reply_draft)
+    draft_ids = normalize_attached_asset_ids(eff_reply_ids)
     packet_ids: list[int] = []
     if packet:
-        for ref in (packet.packet_json or {}).get("assets") or []:
+        for ref in get_ordered_asset_refs_for_packet(db, packet):
             if not isinstance(ref, dict) or ref.get("asset_id") is None:
                 continue
             try:
@@ -106,7 +113,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
         base = append_additional_assets_section_to_email_html(
             base,
             db,
-            reply_draft.attached_asset_ids,
+            eff_reply_ids,
             trailing_rule_if_no_signature_below=not has_sig,
         )
         final_body = append_signature_html_after(base, sig_html)
@@ -137,7 +144,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     base = append_additional_assets_section_to_email_html(
         base,
         db,
-        reply_draft.attached_asset_ids,
+        eff_reply_ids,
         trailing_rule_if_no_signature_below=not has_sig,
         exclude_asset_ids=mime_exclude,
     )

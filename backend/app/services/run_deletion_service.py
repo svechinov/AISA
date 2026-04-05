@@ -5,17 +5,22 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.models.asset_packet import AssetPacket
+from app.models.asset_packet_asset import AssetPacketAsset
 from app.models.contact import Contact
 from app.models.email_attachment import EmailAttachment
 from app.models.email_draft import EmailDraft
+from app.models.email_draft_asset import EmailDraftAsset
 from app.models.email_event import EmailEvent
 from app.models.email_message import EmailMessage
 from app.models.email_thread import EmailThread
 from app.models.follow_up_task import FollowUpTask
 from app.models.reminder import Reminder
 from app.models.reply_draft import ReplyDraft
+from app.models.reply_draft_asset import ReplyDraftAsset
 from app.models.research_task import ResearchTask
 from app.models.run import Run
+from app.models.run_company import RunCompany
+from app.models.run_setup import RunSetup
 from app.models.step import Step
 
 
@@ -29,9 +34,26 @@ def delete_run_cascade(db: Session, run_id: int, *, commit: bool = True) -> bool
     if not run:
         return False
 
+    packet_ids = [r[0] for r in db.query(AssetPacket.id).filter(AssetPacket.run_id == run_id).all()]
+    if packet_ids:
+        db.query(AssetPacketAsset).filter(AssetPacketAsset.packet_id.in_(packet_ids)).delete(
+            synchronize_session=False,
+        )
     db.query(AssetPacket).filter(AssetPacket.run_id == run_id).delete(synchronize_session=False)
     db.query(Reminder).filter(Reminder.run_id == run_id).delete(synchronize_session=False)
     db.query(FollowUpTask).filter(FollowUpTask.run_id == run_id).delete(synchronize_session=False)
+
+    ed_ids = [r[0] for r in db.query(EmailDraft.id).filter(EmailDraft.run_id == run_id).all()]
+    if ed_ids:
+        db.query(EmailDraftAsset).filter(EmailDraftAsset.email_draft_id.in_(ed_ids)).delete(
+            synchronize_session=False,
+        )
+    rd_ids = [r[0] for r in db.query(ReplyDraft.id).filter(ReplyDraft.run_id == run_id).all()]
+    if rd_ids:
+        db.query(ReplyDraftAsset).filter(ReplyDraftAsset.reply_draft_id.in_(rd_ids)).delete(
+            synchronize_session=False,
+        )
+
     db.query(ReplyDraft).filter(ReplyDraft.run_id == run_id).delete(synchronize_session=False)
 
     msg_subq = db.query(EmailMessage.id).filter(EmailMessage.run_id == run_id)
@@ -45,7 +67,9 @@ def delete_run_cascade(db: Session, run_id: int, *, commit: bool = True) -> bool
     db.query(EmailThread).filter(EmailThread.run_id == run_id).delete(synchronize_session=False)
     db.query(EmailDraft).filter(EmailDraft.run_id == run_id).delete(synchronize_session=False)
     db.query(Contact).filter(Contact.run_id == run_id).delete(synchronize_session=False)
+    db.query(RunCompany).filter(RunCompany.run_id == run_id).delete(synchronize_session=False)
     db.query(Step).filter(Step.run_id == run_id).delete(synchronize_session=False)
+    db.query(RunSetup).filter(RunSetup.run_id == run_id).delete(synchronize_session=False)
 
     db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
 

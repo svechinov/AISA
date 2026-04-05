@@ -176,16 +176,20 @@ def build_master_prompt_text(ctx: dict[str, str]) -> str:
     ).strip()
 
 
-# UI storage key (see run_repo); omitted from get_effective_context / wrap_context LLM fields.
-_PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
-
-
 def get_prompt_setup_text(run) -> str:
-    """Labeled outreach brief from Review workspace Prompt setup; drives per-contact draft LLM when non-empty."""
-    raw = (run.context_json or {}).get(_PROMPT_SETUP_JSON_KEY)
-    if isinstance(raw, str):
-        return raw.strip()
+    """Labeled outreach brief — only ``run_setups.prompt_setup_text`` (migrated from context_json on startup)."""
+    rs = getattr(run, "run_setup", None)
+    if rs is not None and rs.prompt_setup_text is not None:
+        return (rs.prompt_setup_text or "").strip()
     return ""
+
+
+def get_sender_signature_html(run) -> str | None:
+    """HTML signature — only ``run_setups.sender_signature_html`` (migrated from runs.sender_signature_html on startup)."""
+    rs = getattr(run, "run_setup", None)
+    if rs is not None and rs.sender_signature_html is not None:
+        return rs.sender_signature_html
+    return None
 
 
 def build_pack_step_zero_input(run) -> dict:
@@ -202,28 +206,55 @@ def build_collect_companies_input_for_round(
     run,
     companies: list[dict],
     round_idx: int,
+    *,
+    continuation: bool = False,
 ) -> dict:
-    """Input for collect_companies; later rounds include prior companies so the model expands the list."""
+    """Input for collect_companies (no embedded company list — worker loads prior rows from run_companies)."""
     base = build_pack_step_zero_input(run)
+    base["continuation"] = continuation
     if companies:
-        base["companies"] = companies
         base["expansion_round"] = round_idx + 1
-        base["expansion_note"] = (
+        note = (
             f"Additional pass {round_idx + 1}: {len(companies)} companies already listed in INPUT DATA. "
             "Return NEW companies only (no duplicates); keep aligning with the goal."
         )
+        if continuation:
+            note += (
+                ' This pass is "Continue outreach" — prioritize growing the list: new regions, '
+                "adjacent categories, indie or B2B brands, not repeats of names already in INPUT DATA."
+            )
+            # Rotate angles so the model does not keep suggesting the same 20 brands every pass.
+            themes = [
+                "This round: prioritize companies headquartered or primarily selling in **different US states/regions** "
+                "than those already implied by INPUT DATA (avoid repeating the same metro clusters).",
+                "This round: prioritize **indie brands**, **promotional product vendors**, **print shops**, "
+                "and **B2B distributors** that may not be household names.",
+                "This round: prioritize **sporting goods**, **outdoor**, **museum gift shops**, **tourism retail**, "
+                "and **event merchandising** channels.",
+                "This round: prioritize **e-commerce native brands**, **Etsy-scale makers**, **wholesale marketplaces**, "
+                "and **private-label** programs.",
+            ]
+            base["diversity_guidance"] = themes[round_idx % len(themes)]
+        base["expansion_note"] = note
     return base
 
 
-def build_collect_companies_task(run) -> str:
+def build_collect_companies_task(run, *, continuation: bool = False) -> str:
     mp = coalesce_str(getattr(run, "master_prompt", None))
+    n = "35–50" if continuation else "20"
     return (
         f"{mp}\n\n"
         "Task:\n"
-        "Find 20 relevant companies or organizations that match the target entities.\n\n"
+        f"List up to {n} relevant real-world companies or organizations that match the target entities.\n\n"
+        "Hard requirements:\n"
+        "- Only include organizations that plausibly exist: use names and domains you could verify on the open web "
+        "(official site, news, registries). Do not invent brands, cute fake names, or placeholder companies.\n"
+        "- Website must be the organization’s real primary domain (https://…). No example.com, localhost, or "
+        "made-up TLDs. If you are not confident a company is real, omit it rather than guessing.\n"
+        "- Prefer well-known or easy-to-check businesses over obscure names you are unsure about.\n\n"
         "Return:\n"
-        "- company name\n"
-        "- website\n\n"
+        "- company name (as commonly used publicly)\n"
+        "- website (canonical URL)\n\n"
         "Be precise and relevant to the goal."
     )
 

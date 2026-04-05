@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.contact_repo import list_contacts_by_run
 from app.repositories.run_repo import get_run, update_run_status
+from app.repositories.run_company_repo import list_run_companies_sparse, sync_run_companies_from_dicts
 from app.repositories.step_repo import (
     create_step,
     get_step_by_run_and_name,
@@ -16,11 +17,14 @@ from app.services.email_draft_persistence_service import persist_generated_email
 from app.services.run_context_service import build_collect_companies_input_for_round
 from app.services.workflow_registry import WORKFLOWS
 from app.setup_milestones import (
+    CONTINUE_OUTREACH_MIN_ROUNDS,
+    CONTINUE_OUTREACH_STALL_LIMIT,
     SETUP_ACCUMULATION_MAX_ROUNDS,
     SETUP_EXTRA_ROUNDS_AFTER_MILESTONES,
     SETUP_MILESTONE_COMPANIES,
     SETUP_MILESTONE_CONTACTS,
     SETUP_MILESTONE_VALID_CONTACTS,
+    SETUP_STALL_LIMIT_DEFAULT,
 )
 from app.workers.contacts_worker import find_contacts, validate_contacts
 from app.workers.email_worker import generate_emails, generate_master_email_draft
@@ -147,7 +151,8 @@ def _load_accumulating_setup_seed(db: Session, run_id: int) -> tuple[list[dict],
     step_f = get_step_by_run_and_name(db, run_id, "find_contacts")
     step_v = get_step_by_run_and_name(db, run_id, "validate_contacts")
 
-    companies = _dicts_from_step_output(step_c, "companies")
+    raw_co = list_run_companies_sparse(db, run_id)
+    companies = [x for x in raw_co if isinstance(x, dict)]
     contacts = _dicts_from_step_output(step_f, "contacts")
 
     last_validate: dict = {"valid_contacts": [], "invalid_contacts": []}
@@ -196,10 +201,14 @@ def _ensure_step(db: Session, run_id: int, step_name: str):
     return s if s else create_step(db, run_id, step_name, {})
 
 
-def run_accumulating_setup_phase(db: Session, run_id: int) -> None:
+def run_accumulating_setup_phase(db: Session, run_id: int, *, continuation: bool = False) -> None:
     """
     Repeatedly collect → find → validate until enough valid contacts (or stall / max rounds).
     Step rows stay running with growing output_json until the phase finishes, then all three complete.
+
+    continuation=True (Continue outreach / POST /runs/:id/restart): prioritize "gather more" —
+    do not stop early just because milestones were already met; require more rounds before
+    stall-based exit and use a higher stall threshold.
     """
     run = get_run(db, run_id)
     if not run:
@@ -221,7 +230,9 @@ def run_accumulating_setup_phase(db: Session, run_id: int) -> None:
         if not run:
             raise ValueError(f"Run {run_id} not found")
 
-        cin = build_collect_companies_input_for_round(run, companies, round_idx)
+        cin = build_collect_companies_input_for_round(
+            run, companies, round_idx, continuation=continuation
+        )
         mark_step_running(db, step_c, cin)
         try:
             out_c = collect_companies(db, run_id, run.workflow_name, cin)
@@ -230,9 +241,10 @@ def run_accumulating_setup_phase(db: Session, run_id: int) -> None:
             raise
         batch_c = out_c.get("companies") if isinstance(out_c.get("companies"), list) else []
         companies = _merge_companies(companies, batch_c)
-        update_step_progress(db, step_c, {"companies": companies})
+        sync_run_companies_from_dicts(db, run_id, companies, commit=False)
+        update_step_progress(db, step_c, {})
 
-        fin = {"companies": companies}
+        fin = {}
         mark_step_running(db, step_f, fin)
         try:
             out_f = find_contacts(db, run_id, run.workflow_name, fin)
@@ -255,9 +267,13 @@ def run_accumulating_setup_phase(db: Session, run_id: int) -> None:
 
         valid_n = len(last_validate.get("valid_contacts") or [])
         sig = (len(companies), len(contacts), valid_n)
-        if prev_sig == sig:
+        stall_limit = CONTINUE_OUTREACH_STALL_LIMIT if continuation else SETUP_STALL_LIMIT_DEFAULT
+        if continuation and round_idx < CONTINUE_OUTREACH_MIN_ROUNDS:
+            stall = 0
+            prev_sig = sig
+        elif prev_sig == sig:
             stall += 1
-            if stall >= 2:
+            if stall >= stall_limit:
                 break
         else:
             stall = 0
@@ -271,13 +287,15 @@ def run_accumulating_setup_phase(db: Session, run_id: int) -> None:
         if all_milestones:
             rounds_after_all_milestones += 1
             if rounds_after_all_milestones > SETUP_EXTRA_ROUNDS_AFTER_MILESTONES:
-                break
+                if not continuation:
+                    break
         else:
             rounds_after_all_milestones = 0
 
         round_idx += 1
 
-    mark_step_completed(db, step_c, {"companies": companies})
+    sync_run_companies_from_dicts(db, run_id, companies, commit=False)
+    mark_step_completed(db, step_c, {})
     mark_step_completed(db, step_f, {"contacts": contacts})
     mark_step_completed(db, step_v, last_validate)
 
@@ -300,6 +318,9 @@ def build_step_input(db: Session, run_id: int, step_name: str) -> dict:
 
     if not previous_step:
         raise ValueError(f"Previous step {previous_step_name} not found")
+
+    if previous_step_name == "collect_companies":
+        return {}
 
     return previous_step.output_json or {}
 
@@ -325,6 +346,14 @@ def execute_step(db: Session, run_id: int, step_name: str):
             workflow_name=run.workflow_name,
             step_input=step_input,
         )
+        if step_name == "collect_companies" and isinstance(output, dict):
+            sync_run_companies_from_dicts(
+                db,
+                run_id,
+                output.get("companies") if isinstance(output.get("companies"), list) else [],
+                commit=False,
+            )
+            output = {}
         mark_step_completed(db, step, output)
 
         if step_name == "validate_contacts":
@@ -338,7 +367,7 @@ def execute_step(db: Session, run_id: int, step_name: str):
         raise
 
 
-def run_workflow(db: Session, run_id: int):
+def run_workflow(db: Session, run_id: int, *, continuation: bool = False):
     run = get_run(db, run_id)
     if not run:
         raise ValueError(f"Run {run_id} not found")
@@ -346,7 +375,7 @@ def run_workflow(db: Session, run_id: int):
     update_run_status(db, run, "running")
 
     try:
-        run_accumulating_setup_phase(db, run_id)
+        run_accumulating_setup_phase(db, run_id, continuation=continuation)
         run = get_run(db, run_id)
         update_run_status(db, run, "needs_review")
         return

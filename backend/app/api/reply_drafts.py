@@ -12,8 +12,11 @@ from app.repositories.reply_draft_repo import (
 )
 from app.schemas.reply_draft import (
     ReplyDraftEditUpdate,
+    ReplyDraftListRead,
     ReplyDraftRead,
     ReplyDraftReviewUpdate,
+    reply_draft_to_list_read,
+    reply_draft_to_read,
 )
 from app.services.reply_draft_service import generate_reply_draft_for_thread, regenerate_reply_draft
 from app.services.reply_sender import build_reply_send_payload, send_one_reply_draft
@@ -21,14 +24,14 @@ from app.services.reply_sender import build_reply_send_payload, send_one_reply_d
 router = APIRouter(prefix="/reply-drafts", tags=["reply-drafts"])
 
 
-@router.get("/run/{run_id}", response_model=list[ReplyDraftRead])
+@router.get("/run/{run_id}", response_model=list[ReplyDraftListRead])
 def list_reply_drafts_for_run(run_id: int, db: Session = Depends(get_db)):
-    return list_reply_drafts_by_run(db, run_id)
+    return [reply_draft_to_list_read(db, d) for d in list_reply_drafts_by_run(db, run_id)]
 
 
-@router.get("/thread/{thread_id}", response_model=list[ReplyDraftRead])
+@router.get("/thread/{thread_id}", response_model=list[ReplyDraftListRead])
 def list_reply_drafts_for_thread(thread_id: int, db: Session = Depends(get_db)):
-    return list_reply_drafts_by_thread(db, thread_id)
+    return [reply_draft_to_list_read(db, d) for d in list_reply_drafts_by_thread(db, thread_id)]
 
 
 @router.post("/thread/{thread_id}/generate")
@@ -52,12 +55,13 @@ def review_reply_draft_route(
     if payload.review_status not in {"approved", "rejected"}:
         raise HTTPException(status_code=400, detail="review_status must be approved or rejected")
 
-    return update_reply_draft_review(
+    updated = update_reply_draft_review(
         db=db,
         draft=draft,
         review_status=payload.review_status,
         review_notes=payload.review_notes,
     )
+    return reply_draft_to_read(db, updated)
 
 
 @router.patch("/{draft_id}/edit", response_model=ReplyDraftRead)
@@ -70,7 +74,7 @@ def edit_reply_draft_route(
     if not draft:
         raise HTTPException(status_code=404, detail="Reply draft not found")
 
-    return update_reply_draft_fields(
+    updated = update_reply_draft_fields(
         db=db,
         draft=draft,
         subject=payload.subject,
@@ -78,6 +82,7 @@ def edit_reply_draft_route(
         review_notes=payload.review_notes,
         attached_asset_ids=payload.attached_asset_ids,
     )
+    return reply_draft_to_read(db, updated)
 
 
 @router.post("/{draft_id}/send")
@@ -91,7 +96,8 @@ def send_reply_draft_route(draft_id: int, db: Session = Depends(get_db)):
 @router.post("/{draft_id}/regenerate", response_model=ReplyDraftRead)
 def regenerate_reply_draft_route(draft_id: int, db: Session = Depends(get_db)):
     try:
-        return regenerate_reply_draft(db, draft_id)
+        draft = regenerate_reply_draft(db, draft_id)
+        return reply_draft_to_read(db, draft)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -132,4 +138,4 @@ def get_reply_draft_route(draft_id: int, db: Session = Depends(get_db)):
     draft = get_reply_draft(db, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Reply draft not found")
-    return draft
+    return reply_draft_to_read(db, draft)

@@ -20,7 +20,11 @@ export function normalizeAttachedAssetIds(raw) {
 
 /** Extract ordered unique asset ids from a packet row (API shape). */
 export function assetIdsFromPacket(packet) {
-  const inner = Array.isArray(packet?.packet_json?.assets) ? packet.packet_json.assets : [];
+  const inner = Array.isArray(packet?.assets)
+    ? packet.assets
+    : Array.isArray(packet?.packet_json?.assets)
+      ? packet.packet_json.assets
+      : [];
   const out = [];
   const seen = new Set();
   for (const row of inner) {

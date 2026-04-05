@@ -99,6 +99,7 @@ def generate_email_reasoning(
     prompt_setup_text: str | None,
     master_variant: dict[str, str] | None,
     style_mode: str,
+    regenerate_hint: str = "",
 ) -> dict[str, str]:
     """Internal planning JSON — not the email itself."""
     role = _contact_role_for_prompt(contact)
@@ -132,6 +133,8 @@ def generate_email_reasoning(
         task = (
             f"Campaign / prompt setup (primary):\n{(prompt_setup_text or '').strip()}\n\n" + task
         )
+    if regenerate_hint:
+        task += regenerate_hint
 
     data: dict[str, Any] = {
         "recipient": {
@@ -170,6 +173,7 @@ def generate_email_draft(
     master_variant: dict[str, str] | None,
     style_mode: str,
     prior_issues: list[str] | None = None,
+    regenerate_hint: str = "",
 ) -> tuple[str, str]:
     """Final subject + body; must reflect personalization and reasoning."""
     role = _contact_role_for_prompt(contact)
@@ -215,6 +219,8 @@ def generate_email_draft(
     )
     if (prompt_setup_text or "").strip():
         task = f"Campaign / prompt setup (primary):\n{(prompt_setup_text or '').strip()}\n\n" + task
+    if regenerate_hint:
+        task += regenerate_hint
 
     data = {
         "recipient": {
@@ -255,6 +261,7 @@ def _draft_without_reasoning(
     master_variant: dict[str, str] | None,
     style_mode: str,
     prior_issues: list[str] | None = None,
+    regenerate_hint: str = "",
 ) -> tuple[str, str]:
     """Single-shot draft if reasoning step fails."""
     return generate_email_draft(
@@ -271,6 +278,7 @@ def _draft_without_reasoning(
         master_variant=master_variant,
         style_mode=style_mode,
         prior_issues=prior_issues,
+        regenerate_hint=regenerate_hint,
     )
 
 
@@ -301,6 +309,8 @@ def compose_outreach_subject_body(
     *,
     prompt_setup_text: str | None,
     master_variant: dict[str, str] | None,
+    regenerate_from_subject: str | None = None,
+    regenerate_from_body: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """
     Unified entry: personalization → reasoning → draft → validate with retries.
@@ -310,6 +320,16 @@ def compose_outreach_subject_body(
     style_mode = resolve_effective_email_style(run, contact)
     peer_bodies = list_outbound_draft_bodies_for_run_excluding_contact(db, run.id, contact.id)
     pers = _serialize_personalization(contact)
+
+    reg_hint = ""
+    if (regenerate_from_body or "").strip() or (regenerate_from_subject or "").strip():
+        reg_hint = (
+            "\n\nREGENERATE: The user clicked Regenerate. "
+            "Produce a meaningfully different subject and body than the prior draft below "
+            "(do not reuse sentences or overall structure; keep the same campaign goal).\n"
+            f"Prior subject: {(regenerate_from_subject or '')[:500]}\n"
+            f"Prior body (avoid repeating):\n{(regenerate_from_body or '')[:8000]}\n"
+        )
 
     reasoning: dict[str, str] = {
         "hook": "",
@@ -326,6 +346,7 @@ def compose_outreach_subject_body(
             prompt_setup_text=prompt_setup_text,
             master_variant=master_variant,
             style_mode=style_mode,
+            regenerate_hint=reg_hint,
         )
         subject, body = generate_email_draft(
             db,
@@ -335,6 +356,7 @@ def compose_outreach_subject_body(
             prompt_setup_text=prompt_setup_text,
             master_variant=master_variant,
             style_mode=style_mode,
+            regenerate_hint=reg_hint,
         )
     except Exception as exc:
         logger.warning(
@@ -351,6 +373,7 @@ def compose_outreach_subject_body(
             prompt_setup_text=prompt_setup_text,
             master_variant=master_variant,
             style_mode=style_mode,
+            regenerate_hint=reg_hint,
         )
 
     val = validate_outbound_email(subject, body, pers, peer_bodies)
@@ -382,6 +405,7 @@ def compose_outreach_subject_body(
                     master_variant=master_variant,
                     style_mode=style_mode,
                     prior_issues=prior,
+                    regenerate_hint=reg_hint,
                 )
             else:
                 subject, body = _draft_without_reasoning(
@@ -392,6 +416,7 @@ def compose_outreach_subject_body(
                     master_variant=master_variant,
                     style_mode=style_mode,
                     prior_issues=prior,
+                    regenerate_hint=reg_hint,
                 )
         except Exception as exc:
             logger.warning(
@@ -411,6 +436,8 @@ def compose_outreach_subject_body(
         validation_retries=retries,
         pipeline_source="llm",
     )
+    pt = (prompt_setup_text or "").strip()
+    meta["prompt_setup_text_used"] = pt if pt else None
     return subject, body, meta
 
 
@@ -435,4 +462,5 @@ def build_template_fallback_meta(
         "peer_similarity_max": val.get("peer_similarity_max"),
         "validation_retries": 0,
         "pipeline_source": "template_fallback",
+        "prompt_setup_text_used": None,
     }

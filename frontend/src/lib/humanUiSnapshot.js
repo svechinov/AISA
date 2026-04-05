@@ -252,9 +252,6 @@ export function snapshotMergeWriteRunPanelLite(runId, partial) {
   storageSet(storageKey(`panel_lite.${runId}`), JSON.stringify(next));
 }
 
-/** @public matches backend `context_json` key for Prompt setup. */
-export const SNAP_PROMPT_SETUP_TEXT_KEY = "prompt_setup_text";
-
 function runSignatureHtmlMeaningful(html) {
   const raw = String(html ?? "").trim();
   if (!raw) return false;
@@ -276,11 +273,7 @@ function deriveSetupPrefsFromRunRow(runRow) {
   const prompt =
     typeof runRow.prompt_setup_saved === "boolean"
       ? runRow.prompt_setup_saved
-      : (() => {
-          const cj = runRow.context_json;
-          const raw = cj && typeof cj === "object" ? cj[SNAP_PROMPT_SETUP_TEXT_KEY] : null;
-          return typeof raw === "string" && raw.trim().length > 0;
-        })();
+      : typeof runRow.prompt_setup_text === "string" && runRow.prompt_setup_text.trim().length > 0;
   const sig =
     typeof runRow.sender_signature_configured === "boolean"
       ? runRow.sender_signature_configured
@@ -299,12 +292,19 @@ export function snapshotReadRunSetupPrefs(runId) {
     prompt_setup_saved: Boolean(v.prompt_setup_saved),
     sender_signature_configured: Boolean(v.sender_signature_configured),
     savedAt: v.savedAt,
+    prompt_setup_text: typeof v.prompt_setup_text === "string" ? v.prompt_setup_text : undefined,
+    signature_html: typeof v.signature_html === "string" ? v.signature_html : undefined,
   };
 }
 
 /**
  * @param {number} runId
- * @param {{ prompt_setup_saved?: boolean, sender_signature_configured?: boolean }} partial
+ * @param {{
+ *   prompt_setup_saved?: boolean,
+ *   sender_signature_configured?: boolean,
+ *   prompt_setup_text?: string,
+ *   signature_html?: string,
+ * }} partial
  */
 export function snapshotWriteRunSetupPrefs(runId, partial) {
   if (runId == null || Number.isNaN(Number(runId)) || !partial || typeof partial !== "object") return;
@@ -325,7 +325,35 @@ export function snapshotWriteRunSetupPrefs(runId, partial) {
           ? Boolean(prev.sender_signature_configured)
           : false,
   };
+  if (partial.prompt_setup_text !== undefined) {
+    next.prompt_setup_text = partial.prompt_setup_text;
+  } else if (prev?.prompt_setup_text !== undefined) {
+    next.prompt_setup_text = prev.prompt_setup_text;
+  }
+  if (partial.signature_html !== undefined) {
+    next.signature_html = partial.signature_html;
+  } else if (prev?.signature_html !== undefined) {
+    next.signature_html = prev.signature_html;
+  }
   storageSet(storageKey(`setup_prefs.${runId}`), JSON.stringify(next));
+}
+
+/** Persist Prompt/Signature editor bodies from a full GET /runs/:id row (prompt_setup_text + sender_signature_html). */
+export function snapshotMergeRunSetupBodiesFromRun(runId, runRow) {
+  if (runId == null || Number.isNaN(Number(runId)) || !runRow) return;
+  const partial = {};
+  if (typeof runRow.prompt_setup_text === "string" && runRow.prompt_setup_text.length > 0) {
+    partial.prompt_setup_text = runRow.prompt_setup_text;
+  }
+  if (typeof runRow.sender_signature_html === "string") {
+    partial.signature_html = runRow.sender_signature_html;
+  }
+  const d = deriveSetupPrefsFromRunRow(runRow);
+  snapshotWriteRunSetupPrefs(runId, {
+    ...partial,
+    prompt_setup_saved: d.prompt_setup_saved,
+    sender_signature_configured: d.sender_signature_configured,
+  });
 }
 
 /** One-time: if no prefs stored for this run, fill from API run row (list or full GET). Never overwrites existing. */

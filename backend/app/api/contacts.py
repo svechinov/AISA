@@ -14,10 +14,12 @@ from app.schemas.contact import (
     ContactReviewCountsRead,
     ContactReviewUpdate,
     ContactRunBucketResponse,
+    PaginatedContactsRunResponse,
+    contact_matches_list_search,
     contact_read_for_run_list,
 )
 from app.services.contact_review_bucket import ALL_REVIEW_BUCKETS, filter_contacts_by_review_bucket, review_counts_from_contacts
-from app.schemas.email_draft import EmailDraftRead
+from app.schemas.email_draft import EmailDraftRead, email_draft_to_read
 from app.workers.email_worker import (
     ensure_outreach_draft_for_contact,
     materialize_outreach_draft_for_sendable_contact,
@@ -37,7 +39,10 @@ def _background_ensure_outreach_draft(contact_id: int) -> None:
         db.close()
 
 
-@router.get("/run/{run_id}", response_model=list[ContactRead] | ContactRunBucketResponse)
+@router.get(
+    "/run/{run_id}",
+    response_model=list[ContactRead] | PaginatedContactsRunResponse | ContactRunBucketResponse,
+)
 def list_contacts_for_run(
     run_id: int,
     review_bucket: str | None = Query(
@@ -45,30 +50,67 @@ def list_contacts_for_run(
         description="If set (pending|approved|…|no_email), response is {review_counts, contacts} for that tab only; "
         "omit for full list (TrackingView, scripts). DB still loads the full run once for dedupe + counts.",
     ),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=5000,
+        description="If set, response is PaginatedContactsRunResponse (or paginated ContactRunBucketResponse). "
+        "If omitted, legacy JSON array (no review_bucket) or full tab list (with review_bucket).",
+    ),
+    offset: int = Query(0, ge=0),
+    q: str | None = Query(None, description="Case-insensitive substring filter on company, name, role, email, linkedin."),
     db: Session = Depends(get_db),
 ):
     """
     List contacts for one run only (`run_id` filter — not all projects).
 
-    Without `review_bucket`: JSON array of ContactRead (legacy).
+    Without `review_bucket`: JSON array of ContactRead when `limit` is omitted (legacy).
+    With `limit`: PaginatedContactsRunResponse with `items`, `total`, `limit`, `offset`.
 
-    With `review_bucket`: JSON object with `review_counts` for all tabs and `contacts` only for the
-    requested tab (smaller payload). Note: the repository still reads all contact rows for
-    this run to apply dedupe and compute accurate counts.
+    With `review_bucket`: JSON object with `review_counts` for all tabs and `contacts` for the
+    requested tab. When `limit` is set, `contacts` is a page and `total` is the filtered count.
     """
     rows = list_contacts_by_run(db, run_id)
     counts_dict = review_counts_from_contacts(rows)
-    if review_bucket is None:
-        return [contact_read_for_run_list(c) for c in rows]
-    if review_bucket not in ALL_REVIEW_BUCKETS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid review_bucket. Use one of: {', '.join(ALL_REVIEW_BUCKETS)}",
+
+    if review_bucket is not None:
+        if review_bucket not in ALL_REVIEW_BUCKETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid review_bucket. Use one of: {', '.join(ALL_REVIEW_BUCKETS)}",
+            )
+        filtered = filter_contacts_by_review_bucket(rows, review_bucket)
+        filtered = [c for c in filtered if contact_matches_list_search(c, q)]
+        total_f = len(filtered)
+        off = max(0, offset)
+        if limit is None:
+            page = filtered
+            lim = total_f
+            off_out = 0
+        else:
+            lim = limit
+            page = filtered[off : off + limit]
+            off_out = off
+        return ContactRunBucketResponse(
+            review_counts=ContactReviewCountsRead(**counts_dict),
+            contacts=[contact_read_for_run_list(c) for c in page],
+            total=total_f,
+            limit=lim,
+            offset=off_out,
         )
-    filtered = filter_contacts_by_review_bucket(rows, review_bucket)
-    return ContactRunBucketResponse(
-        review_counts=ContactReviewCountsRead(**counts_dict),
-        contacts=[contact_read_for_run_list(c) for c in filtered],
+
+    filtered = [c for c in rows if contact_matches_list_search(c, q)]
+    total_f = len(filtered)
+    if limit is None:
+        return [contact_read_for_run_list(c) for c in filtered]
+
+    off = max(0, offset)
+    page = filtered[off : off + limit]
+    return PaginatedContactsRunResponse(
+        items=[contact_read_for_run_list(c) for c in page],
+        total=total_f,
+        limit=limit,
+        offset=off,
     )
 
 
@@ -96,7 +138,7 @@ def create_draft_for_contact_route(contact_id: int, db: Session = Depends(get_db
             status_code=400,
             detail="Could not create draft — workflow may not support outreach, or contact is not eligible.",
         )
-    return draft
+    return email_draft_to_read(db, draft)
 
 
 @router.patch("/{contact_id}/review", response_model=ContactRead)

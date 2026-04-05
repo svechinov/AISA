@@ -3,6 +3,11 @@ from copy import deepcopy
 from sqlalchemy.orm import Session
 
 from app.models.asset_packet import AssetPacket
+from app.models.asset_packet_asset import AssetPacketAsset
+from app.repositories.asset_packet_asset_repo import (
+    copy_asset_packet_asset_rows,
+    replace_asset_packet_asset_rows,
+)
 from app.repositories.asset_packet_repo import (
     create_asset_packet,
     get_asset_packet,
@@ -12,6 +17,49 @@ from app.repositories.asset_repo import get_asset, list_assets
 from app.repositories.contact_repo import get_contact
 from app.repositories.email_thread_repo import get_email_thread
 from app.repositories.run_repo import get_run
+
+
+def _ref_dict_from_asset_row(asset) -> dict:
+    """Snapshot shape expected by email body / UI — built from ``assets`` table only."""
+    return {
+        "asset_id": asset.id,
+        "title": asset.name,
+        "asset_type": asset.asset_type,
+        "name": asset.name,
+        "description": asset.description,
+        "url": asset.url,
+        "file_path": asset.file_path,
+        "download_url": asset.download_url,
+        "storage_key": asset.storage_key,
+        "filename": asset.filename,
+        "mime_type": asset.mime_type,
+        "file_size_bytes": asset.file_size_bytes,
+    }
+
+
+def get_ordered_asset_refs_for_packet(db: Session, packet: AssetPacket) -> list[dict]:
+    """Membership/order: ``asset_packet_assets`` + ``assets`` rows only (no packet_json.assets)."""
+    rows = (
+        db.query(AssetPacketAsset)
+        .filter(AssetPacketAsset.packet_id == packet.id)
+        .order_by(AssetPacketAsset.position.asc(), AssetPacketAsset.id.asc())
+        .all()
+    )
+    if not rows:
+        return []
+    out: list[dict] = []
+    for r in rows:
+        a = get_asset(db, r.asset_id)
+        if a:
+            out.append(_ref_dict_from_asset_row(a))
+        else:
+            out.append({"asset_id": r.asset_id})
+    return out
+
+
+def packet_metadata_json_for_api(packet: AssetPacket) -> dict:
+    """Metadata only for API ``packet_json`` (no ``assets`` key — membership is ``AssetPacketRead.assets``)."""
+    return {k: v for k, v in (packet.packet_json or {}).items() if k != "assets"}
 
 
 def render_assets_block_for_email(assets: list[dict]) -> str:
@@ -38,11 +86,11 @@ def render_assets_block_for_email(assets: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_packet_block_for_email(packet: AssetPacket | None) -> str:
-    """Legacy: full packet → Materials block for every asset row (no attachment split)."""
+def render_packet_block_for_email(db: Session, packet: AssetPacket | None) -> str:
+    """Full packet → Materials block for every asset row (no attachment split)."""
     if not packet or packet.status == "archived":
         return ""
-    assets = (packet.packet_json or {}).get("assets") or []
+    assets = get_ordered_asset_refs_for_packet(db, packet)
     return render_assets_block_for_email(assets)
 
 
@@ -81,8 +129,8 @@ def update_packet_assets(db: Session, packet_id: int, assets_payload: list[dict]
 
     validate_packet_assets_payload(db, assets_payload)
 
-    packet_json = dict(packet.packet_json or {})
-    packet_json["assets"] = assets_payload
+    replace_asset_packet_asset_rows(db, packet.id, assets_payload)
+    packet_json = {k: v for k, v in dict(packet.packet_json or {}).items() if k != "assets"}
     packet.packet_json = packet_json
 
     db.add(packet)
@@ -122,6 +170,8 @@ def clone_asset_packet(db: Session, packet_id: int) -> AssetPacket:
     base_title = (original.title or "").strip() or "Packet"
     new_title = f"{base_title} (copy)"
 
+    pj = deepcopy(original.packet_json or {})
+    pj.pop("assets", None)
     new_packet = AssetPacket(
         run_id=original.run_id,
         thread_id=original.thread_id,
@@ -130,11 +180,13 @@ def clone_asset_packet(db: Session, packet_id: int) -> AssetPacket:
         title=new_title,
         description=original.description,
         status="draft",
-        packet_json=deepcopy(original.packet_json or {}),
+        packet_json=pj,
         reply_draft_id=None,
     )
 
     db.add(new_packet)
+    db.flush()
+    copy_asset_packet_asset_rows(db, original.id, new_packet.id)
     db.commit()
     db.refresh(new_packet)
     return new_packet
@@ -150,8 +202,7 @@ def create_run_asset_packet(
         raise ValueError(f"Run {run_id} not found")
 
     validate_packet_assets_payload(db, assets_payload)
-    packet_json: dict = {"assets": assets_payload, "source": "run_preset"}
-    return create_asset_packet(
+    packet = create_asset_packet(
         db=db,
         run_id=run_id,
         thread_id=None,
@@ -160,9 +211,13 @@ def create_run_asset_packet(
         title=title.strip() or "Packet",
         description=None,
         status="draft",
-        packet_json=packet_json,
+        packet_json={"source": "run_preset"},
         reply_draft_id=None,
     )
+    replace_asset_packet_asset_rows(db, packet.id, assets_payload)
+    db.commit()
+    db.refresh(packet)
+    return packet
 
 
 def build_asset_packet_for_thread(db: Session, thread_id: int) -> dict:
@@ -200,24 +255,8 @@ def build_asset_packet_for_thread(db: Session, thread_id: int) -> dict:
             "company": contact.company if contact else None,
             "email": contact.email if contact else None,
         },
-        "assets": [
-            {
-                "asset_id": asset.id,
-                "title": asset.name,
-                "asset_type": asset.asset_type,
-                "name": asset.name,
-                "description": asset.description,
-                "url": asset.url,
-                "file_path": asset.file_path,
-                "download_url": asset.download_url,
-                "storage_key": asset.storage_key,
-                "filename": asset.filename,
-                "mime_type": asset.mime_type,
-                "file_size_bytes": asset.file_size_bytes,
-            }
-            for asset in selected_assets
-        ],
     }
+    assets_payload = [_ref_dict_from_asset_row(a) for a in selected_assets]
 
     packet = create_asset_packet(
         db=db,
@@ -230,6 +269,9 @@ def build_asset_packet_for_thread(db: Session, thread_id: int) -> dict:
         status="draft",
         packet_json=packet_json,
     )
+    replace_asset_packet_asset_rows(db, packet.id, assets_payload)
+    db.commit()
+    db.refresh(packet)
 
     return {
         "thread_id": thread.id,

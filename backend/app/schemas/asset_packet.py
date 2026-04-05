@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,11 +14,36 @@ class AssetPacketRead(BaseModel):
     title: str
     description: str | None
     status: str
+    #: Ordered snapshots from ``asset_packet_assets`` + ``assets`` table rows (not from ``packet_json``).
+    assets: list[dict[str, Any]] = Field(default_factory=list)
+    #: Metadata only (no embedded ``assets`` list).
     packet_json: dict
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_packet(cls, db, packet) -> "AssetPacketRead":
+        from app.services.asset_packet_service import (
+            get_ordered_asset_refs_for_packet,
+            packet_metadata_json_for_api,
+        )
+
+        return cls(
+            id=packet.id,
+            run_id=packet.run_id,
+            thread_id=packet.thread_id,
+            contact_id=packet.contact_id,
+            reply_draft_id=packet.reply_draft_id,
+            packet_type=packet.packet_type,
+            title=packet.title,
+            description=packet.description,
+            status=packet.status,
+            assets=get_ordered_asset_refs_for_packet(db, packet),
+            packet_json=packet_metadata_json_for_api(packet),
+            created_at=packet.created_at,
+        )
 
 
 class AssetPacketUpdate(BaseModel):
@@ -33,7 +59,7 @@ class AttachReplyDraftRequest(BaseModel):
 
 
 class AssetPacketAssetItem(BaseModel):
-    """Snapshot row in packet_json.assets; extra keys are preserved on round-trip."""
+    """Library asset snapshot for create/update; persisted via ``asset_packet_assets`` + ``assets`` rows."""
 
     model_config = ConfigDict(extra="allow")
 

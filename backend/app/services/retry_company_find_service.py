@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.step import Step
 from app.repositories.run_repo import get_run
+from app.repositories.run_company_repo import get_company_dict_at_index, list_run_companies_sparse
 from app.repositories.step_repo import create_step, get_step_by_run_and_name, mark_step_completed
 from app.services.contact_persistence_service import persist_validated_contacts
 from app.services.orchestrator import _merge_contacts
@@ -37,8 +38,7 @@ def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
     For runs where find_contacts is not completed, run find once for every collected company
     that still has no matching contact in the find output. Then mark find (and validate) completed.
 
-    Collect may still be running (partial output via update_step_progress); we only require at least one
-    company dict in collect output. Matches Companies UI \"Not searched yet\" (find not completed).
+    We only require at least one company row in run_companies. Matches Companies UI \"Not searched yet\" (find not completed).
     """
     run = get_run(db, run_id)
     if not run:
@@ -54,11 +54,10 @@ def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
     if step_collect.status == "failed":
         raise ValueError("Collect companies step failed — fix the run and try again")
 
-    out_c = step_collect.output_json if isinstance(step_collect.output_json, dict) else {}
-    raw_companies = out_c.get("companies")
+    raw_companies = list_run_companies_sparse(db, run_id)
     if not isinstance(raw_companies, list) or not any(isinstance(c, dict) for c in raw_companies):
         raise ValueError(
-            "No companies in the collect step yet — wait until search has added at least one company",
+            "No companies stored for this run yet — wait until search has added at least one company",
         )
 
     find_completed = bool(step_find and step_find.status == "completed")
@@ -74,6 +73,8 @@ def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
     pending_companies: list[dict] = []
     for co in raw_companies:
         if not isinstance(co, dict):
+            continue
+        if co.get("llm_hallucination") is True:
             continue
         ckeys = _entity_keys(co)
         has_contact = any(
@@ -144,15 +145,13 @@ def retry_find_for_collected_company(db: Session, run_id: int, collect_index: in
     if not step_find_ref or step_find_ref.status != "completed":
         raise ValueError("Find contacts step is not completed yet — retry when setup has finished")
 
-    out_c = step_collect.output_json if isinstance(step_collect.output_json, dict) else {}
-    raw_companies = out_c.get("companies")
-    if not isinstance(raw_companies, list):
-        raise ValueError("No companies list on collect step")
-    if collect_index < 0 or collect_index >= len(raw_companies):
+    company_row = get_company_dict_at_index(db, run_id, collect_index)
+    if not company_row:
         raise ValueError("Invalid company index")
-    company_row = raw_companies[collect_index]
-    if not isinstance(company_row, dict):
-        raise ValueError("Company entry is not valid")
+    if company_row.get("llm_hallucination") is True:
+        raise ValueError(
+            "This company is marked LLM hallucination (invalid or unreachable website); contact search retry is disabled.",
+        )
 
     # LLM call can run in parallel across requests; merge must see latest stored contacts.
     out_new = find_contacts(

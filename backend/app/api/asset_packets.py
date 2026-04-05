@@ -29,7 +29,7 @@ router = APIRouter(prefix="/asset-packets", tags=["asset-packets"])
 
 @router.get("/run/{run_id}", response_model=list[AssetPacketRead])
 def list_asset_packets_for_run(run_id: int, db: Session = Depends(get_db)):
-    return list_asset_packets_by_run(db, run_id)
+    return [AssetPacketRead.from_packet(db, p) for p in list_asset_packets_by_run(db, run_id)]
 
 
 @router.post("/run/{run_id}/create", response_model=AssetPacketRead)
@@ -39,19 +39,20 @@ def create_run_asset_packet_route(
     db: Session = Depends(get_db),
 ):
     try:
-        return create_run_asset_packet(
+        packet = create_run_asset_packet(
             db,
             run_id=run_id,
             title=payload.title,
             assets_payload=[item.model_dump() for item in payload.assets],
         )
+        return AssetPacketRead.from_packet(db, packet)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/thread/{thread_id}", response_model=list[AssetPacketRead])
 def list_asset_packets_for_thread_route(thread_id: int, db: Session = Depends(get_db)):
-    return list_asset_packets_by_thread(db, thread_id)
+    return [AssetPacketRead.from_packet(db, p) for p in list_asset_packets_by_thread(db, thread_id)]
 
 
 @router.post("/thread/{thread_id}/build")
@@ -90,7 +91,7 @@ def update_asset_packet_route(
     if "reply_draft_id" in _fields_set:
         rd = payload.reply_draft_id
 
-    return update_asset_packet(
+    updated = update_asset_packet(
         db=db,
         packet=packet,
         title=payload.title,
@@ -99,6 +100,7 @@ def update_asset_packet_route(
         packet_json=payload.packet_json,
         reply_draft_id=rd,
     )
+    return AssetPacketRead.from_packet(db, updated)
 
 
 @router.get("/{packet_id}", response_model=AssetPacketRead)
@@ -106,7 +108,7 @@ def get_asset_packet_route(packet_id: int, db: Session = Depends(get_db)):
     packet = get_asset_packet(db, packet_id)
     if not packet:
         raise HTTPException(status_code=404, detail="Asset packet not found")
-    return packet
+    return AssetPacketRead.from_packet(db, packet)
 
 
 @router.patch("/{packet_id}/assets", response_model=AssetPacketRead)
@@ -116,11 +118,12 @@ def update_asset_packet_assets_route(
     db: Session = Depends(get_db),
 ):
     try:
-        return update_packet_assets(
+        packet = update_packet_assets(
             db=db,
             packet_id=packet_id,
             assets_payload=[item.model_dump() for item in payload.assets],
         )
+        return AssetPacketRead.from_packet(db, packet)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -128,7 +131,8 @@ def update_asset_packet_assets_route(
 @router.post("/{packet_id}/clone", response_model=AssetPacketRead)
 def clone_asset_packet_route(packet_id: int, db: Session = Depends(get_db)):
     try:
-        return clone_asset_packet(db=db, packet_id=packet_id)
+        packet = clone_asset_packet(db=db, packet_id=packet_id)
+        return AssetPacketRead.from_packet(db, packet)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -146,10 +150,11 @@ def attach_packet_to_reply_draft_route(
     db: Session = Depends(get_db),
 ):
     try:
-        return attach_packet_to_reply_draft(
+        packet = attach_packet_to_reply_draft(
             db,
             packet_id=packet_id,
             reply_draft_id=payload.reply_draft_id,
         )
+        return AssetPacketRead.from_packet(db, packet)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

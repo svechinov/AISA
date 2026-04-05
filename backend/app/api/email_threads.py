@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -6,10 +6,11 @@ from app.repositories.email_message_repo import list_email_messages_by_run, list
 from app.repositories.email_thread_repo import (
     get_email_thread,
     list_email_threads_by_run,
+    list_email_threads_by_run_paginated,
     resolve_thread_outbound_draft_id,
 )
-from app.schemas.email_message import EmailMessageRead
-from app.schemas.email_thread import EmailThreadRead, ThreadDeliveryLlmAnalyzeResponse
+from app.schemas.email_message import EmailMessageListRead, EmailMessageRead, email_message_to_list_read
+from app.schemas.email_thread import EmailThreadRead, PaginatedEmailThreadsResponse, ThreadDeliveryLlmAnalyzeResponse
 from app.services.email_tracking_service import register_manual_bounce, register_manual_dead_mailbox
 from app.services.thread_delivery_llm_service import analyze_thread_delivery_llm
 
@@ -22,14 +23,34 @@ def _thread_read_with_effective_draft(db: Session, t) -> EmailThreadRead:
     return base.model_copy(update={"effective_draft_id": eff})
 
 
-@router.get("/run/{run_id}/messages", response_model=list[EmailMessageRead])
+@router.get("/run/{run_id}/messages", response_model=list[EmailMessageListRead])
 def list_messages_for_run_route(run_id: int, db: Session = Depends(get_db)):
-    return list_email_messages_by_run(db, run_id)
+    return [email_message_to_list_read(m) for m in list_email_messages_by_run(db, run_id)]
 
 
-@router.get("/run/{run_id}", response_model=list[EmailThreadRead])
-def list_threads_for_run(run_id: int, db: Session = Depends(get_db)):
-    return [_thread_read_with_effective_draft(db, t) for t in list_email_threads_by_run(db, run_id)]
+@router.get("/run/{run_id}", response_model=list[EmailThreadRead] | PaginatedEmailThreadsResponse)
+def list_threads_for_run(
+    run_id: int,
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=5000,
+        description="If set, response is paginated {items,total,limit,offset}. If omitted, legacy array.",
+    ),
+    offset: int = Query(0, ge=0),
+    q: str | None = Query(None, description="Optional search on subject and provider_thread_id (ilike)."),
+    db: Session = Depends(get_db),
+):
+    if limit is None:
+        return [_thread_read_with_effective_draft(db, t) for t in list_email_threads_by_run(db, run_id)]
+    rows, total = list_email_threads_by_run_paginated(db, run_id, limit=limit, offset=offset, q=q)
+    off = max(0, offset)
+    return PaginatedEmailThreadsResponse(
+        items=[_thread_read_with_effective_draft(db, t) for t in rows],
+        total=total,
+        limit=limit,
+        offset=off,
+    )
 
 
 @router.get("/{thread_id}/messages", response_model=list[EmailMessageRead])

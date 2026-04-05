@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run
+from app.repositories.run_company_repo import list_run_companies_sparse
 from app.services.llm_gateway import generate_json
 from app.utils.contact_identity import contact_identity_key_from_dict
 from app.services.prompt_builder import build_prompt
@@ -16,9 +17,18 @@ def find_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict
     rules = get_effective_rules_from_run(db, run_id, "find_contacts")
     task = build_find_contacts_task(run)
 
+    companies = step_input.get("companies") if isinstance(step_input, dict) else None
+    if not isinstance(companies, list):
+        companies = []
+    if not companies:
+        companies = list_run_companies_sparse(db, run_id)
+    grounded = [c for c in companies if isinstance(c, dict) and not c.get("llm_hallucination")]
+    data = dict(step_input) if isinstance(step_input, dict) else {}
+    data["companies"] = grounded
+
     prompt = build_prompt(
         task=task,
-        data=step_input,
+        data=data,
         rules=rules,
         output_schema={
             "contacts": [

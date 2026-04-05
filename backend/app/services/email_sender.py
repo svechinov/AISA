@@ -2,6 +2,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.db import SessionLocal
 from app.config import settings
 from app.repositories.email_draft_repo import (
     get_email_draft,
@@ -35,7 +36,9 @@ from app.services.outbound_email_body import (
     append_signature_html_after,
     normalize_draft_body_for_email_html,
 )
+from app.services.run_context_service import get_sender_signature_html
 from app.utils.attached_asset_ids import normalize_attached_asset_ids
+from app.utils.draft_attached_assets import effective_attached_asset_ids_for_email_draft
 
 _log = logging.getLogger(__name__)
 
@@ -60,11 +63,8 @@ def _outreach_mime_attachments_and_exclude_ids(
     return payloads, exclude
 
 
-def send_one_draft(db: Session, draft_id: int) -> dict:
-    draft = get_email_draft(db, draft_id)
-    if not draft:
-        raise ValueError(f"Draft {draft_id} not found")
-
+def validate_outbound_draft_sendable(db: Session, draft) -> None:
+    """Raises ValueError if this draft row cannot be sent (same rules as send_one_draft)."""
     if draft.review_status not in {"approved", "edited"}:
         raise ValueError("Draft is not approved")
 
@@ -78,20 +78,30 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
     if run and run.closed_at is not None:
         raise ValueError("Run is closed — cannot send new outreach")
 
+
+def send_one_draft(db: Session, draft_id: int) -> dict:
+    draft = get_email_draft(db, draft_id)
+    if not draft:
+        raise ValueError(f"Draft {draft_id} not found")
+
+    validate_outbound_draft_sendable(db, draft)
+
+    run = get_run(db, draft.run_id)
     base_raw = str(draft.body or "").strip()
     base = normalize_draft_body_for_email_html(draft.body) if base_raw else ""
-    sig_html = getattr(run, "sender_signature_html", None) if run else None
+    sig_html = get_sender_signature_html(run) if run else None
     has_sig = bool(str(sig_html or "").strip())
 
     try:
+        eff_ids = effective_attached_asset_ids_for_email_draft(db, draft)
         attachment_payloads, mime_exclude_ids = _outreach_mime_attachments_and_exclude_ids(
             db,
-            draft.attached_asset_ids,
+            eff_ids,
         )
         base = append_additional_assets_section_to_email_html(
             base,
             db,
-            draft.attached_asset_ids,
+            eff_ids,
             trailing_rule_if_no_signature_below=not has_sig,
             exclude_asset_ids=mime_exclude_ids,
         )
@@ -198,6 +208,31 @@ def send_one_draft(db: Session, draft_id: int) -> dict:
         }
 
 
+def send_one_draft_in_thread(draft_id: int) -> None:
+    """Runs send_one_draft in a worker thread with its own DB session (API returns 202 before this finishes)."""
+    db = SessionLocal()
+    try:
+        send_one_draft(db, draft_id)
+    except ValueError as e:
+        _log.warning("send_one_draft (async) draft_id=%s: %s", draft_id, e)
+    except Exception:
+        _log.exception("send_one_draft (async) draft_id=%s", draft_id)
+    finally:
+        db.close()
+
+
+def send_approved_drafts_for_run_in_thread(run_id: int) -> None:
+    db = SessionLocal()
+    try:
+        send_approved_drafts_for_run(db, run_id)
+    except ValueError as e:
+        _log.warning("send_approved_drafts_for_run (async) run_id=%s: %s", run_id, e)
+    except Exception:
+        _log.exception("send_approved_drafts_for_run (async) run_id=%s", run_id)
+    finally:
+        db.close()
+
+
 def send_approved_drafts_for_run(db: Session, run_id: int) -> dict:
     run = get_run(db, run_id)
     if run and run.closed_at is not None:
@@ -238,16 +273,17 @@ def mock_send_first_approved_draft_preview(db: Session, run_id: int) -> dict:
     draft = drafts[0]
     base_raw = str(draft.body or "").strip()
     base = normalize_draft_body_for_email_html(draft.body) if base_raw else ""
-    sig_html = getattr(run, "sender_signature_html", None)
+    sig_html = get_sender_signature_html(run)
     has_sig = bool(str(sig_html or "").strip())
+    eff_ids = effective_attached_asset_ids_for_email_draft(db, draft)
     preview_attachment_payloads, preview_mime_exclude = _outreach_mime_attachments_and_exclude_ids(
         db,
-        draft.attached_asset_ids,
+        eff_ids,
     )
     base = append_additional_assets_section_to_email_html(
         base,
         db,
-        draft.attached_asset_ids,
+        eff_ids,
         trailing_rule_if_no_signature_below=not has_sig,
         exclude_asset_ids=preview_mime_exclude,
     )

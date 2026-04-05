@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,7 +36,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { RunSetupHourlySendsChart } from "@/components/RunSetupHourlySendsChart";
 import { cn } from "@/lib/utils";
 import {
-  snapshotEnsureRunSetupPrefsSeedFromRun,
+  snapshotMergeRunSetupBodiesFromRun,
   snapshotInitialProjectView,
   snapshotMergeWorkspaceFromRunCards,
   snapshotMergeWriteInnerTabs,
@@ -54,11 +62,13 @@ import {
   stripContactForPanelLite,
   stripDraftForPanelLite,
 } from "@/lib/runPanelLite";
+import { fetchAllPagedItems } from "@/lib/paginatedApi";
 import {
   Archive,
   ArchiveRestore,
   ArrowDownWideNarrow,
   ArrowUpNarrowWide,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
   CircleCheck,
@@ -81,14 +91,17 @@ import {
  * In a production build without env, the default is a direct URL (with nginx, configure your own proxy).
  */
 const ENV_API = import.meta.env.VITE_API_BASE?.trim();
-const DEV_PROXY_TARGET =
-  import.meta.env.VITE_API_PROXY_TARGET?.trim() || "http://127.0.0.1:8000";
 const API_BASE =
   ENV_API && ENV_API.length > 0
     ? ENV_API.replace(/\/$/, "")
     : import.meta.env.DEV
       ? "/api"
       : "http://127.0.0.1:8000";
+
+/** GET /email-drafts/run/:id with full `body` for Review Drafts (not only body_preview). */
+function emailDraftsRunListPath(runId) {
+  return `/email-drafts/run/${runId}?include_body=1`;
+}
 
 /** Labels for GET /setup/status summary (dashboard informer). */
 const SETUP_LLM_LABELS = {
@@ -163,6 +176,33 @@ function isOutboundDraftClosedForReview(d) {
   return Boolean(d && String(d.status) === "sent");
 }
 
+/** Lite snapshot + cached cards — only drafts still in the Review pipeline (not historical sent rows). */
+function draftsForRunPanelLitePreview(draftsArray) {
+  if (!Array.isArray(draftsArray)) return [];
+  return draftsArray.filter((d) => !isOutboundDraftClosedForReview(d));
+}
+
+function DraftCollapsibleSection({ title, children, className }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={cn("rounded-lg border border-border bg-muted/20 p-3", className)}>
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <ChevronDown
+          className={cn("h-4 w-4 shrink-0 transition-transform", open && "rotate-180")}
+          aria-hidden
+        />
+        {title}
+      </button>
+      {open ? <div className="mt-2">{children}</div> : null}
+    </div>
+  );
+}
+
 function mergeContactReviewSnap(snap, live) {
   return {
     pending: snap?.pending ?? live.pending,
@@ -174,9 +214,10 @@ function mergeContactReviewSnap(snap, live) {
   };
 }
 
-/** GET /contacts/run/:id — always prefer array; tolerate legacy { contacts } if ever returned. */
+/** GET /contacts/run/:id — array, or paginated { items }, or bucket { contacts }. */
 function normalizeContactsRunPayload(data) {
   if (Array.isArray(data)) return data;
+  if (data && typeof data === "object" && Array.isArray(data.items)) return data.items;
   if (data && typeof data === "object" && Array.isArray(data.contacts)) return data.contacts;
   return [];
 }
@@ -229,6 +270,39 @@ function orderRunsOpenFirst(runs) {
   const open = runs.filter((r) => !r.closed_at);
   const closed = runs.filter((r) => r.closed_at);
   return [...open, ...closed];
+}
+
+/** One row in the Switch run dialog (open + closed sections use the same layout). */
+function SwitchRunListRow({ run, selectedRun, onSelect }) {
+  const isCurrent = selectedRun?.id === run.id;
+  return (
+    <button
+      type="button"
+      aria-current={isCurrent ? "true" : undefined}
+      className={`w-full rounded-2xl border-2 p-3 text-left text-sm transition-colors hover:bg-muted/50 ${
+        isCurrent ? "border-primary bg-primary/5" : "border-border"
+      }`}
+      onClick={() => void onSelect(run.id, run)}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{run.name}</span>
+        {isCurrent ? (
+          <Badge variant="secondary" className="font-normal text-xs">
+            Current
+          </Badge>
+        ) : null}
+      </div>
+      <div className="space-y-0.5 text-xs text-muted-foreground">
+        <div>{run.display_phase}</div>
+        <div>
+          Companies {run.companies_count} · Contacts {run.contacts_count}
+        </div>
+        <div>
+          Sent {run.emails_sent} · Replies {run.replies} · Threads {run.active_threads}
+        </div>
+      </div>
+    </button>
+  );
 }
 
 /** Longest first so e.g. "professional notes:" wins over embedded "notes:". */
@@ -329,9 +403,6 @@ function contextToOutreachBriefText(ctx) {
   ].join("\n");
 }
 
-/** Mirrors backend run.context_json key for saved Prompt setup textarea. */
-const PROMPT_SETUP_STORAGE_KEY = "prompt_setup_text";
-
 /** True when saved HTML has visible text (empty rich-text often stores tags only). */
 function runSignatureHasMeaningfulContent(html) {
   const raw = String(html ?? "").trim();
@@ -347,17 +418,50 @@ function runSignatureHasMeaningfulContent(html) {
   return text.length > 0;
 }
 
+/** After failed optimistic Prompt/Signature save: full prefs row for snapshotWriteRunSetupPrefs (before may be null). */
+function runSetupPrefsRollbackPartial(prefsBefore, prevRun) {
+  if (prefsBefore != null) {
+    return {
+      prompt_setup_saved: Boolean(prefsBefore.prompt_setup_saved),
+      sender_signature_configured: Boolean(prefsBefore.sender_signature_configured),
+      prompt_setup_text:
+        typeof prefsBefore.prompt_setup_text === "string" ? prefsBefore.prompt_setup_text : "",
+      signature_html: typeof prefsBefore.signature_html === "string" ? prefsBefore.signature_html : "",
+    };
+  }
+  const pt = typeof prevRun?.prompt_setup_text === "string" ? prevRun.prompt_setup_text : "";
+  return {
+    prompt_setup_saved: pt.trim().length > 0,
+    sender_signature_configured: runSignatureHasMeaningfulContent(prevRun?.sender_signature_html ?? ""),
+    prompt_setup_text: pt,
+    signature_html: String(prevRun?.sender_signature_html ?? ""),
+  };
+}
+
 function getPromptSetupEditorInitialText(run) {
   if (!run) return DEFAULT_OUTREACH_BRIEF;
-  const cj = run.context_json;
-  if (cj && typeof cj === "object") {
-    const raw = cj[PROMPT_SETUP_STORAGE_KEY];
-    if (typeof raw === "string" && raw.length > 0) {
-      return raw;
-    }
+  if (typeof run.prompt_setup_text === "string" && run.prompt_setup_text.length > 0) {
+    return run.prompt_setup_text;
   }
   const ctx = contextFromRun(run);
   return contextToOutreachBriefText(ctx);
+}
+
+/** Instant dialog text: cached bodies (localStorage) beat card-only selectedRun (no context_json). */
+function getPromptSetupDialogSeed(runId, selectedRun) {
+  const snap = snapshotReadRunSetupPrefs(runId);
+  if (snap && typeof snap.prompt_setup_text === "string") {
+    return snap.prompt_setup_text;
+  }
+  return getPromptSetupEditorInitialText(selectedRun);
+}
+
+function getSignatureDialogSeed(runId, selectedRun, workspace) {
+  const snap = snapshotReadRunSetupPrefs(runId);
+  if (snap && typeof snap.signature_html === "string") {
+    return snap.signature_html;
+  }
+  return String(selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "");
 }
 
 /** Prefill dialog from a run (GET /runs/:id or selected run). */
@@ -392,18 +496,29 @@ function seedNewRunFormFromRun(run) {
 
 /** Default timeout so the UI never sits on “Loading…” forever if the proxy/API hangs. */
 const API_TIMEOUT_MS = 25000;
-/** POST /runs/:id/restart runs the full LLM setup loop synchronously. */
-const RESTART_RUN_TIMEOUT_MS = 600000;
 /** POST /runs/start runs `run_workflow` synchronously on the server (same class of long work as restart). */
 const START_RUN_TIMEOUT_MS = 600000;
 /** Single-company find retry calls the LLM again; allow longer than default API timeout. */
 const COMPANY_RETRY_FIND_TIMEOUT_MS = 120000;
-/** PATCH prompt/signature is fast on the server, but slow proxies or queued workers can exceed the default. */
-const RUN_SETUP_PATCH_TIMEOUT_MS = 120000;
+/** Background PATCH after optimistic UI; server is fast — this bounds how long we retry reconciling. */
+const RUN_SETUP_PATCH_TIMEOUT_MS = 45000;
+/** GET /runs/:id/review-setup-fields — tiny JSON for Prompt/Signature dialogs (no full run row). */
+const RUN_REVIEW_SETUP_LITE_TIMEOUT_MS = 20000;
 /** Run-details bundle is many parallel GETs; allow the same headroom when refreshing after setup saves. */
 const LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS = 120000;
+/** GET /runs/:id/companies — run_companies + statuses; allow long wait like other run bundles. */
+const COMPANIES_HTTP_TIMEOUT_MS = LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
+/** POST /sending/.../mock-send-preview — synchronous Gmail on server; allow long wait. */
+const MOCK_SEND_PREVIEW_POST_TIMEOUT_MS = 120000;
+/** Poll GET /email-drafts/:id until terminal status (API returns 202 immediately; Gmail runs in background). */
+const OUTBOUND_SEND_POLL_MS = 2000;
+const OUTBOUND_SEND_POLL_MAX = 30;
 /** Background poll / metrics-only refresh: workspace-lite + global performance (no contact/draft lists). */
-const POLL_METRICS_TIMEOUT_MS = 30000;
+const POLL_METRICS_TIMEOUT_MS = 60000;
+/** Don’t spam the activity log with the same silent metrics failure on every poll tick. */
+const METRICS_SILENT_FAILURE_LOG_INTERVAL_MS = 45000;
+/** GET /email-drafts/:id for edit modal — list often already has full body; this caps wait when a second GET is needed. */
+const EMAIL_DRAFT_GET_FOR_EDIT_TIMEOUT_MS = 45000;
 /** Contact analyzer: many Gmail searches in one request — allow long run (default 25s would abort mid-flight). */
 const CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS = 600000;
 /** Single-address Gmail search can be slow. */
@@ -414,6 +529,37 @@ const CONTACT_ANALYZER_IMPORT_INBOX_TIMEOUT_MS = 600000;
 const CONTACT_ANALYZER_PAGE_SIZE = 50;
 /** Same page size for Companies table and Contacts group lists. */
 const WORKSPACE_TABLE_PAGE_SIZE = CONTACT_ANALYZER_PAGE_SIZE;
+/** One GET loads up to this many company rows; pagination is client-side only. */
+const COMPANIES_FETCH_MAX = 500;
+/** Retry-all queue scan: find next candidate across this many companies (API allows up to 5000). */
+const COMPANIES_RETRY_QUEUE_SCAN_MAX = 5000;
+
+function normalizeCompaniesPanelResponse(data, offsetFallback = 0) {
+  const rawList = data?.companies;
+  const companies = Array.isArray(rawList) ? rawList : [];
+  const totalRaw = data?.companies_total;
+  const pageLen = companies.length;
+  const respOffset = Number(data?.offset ?? offsetFallback);
+  const minTotalFromPaging = respOffset + pageLen;
+  const parsedTotal =
+    typeof totalRaw === "number" && Number.isFinite(totalRaw)
+      ? totalRaw
+      : typeof totalRaw === "string" && String(totalRaw).trim() !== ""
+        ? Number(totalRaw)
+        : NaN;
+  const companies_total = Number.isFinite(parsedTotal)
+    ? Math.max(parsedTotal, minTotalFromPaging)
+    : respOffset > 0
+      ? minTotalFromPaging
+      : pageLen;
+  return {
+    ...data,
+    companies,
+    companies_total,
+    offset: respOffset,
+    limit: data?.limit != null ? Number(data.limit) : COMPANIES_FETCH_MAX,
+  };
+}
 
 function combineAbortSignals(a, b) {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
@@ -586,19 +732,11 @@ function detailFromApiErrorMessage(msg) {
 
 function formatApiError(e) {
   if (e?.name === "AbortError") {
-    const curlHint =
-      API_BASE === "/api"
-        ? `Timed out or cancelled — check ${DEV_PROXY_TARGET}/health (Vite proxies /api to VITE_API_PROXY_TARGET; default http://127.0.0.1:8000).`
-        : `Timed out or cancelled — check ${API_BASE}/health.`;
-    return `${curlHint}`;
+    return "Timed out or cancelled";
   }
   const msg = e?.message || String(e);
   if (msg === "Failed to fetch" || msg.includes("NetworkError") || msg.includes("Load failed")) {
-    const curlHint =
-      API_BASE === "/api"
-        ? `curl ${DEV_PROXY_TARGET}/health — the Vite proxy uses VITE_API_PROXY_TARGET (${DEV_PROXY_TARGET}); if not OK, start the backend (e.g. docker compose up -d in infra/ for :8000).`
-        : `curl ${API_BASE}/health and docker compose up -d in infra/.`;
-    return `${msg} — ${curlHint}`;
+    return "Failed to fetch";
   }
   return msg;
 }
@@ -606,22 +744,60 @@ function formatApiError(e) {
 /** Transient / bursty request failures — log only; no full-page error informer. */
 function isConsoleOnlyApiFailure(message) {
   const m = String(message || "");
+  const lower = m.toLowerCase();
   return (
     m.includes("Failed to fetch") ||
     m.includes("NetworkError") ||
     m.includes("Load failed") ||
     m.includes("Timed out or cancelled") ||
-    (m.includes("Abort") && (m.includes("aborted") || m.includes("cancel")))
+    lower.includes("aborted") ||
+    (lower.includes("abort") && lower.includes("cancel"))
   );
 }
 
+const DEBUG_LOG_MAX_JSON = 12000;
+
+/** Second line for activity log — JSON or string (truncated). */
+function formatDebugDetail(d) {
+  if (d == null) return "";
+  if (typeof d === "string") {
+    return d.length > DEBUG_LOG_MAX_JSON ? `${d.slice(0, DEBUG_LOG_MAX_JSON)}\n…` : d;
+  }
+  try {
+    const s = JSON.stringify(d, null, 0);
+    return s.length > DEBUG_LOG_MAX_JSON ? `${s.slice(0, DEBUG_LOG_MAX_JSON)}\n… [truncated]` : s;
+  } catch {
+    return String(d);
+  }
+}
+
+/** Set from AiBizOsHumanUI via useLayoutEffect — setUiError writes silent failures here. */
+let activityLogAppendRef = null;
+/** Throttle duplicate [ui] lines for the same transient message (parallel requests → log spam). */
+let uiSilentErrorLastLogAt = 0;
+let uiSilentErrorLastKey = "";
+
 function setUiError(setError, err) {
+  if (err?.name === "AbortError") return;
   const raw = String(err?.message ?? err ?? "");
   if (!raw) return;
   const msg = detailFromApiErrorMessage(raw);
   if (!msg) return;
   if (isConsoleOnlyApiFailure(msg)) {
-    console.warn("[AiBizOsHumanUI]", msg, err);
+    const now = Date.now();
+    const key = msg.trim().slice(0, 120);
+    if (
+      key === uiSilentErrorLastKey &&
+      now - uiSilentErrorLastLogAt < METRICS_SILENT_FAILURE_LOG_INTERVAL_MS
+    ) {
+      return;
+    }
+    uiSilentErrorLastLogAt = now;
+    uiSilentErrorLastKey = key;
+    activityLogAppendRef?.(`[ui] ${msg}`, {
+      name: err?.name,
+      message: raw.slice(0, 2000),
+    });
     return;
   }
   setError(msg);
@@ -834,6 +1010,16 @@ export default function AiBizOsHumanUI() {
   const [contacts, setContacts] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(false);
+  /** True while loadRunDetails bundle is in flight (parallel GETs for run). */
+  const [runDetailsLoading, setRunDetailsLoading] = useState(false);
+  /** Drafts/Contacts tab: separate GET lists (not part of workspace-only loadRunDetails). */
+  const [draftsSectionFetchBusy, setDraftsSectionFetchBusy] = useState(false);
+  const [contactsSectionFetchBusy, setContactsSectionFetchBusy] = useState(false);
+  /** Right-top activity log: { id, t, text }[] */
+  const [activityLogLines, setActivityLogLines] = useState([]);
+  const [activityLogDismissed, setActivityLogDismissed] = useState(false);
+  const runDetailsLoadGenRef = useRef(0);
+  const activityLogEndRef = useRef(null);
   const [error, setError] = useState("");
   /** Hide draft error banner after dismiss; key = `${id}:${error_message}` so a new error shows again. */
   const [dismissedOutboundDraftErrorKeys, setDismissedOutboundDraftErrorKeys] = useState(
@@ -854,8 +1040,14 @@ export default function AiBizOsHumanUI() {
   const [runDetailsHydratedId, setRunDetailsHydratedId] = useState(null);
   /** GET /contacts/run/:id applied for this run (Review + contact-analyzer). */
   const [contactsListReadyRunId, setContactsListReadyRunId] = useState(null);
+  /** Last run where GET /contacts/run failed — stops infinite "Loading…" without marking list hydrated. */
+  const [contactsListFailedRunId, setContactsListFailedRunId] = useState(null);
+  /** Last run where GET /runs/:id/companies failed (incl. network) — avoids empty copy when load never applied. */
+  const [companiesListFailedRunId, setCompaniesListFailedRunId] = useState(null);
   /** GET /email-drafts/run/:id applied for this run (Review Drafts). */
   const [draftsListReadyRunId, setDraftsListReadyRunId] = useState(null);
+  /** Last run where GET /email-drafts/run failed — avoids infinite “cached drafts — refreshing…”. */
+  const [draftsListFailedRunId, setDraftsListFailedRunId] = useState(null);
   /** Bumps when Prompt/Signature setup localStorage prefs change so icons re-read snapshots without waiting on run object. */
   const [runSetupPrefsRev, setRunSetupPrefsRev] = useState(0);
   /** All runs / all projects — from GET /sending/global-performance. */
@@ -867,6 +1059,8 @@ export default function AiBizOsHumanUI() {
   const [newRunUpdateInFlight, setNewRunUpdateInFlight] = useState(false);
   const newRunDialogBusy = newRunCreateInFlight || newRunUpdateInFlight;
   const [switchRunOpen, setSwitchRunOpen] = useState(false);
+  /** PATCH /runs/:id/project — attach run to current project when project_id drifted. */
+  const [runProjectMoveInFlight, setRunProjectMoveInFlight] = useState(false);
   const [closeRunOpen, setCloseRunOpen] = useState(false);
   const [renameProjectOpen, setRenameProjectOpen] = useState(false);
   const [renameProjectId, setRenameProjectId] = useState(null);
@@ -900,19 +1094,50 @@ export default function AiBizOsHumanUI() {
   /** POST /sending/runs/:id/send in flight (Send all approved). */
   const [sendAllApprovedBusy, setSendAllApprovedBusy] = useState(false);
   const [editDraft, setEditDraft] = useState(null);
+  /** True while GET /email-drafts/:id for the editor is in flight — modal still opens (was null until fetch, so Edit looked broken). */
+  const [editDraftLoading, setEditDraftLoading] = useState(false);
   const [editDraftSaving, setEditDraftSaving] = useState(false);
-  const [applyAssetsToAllPendingDrafts, setApplyAssetsToAllPendingDrafts] = useState(false);
+  /** Edit draft dialog: apply chosen attachments to all drafts in Pending or Approved (matches active sub-tab). */
+  const [applyAssetsEditScope, setApplyAssetsEditScope] = useState("none");
   const [assetsLibrary, setAssetsLibrary] = useState([]);
   const [runAssetPackets, setRunAssetPackets] = useState([]);
-  /** Global library: fetch once per session (Tracking can push updates via onStaticAssetsSynced). */
+  /** Set after a successful assets GET (Tracking can also push via onStaticAssetsSynced). */
   const assetsLibraryFetchedRef = useRef(false);
-  /** Packets for the current run — one GET per run id until invalidated by Tracking. */
+  /** Last run id we stored packets for (kept in sync with onStaticAssetsSynced). */
   const assetPacketsLoadedForRunIdRef = useRef(null);
+  /** Bumped on each assets/packets fetch start so stale async completions never wipe state. */
+  const assetsFetchGenerationRef = useRef(0);
   /** Latest in-flight `loadRunDetails` run id — stale responses must not apply state. */
   const runLoadTargetRef = useRef(null);
+  /** Invalidate in-flight GET /email-drafts/:id when the edit modal is closed or a new edit starts. */
+  const editDraftFetchSeqRef = useRef(0);
+  /** Draft id being opened in the editor (set before GET returns — for delete-while-loading). */
+  const editDraftOpenTargetIdRef = useRef(null);
+  /** Abort in-flight GET /email-drafts/:id when closing the edit modal or opening another draft. */
+  const editDraftGetAbortRef = useRef(null);
   /** Stale-response guards for list GETs (independent so Contacts-only fetch cannot overwrite Drafts from a bundled poll). */
   const contactsListFetchSeqRef = useRef(0);
   const draftsListFetchSeqRef = useRef(0);
+  /** Mirrors list-ready state for deferred checks after loadRunDetails catch (avoids stale closure vs refreshRun*Only). */
+  const contactsListReadyRunIdRef = useRef(null);
+  const draftsListReadyRunIdRef = useRef(null);
+  /** Stale-response guard for GET /runs/:id/companies (Companies tab). */
+  const companiesListFetchSeqRef = useRef(0);
+  /** Last run id we applied Companies pagination for — detects run switch before `companiesPage` state updates. */
+  const companiesFetchRunIdRef = useRef(null);
+  /** Last workspace.setup_summary.companies_collected seen for selected run — refresh list on real count change without re-fetching on every metrics poll tick. */
+  const prevCompaniesCollectedRef = useRef(null);
+  /** One metrics poll at a time — avoids overlapping GETs when interval (e.g. 8s) < request duration. */
+  const metricsPollInFlightRef = useRef(false);
+  /** Mirrors `restartsInFlight` for sync handlers (metrics poll skips only runs with background restart). */
+  const restartsInFlightRef = useRef({});
+  /** One interval per run_id polling GET /runs/:id until needs_review/failed after 202 restart. */
+  const restartPollIntervalsRef = useRef({});
+  /** Throttle silent metrics errors in the activity log. */
+  const metricsSilentFailureLastLogAtRef = useRef(0);
+  /** Concurrent section fetches share one "busy" flag — use depth so one finally() cannot clear spinner while another is still in flight. */
+  const contactsSectionFetchDepthRef = useRef(0);
+  const draftsSectionFetchDepthRef = useRef(0);
   const [draftForm, setDraftForm] = useState({
     subject: "",
     body: "",
@@ -927,20 +1152,18 @@ export default function AiBizOsHumanUI() {
   const [promptSetupOpen, setPromptSetupOpen] = useState(false);
   const [promptSetupText, setPromptSetupText] = useState("");
   const [promptSetupSaving, setPromptSetupSaving] = useState(false);
-  /** GET /runs/:id in flight before opening Prompt setup (full context_json). */
-  const [promptSetupOpenLoading, setPromptSetupOpenLoading] = useState(false);
-  /** GET /runs/:id in flight before opening Signature setup (full sender_signature_html). */
-  const [signatureSetupOpenLoading, setSignatureSetupOpenLoading] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restartDialogRun, setRestartDialogRun] = useState(null);
-  /** Non-blocking: restart runs in background after confirm (no full-screen lock). */
-  const [pendingRestart, setPendingRestart] = useState(null);
+  /** run_id → { name } while POST /restart accepted and background workflow not finished. */
+  const [restartsInFlight, setRestartsInFlight] = useState(() => ({}));
   const [companiesPanel, setCompaniesPanel] = useState(null);
   const [companiesLoading, setCompaniesLoading] = useState(false);
   /** Per-row: POST /companies/retry-find in flight (several retries can run in parallel). */
   const [companyRetryLoading, setCompanyRetryLoading] = useState(() => ({}));
   const [companyRetryAllLoading, setCompanyRetryAllLoading] = useState(false);
   const [companiesPage, setCompaniesPage] = useState(1);
+  /** Increment to re-run Companies tab GET after a failed load (Retry). */
+  const [companiesRefreshNonce, setCompaniesRefreshNonce] = useState(0);
   const [contactReviewTab, setContactReviewTab] = useState("pending");
   const [contactsReviewPage, setContactsReviewPage] = useState(1);
   const [continueCompanyFindLoading, setContinueCompanyFindLoading] = useState(false);
@@ -970,6 +1193,11 @@ export default function AiBizOsHumanUI() {
 
   const gmailSendReady = setupIntegration?.gmail_send_ready === true;
 
+  useEffect(() => {
+    contactsListReadyRunIdRef.current = contactsListReadyRunId;
+    draftsListReadyRunIdRef.current = draftsListReadyRunId;
+  }, [contactsListReadyRunId, draftsListReadyRunId]);
+
   const contactsVisible = useMemo(() => filterShadowNoEmailContacts(contacts), [contacts]);
 
   useEffect(() => {
@@ -987,6 +1215,29 @@ export default function AiBizOsHumanUI() {
       ),
     [contactAnalyzerNavVisible],
   );
+
+  const switchRunOpenList = useMemo(
+    () => (Array.isArray(runsList) ? runsList.filter((r) => !r.closed_at) : []),
+    [runsList],
+  );
+  const switchRunClosedList = useMemo(
+    () => (Array.isArray(runsList) ? runsList.filter((r) => r.closed_at) : []),
+    [runsList],
+  );
+
+  const runProjectMismatch = useMemo(() => {
+    if (!selectedRun?.id || !selectedProject) return false;
+    const pid = projectPk(selectedProject);
+    if (pid == null || pid === "") return false;
+    return Number(selectedRun.project_id) !== Number(pid);
+  }, [selectedRun, selectedProject]);
+
+  const runOtherProjectLabel = useMemo(() => {
+    if (!runProjectMismatch || selectedRun?.project_id == null) return null;
+    const rid = Number(selectedRun.project_id);
+    const row = projects.find((p) => Number(p.id) === rid || Number(p.project_id) === rid);
+    return row?.name?.trim() || `Project #${selectedRun.project_id}`;
+  }, [runProjectMismatch, selectedRun?.project_id, projects]);
 
   const analyzerRowsSorted = useMemo(() => {
     const rows = analyzerRows.slice();
@@ -1044,6 +1295,68 @@ export default function AiBizOsHumanUI() {
     }
   }, []);
 
+  const appendActivityLog = useCallback((text, detail) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    let full = String(text);
+    if (detail !== undefined && detail !== null) {
+      full += `\n${formatDebugDetail(detail)}`;
+    }
+    setActivityLogLines((prev) => [...prev.slice(-400), { id, t: Date.now(), text: full }]);
+    setActivityLogDismissed(false);
+  }, []);
+
+  useLayoutEffect(() => {
+    activityLogAppendRef = appendActivityLog;
+    return () => {
+      activityLogAppendRef = null;
+    };
+  }, [appendActivityLog]);
+
+  /** Run switch + assets/packets pipeline — same channel as the rest of the UI (Activity panel). */
+  const appendRunTraceLog = useCallback((message, detail) => {
+    appendActivityLog(`Run trace: ${message}`, detail);
+  }, [appendActivityLog]);
+
+  const appendTrackingRunTraceLog = useCallback(
+    (message, detail) => {
+      appendActivityLog(`Run trace: [Tracking] ${message}`, detail);
+    },
+    [appendActivityLog],
+  );
+
+  useEffect(() => {
+    if (activityLogLines.length === 0) return;
+    queueMicrotask(() => {
+      activityLogEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+  }, [activityLogLines]);
+
+  useEffect(() => {
+    restartsInFlightRef.current = restartsInFlight;
+  }, [restartsInFlight]);
+
+  const selectedRunIdRef = useRef(null);
+  /** Keep in sync during render so async callbacks (e.g. Tracking onStaticAssetsSynced) see the current run before child useEffects run. */
+  selectedRunIdRef.current = selectedRun?.id ?? null;
+  const selectedProjectRef = useRef(null);
+  useEffect(() => {
+    selectedProjectRef.current = selectedProject;
+  }, [selectedProject]);
+
+  const selectedRunRef = useRef(null);
+  useEffect(() => {
+    selectedRunRef.current = selectedRun;
+  }, [selectedRun]);
+
+  useEffect(() => {
+    return () => {
+      Object.keys(restartPollIntervalsRef.current).forEach((k) => {
+        clearInterval(restartPollIntervalsRef.current[k]);
+      });
+      restartPollIntervalsRef.current = {};
+    };
+  }, []);
+
   const loadProjects = useCallback(async (listView, options = {}) => {
     const { signal } = options;
     const v = listView === undefined ? projectView : listView;
@@ -1054,6 +1367,12 @@ export default function AiBizOsHumanUI() {
     }
     setLoading(true);
     setError("");
+    setActivityLogLines([]);
+    appendActivityLog(
+      v === "archived"
+        ? "Projects: GET /projects?archived=true"
+        : "Projects: GET /projects?archived=false",
+    );
     try {
       const qs = v === "archived" ? "?archived=true" : "?archived=false";
       const data = await api(`/projects${qs}`, { signal });
@@ -1064,28 +1383,38 @@ export default function AiBizOsHumanUI() {
         if (!data.length) return null;
         return snapshotPickSelectedProject(data, prev, v);
       });
+      appendActivityLog(`Projects loaded (${Array.isArray(data) ? data.length : 0}).`);
     } catch (e) {
       if (signal?.aborted) return;
+      appendActivityLog(`Projects error: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
       setUiError(setError, e);
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [projectView]);
+  }, [projectView, appendActivityLog]);
 
   const continueCompanyFindAllPending = async (runId) => {
     if (!runId) return;
     setError("");
     setContinueCompanyFindLoading(true);
+    appendActivityLog(`Companies: POST /runs/${runId}/companies/continue-find`);
     try {
       await api(`/runs/${runId}/companies/continue-find`, {
         method: "POST",
         timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
       });
-      const data = await api(`/runs/${runId}/companies`);
-      setCompaniesPanel(data);
+      const ps = new URLSearchParams();
+      ps.set("limit", String(COMPANIES_FETCH_MAX));
+      ps.set("offset", "0");
+      const data = await api(`/runs/${runId}/companies?${ps}`, {
+        timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+      });
+      setCompaniesPanel(normalizeCompaniesPanelResponse(data, 0));
       setCompanyFindUnavailable({});
       refreshRunMetricsOnly(runId);
+      appendActivityLog("Continue-find finished; table refreshed.");
     } catch (e) {
+      appendActivityLog(`Continue-find: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
       setUiError(setError, e);
     } finally {
       setContinueCompanyFindLoading(false);
@@ -1096,6 +1425,7 @@ export default function AiBizOsHumanUI() {
     if (!runId || collectIndex == null) return;
     setError("");
     setCompanyRetryLoading((prev) => ({ ...prev, [collectIndex]: true }));
+    appendActivityLog(`Companies: POST /runs/${runId}/companies/retry-find { collect_index: ${collectIndex} }`);
     try {
       const result = await api(`/runs/${runId}/companies/retry-find`, {
         method: "POST",
@@ -1108,9 +1438,15 @@ export default function AiBizOsHumanUI() {
           : typeof result?.newContactsMerged === "number"
             ? result.newContactsMerged
             : 0;
-      const data = await api(`/runs/${runId}/companies`);
-      setCompaniesPanel(data);
-      const rowAfter = data.companies?.find((c) => c.collect_index === collectIndex);
+      const ps = new URLSearchParams();
+      ps.set("limit", String(COMPANIES_FETCH_MAX));
+      ps.set("offset", "0");
+      const data = await api(`/runs/${runId}/companies?${ps}`, {
+        timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+      });
+      const normalized = normalizeCompaniesPanelResponse(data, 0);
+      setCompaniesPanel(normalized);
+      const rowAfter = normalized.companies?.find((c) => c.collect_index === collectIndex);
       if (
         (rowAfter?.contact_status === "none" || rowAfter?.contact_status === "no_email") &&
         merged === 0
@@ -1126,7 +1462,17 @@ export default function AiBizOsHumanUI() {
         });
       }
       refreshRunMetricsOnly(runId);
+      const label = String(rowAfter?.name ?? rowAfter?.company ?? "—").trim() || "—";
+      appendActivityLog(
+        `Companies: retry-find done — collect_index=${collectIndex} "${label}" → contact_status=${rowAfter?.contact_status ?? "—"}, new_contacts_merged=${merged}`,
+        { runId, collectIndex },
+      );
     } catch (e) {
+      const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
+      appendActivityLog(`Companies: retry-find error (collect_index=${collectIndex}) — ${msg}`, {
+        runId,
+        collectIndex,
+      });
       setUiError(setError, e);
     } finally {
       setCompanyRetryLoading((prev) => {
@@ -1142,19 +1488,44 @@ export default function AiBizOsHumanUI() {
     if (!runId) return;
     setError("");
     setCompanyRetryAllLoading(true);
+    appendActivityLog(`Companies: Retry all — start (run_id=${runId})`);
+    let retryAllAbortedByError = false;
     let unavailableAcc = { ...companyFindUnavailable };
+    const companiesSnapshotUrl = () => {
+      const ps = new URLSearchParams();
+      ps.set("limit", String(COMPANIES_FETCH_MAX));
+      ps.set("offset", "0");
+      return `/runs/${runId}/companies?${ps}`;
+    };
+    const retryQueueScanUrl = () => {
+      const ps = new URLSearchParams();
+      ps.set("limit", String(COMPANIES_RETRY_QUEUE_SCAN_MAX));
+      ps.set("offset", "0");
+      return `/runs/${runId}/companies?${ps}`;
+    };
     try {
       for (let safety = 0; safety < 500; safety++) {
-        const data = await api(`/runs/${runId}/companies`);
-        setCompaniesPanel(data);
-        const row = data.companies?.find(
+        const fullScan = await api(retryQueueScanUrl(), {
+          timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+        });
+        const row = fullScan.companies?.find(
           (c) =>
             (c.contact_status === "none" || c.contact_status === "no_email") &&
             !unavailableAcc[c.collect_index],
         );
-        if (!row) break;
+        if (!row) {
+          const snap = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
+          setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
+          appendActivityLog(`Companies: Retry all — queue empty, table refreshed (run_id=${runId}).`);
+          break;
+        }
 
         const collectIndex = row.collect_index;
+        const rowLabel = String(row?.name ?? row?.company ?? "—").trim() || "—";
+        appendActivityLog(
+          `Companies: Retry all — POST retry-find collect_index=${collectIndex} "${rowLabel}" (was: contact_status=${row?.contact_status ?? "—"})`,
+          { runId, collectIndex },
+        );
         setCompanyRetryLoading((prev) => ({ ...prev, [collectIndex]: true }));
         try {
           const result = await api(`/runs/${runId}/companies/retry-find`, {
@@ -1168,9 +1539,12 @@ export default function AiBizOsHumanUI() {
               : typeof result?.newContactsMerged === "number"
                 ? result.newContactsMerged
                 : 0;
-          const dataAfter = await api(`/runs/${runId}/companies`);
-          setCompaniesPanel(dataAfter);
+          const dataAfter = await api(retryQueueScanUrl(), {
+            timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+          });
           const rowAfter = dataAfter.companies?.find((c) => c.collect_index === collectIndex);
+          const snap = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
+          setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
           if (
             (rowAfter?.contact_status === "none" || rowAfter?.contact_status === "no_email") &&
             merged === 0
@@ -1187,8 +1561,19 @@ export default function AiBizOsHumanUI() {
               return next;
             });
           }
+          const afterLabel = String(rowAfter?.name ?? rowAfter?.company ?? "—").trim() || "—";
+          appendActivityLog(
+            `Companies: Retry all — row done collect_index=${collectIndex} "${afterLabel}" → contact_status=${rowAfter?.contact_status ?? "—"}, new_contacts_merged=${merged}`,
+            { runId, collectIndex },
+          );
         } catch (e) {
+          const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
+          appendActivityLog(`Companies: Retry all — error (collect_index=${collectIndex}) — ${msg}`, {
+            runId,
+            collectIndex,
+          });
           setUiError(setError, e);
+          retryAllAbortedByError = true;
           break;
         } finally {
           setCompanyRetryLoading((prev) => {
@@ -1199,6 +1584,11 @@ export default function AiBizOsHumanUI() {
         }
       }
       refreshRunMetricsOnly(runId);
+      if (retryAllAbortedByError) {
+        appendActivityLog(`Companies: Retry all — stopped on error (run_id=${runId}).`);
+      } else {
+        appendActivityLog(`Companies: Retry all — finished (run_id=${runId}).`);
+      }
     } finally {
       setCompanyRetryAllLoading(false);
     }
@@ -1213,8 +1603,16 @@ export default function AiBizOsHumanUI() {
   const loadRunDetails = async (runId, runRowHint, options = {}) => {
     const rid = Number(runId);
     if (!Number.isFinite(rid) || rid <= 0) return null;
-    const requestTimeoutMs = options?.requestTimeoutMs ?? API_TIMEOUT_MS;
+    /** Core-only and bundle both hit the same backend; 25s was too tight when POST /restart queues other GETs. */
+    const requestTimeoutMs = options?.requestTimeoutMs ?? LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
     const includeLists = options.includeLists === true;
+    const myGen = ++runDetailsLoadGenRef.current;
+    setRunDetailsLoading(true);
+    appendActivityLog(
+      includeLists
+        ? `Run run_id=${rid}: GET /runs/${rid}, /steps/run/${rid}, /runs/${rid}/workspace-lite, /contacts/run/${rid}, /email-drafts/run/${rid}?include_body=1`
+        : `Run run_id=${rid}: GET /runs/${rid}, /steps/run/${rid}, /runs/${rid}/workspace-lite (no /contacts or /email-drafts in this request)`,
+    );
     const prevTarget = runLoadTargetRef.current;
     runLoadTargetRef.current = rid;
     /**
@@ -1227,14 +1625,24 @@ export default function AiBizOsHumanUI() {
      */
     const switchingRun = prevTarget != null && Number(prevTarget) !== rid;
     if (switchingRun) {
+      contactsListReadyRunIdRef.current = null;
+      draftsListReadyRunIdRef.current = null;
       setContactsListReadyRunId(null);
+      setContactsListFailedRunId(null);
+      setCompaniesListFailedRunId(null);
       setDraftsListReadyRunId(null);
+      setDraftsListFailedRunId(null);
       setContacts([]);
       setDrafts([]);
       setSteps([]);
     } else if (includeLists) {
+      contactsListReadyRunIdRef.current = null;
+      draftsListReadyRunIdRef.current = null;
       setContactsListReadyRunId(null);
+      setContactsListFailedRunId(null);
+      setCompaniesListFailedRunId(null);
       setDraftsListReadyRunId(null);
+      setDraftsListFailedRunId(null);
       setContacts([]);
       setDrafts([]);
       setSteps([]);
@@ -1244,6 +1652,12 @@ export default function AiBizOsHumanUI() {
     if (rowGuess) {
       setSelectedRun(rowGuess);
       setWorkspace(snapshotMergeWorkspaceFromRunCards(snapshotReadRunCards(rid), rowGuess));
+    } else {
+      const pj = selectedProjectRef.current;
+      const pid = pj != null ? projectPk(pj) : null;
+      const minimal = { id: rid, project_id: pid };
+      setSelectedRun(minimal);
+      setWorkspace(snapshotMergeWorkspaceFromRunCards(snapshotReadRunCards(rid), minimal));
     }
     try {
       const wsLitePath = `/runs/${rid}/workspace-lite`;
@@ -1252,16 +1666,17 @@ export default function AiBizOsHumanUI() {
       const pSteps = api(`/steps/run/${rid}`, { timeoutMs: requestTimeoutMs });
       const pWsLite = api(wsLitePath, { timeoutMs: requestTimeoutMs });
       const pContacts = includeLists
-        ? api(`/contacts/run/${rid}`, { timeoutMs: requestTimeoutMs })
+        ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), `/contacts/run/${rid}`)
         : null;
       const pDrafts = includeLists
-        ? api(`/email-drafts/run/${rid}`, { timeoutMs: requestTimeoutMs })
+        ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), emailDraftsRunListPath(rid))
         : null;
 
       const [run, stepsData] = await Promise.all([pRun, pSteps]);
       if (runLoadTargetRef.current !== rid) return null;
+      appendActivityLog("→ Run and steps received.");
       setSelectedRun(run);
-      snapshotEnsureRunSetupPrefsSeedFromRun(rid, run);
+      snapshotMergeRunSetupBodiesFromRun(rid, run);
       setSteps(stepsData);
 
       let contactsData = null;
@@ -1275,21 +1690,28 @@ export default function AiBizOsHumanUI() {
         draftsData = lists[2];
       } else {
         wsLiteData = await pWsLite;
+        appendActivityLog("→ Workspace-lite received.");
       }
       if (runLoadTargetRef.current !== rid) return null;
 
       if (includeLists) {
-        const cArr = normalizeContactsRunPayload(contactsData);
+        const cArr = Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData);
+        const dArr = Array.isArray(draftsData) ? draftsData : [];
+        appendActivityLog(`→ Contacts: ${cArr.length}, drafts: ${dArr.length}`);
         setContacts(cArr);
-        setDrafts(Array.isArray(draftsData) ? draftsData : []);
+        setDrafts(dArr);
+        contactsListReadyRunIdRef.current = rid;
+        draftsListReadyRunIdRef.current = rid;
         setContactsListReadyRunId(rid);
         setDraftsListReadyRunId(rid);
+        setContactsListFailedRunId(null);
+        setDraftsListFailedRunId(null);
         try {
           const cp = cArr
             .slice(0, MAX_CONTACTS_PANEL_LITE)
             .map(stripContactForPanelLite)
             .filter(Boolean);
-          const dp = (Array.isArray(draftsData) ? draftsData : [])
+          const dp = draftsForRunPanelLitePreview(draftsData)
             .map(stripDraftForPanelLite)
             .filter(Boolean);
           snapshotMergeWriteRunPanelLite(rid, { contactsPreview: cp, draftsPreview: dp });
@@ -1312,16 +1734,87 @@ export default function AiBizOsHumanUI() {
           });
         } catch (e) {
           const msg = detailFromApiErrorMessage(e?.message || e);
-          console.warn("[Total performance] GET /sending/global-performance failed:", msg);
+          appendActivityLog(`Total performance: GET /sending/global-performance — ${msg}`, {
+            runId: rid,
+            phase: "loadRunDetails",
+          });
         }
       })();
       return ws;
     } catch (e) {
+      if (runDetailsLoadGenRef.current !== myGen) return null;
       if (runLoadTargetRef.current === rid) {
         setRunDetailsHydratedId(null);
+        if (includeLists) {
+          setDraftsListFailedRunId(rid);
+          setContactsListFailedRunId(rid);
+        } else {
+          /**
+           * Core-only load does not fetch /email-drafts — if it fails while section GETs are still
+           * unresolved, we would otherwise spin forever on SnapshotCardsPlaceholder ("Draft data is loading…").
+           * Defer: if a parallel refreshRun*Only later applies the list, refs match and we skip marking failed.
+           */
+          setTimeout(() => {
+            if (runLoadTargetRef.current !== rid) return;
+            if (draftsListReadyRunIdRef.current !== rid) {
+              setDraftsListFailedRunId(rid);
+            }
+            if (contactsListReadyRunIdRef.current !== rid) {
+              setContactsListFailedRunId(rid);
+            }
+          }, 0);
+        }
         setUiError(setError, e);
+        appendActivityLog(`Error: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
       }
       return null;
+    } finally {
+      if (runDetailsLoadGenRef.current === myGen) {
+        setRunDetailsLoading(false);
+        appendActivityLog("Run load done.");
+      }
+    }
+  };
+
+  const moveRunToCurrentProject = async () => {
+    if (!selectedRun?.id || !selectedProject || runProjectMoveInFlight) return;
+    const pid = projectPk(selectedProject);
+    if (pid == null || pid === "") return;
+    if (selectedProject.is_archived) return;
+    const rid = selectedRun.id;
+    try {
+      setRunProjectMoveInFlight(true);
+      setError("");
+      appendActivityLog(
+        `Run ${rid}: PATCH /runs/${rid}/project { project_id: ${Number(pid)} } (move to current project)`,
+      );
+      const updated = await api(`/runs/${rid}/project`, {
+        method: "PATCH",
+        body: { project_id: Number(pid) },
+      });
+      appendActivityLog(`Run ${rid}: PATCH OK — GET /runs/project/${pid} (refresh sidebar list)`);
+      setSelectedRun(updated);
+      const runs = await api(`/runs/project/${pid}`);
+      const ordered = orderRunsOpenFirst(runs);
+      setRunsList(ordered);
+      snapshotWriteRuns(pid, ordered);
+      appendActivityLog(`Run ${rid} attached to project ${pid} (${selectedProject.name ?? "—"}).`);
+      const rowHint = ordered.find((r) => r.id === rid);
+      /** Merge card row + PATCH body so loadRunDetails’ first paint keeps correct project_id (avoids stale mismatch banner). */
+      const hintForLoad =
+        rowHint && updated && typeof updated === "object"
+          ? { ...rowHint, ...updated, project_id: Number(updated.project_id ?? pid) }
+          : updated ?? rowHint;
+      void loadRunDetails(rid, hintForLoad, { includeLists: false });
+    } catch (e) {
+      const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
+      appendActivityLog(`Run ${rid}: move to project ${pid} failed — ${msg}`, {
+        name: e?.name,
+        message: String(e?.message || e).slice(0, 2000),
+      });
+      setUiError(setError, e);
+    } finally {
+      setRunProjectMoveInFlight(false);
     }
   };
 
@@ -1331,12 +1824,16 @@ export default function AiBizOsHumanUI() {
    */
   const refreshRunMetricsOnly = useCallback((runId) => {
     if (!runId) return;
+    if (restartsInFlightRef.current[runId]) return;
+    if (metricsPollInFlightRef.current) return;
+    metricsPollInFlightRef.current = true;
     void (async () => {
       try {
         const [wsLite, tp] = await Promise.all([
           api(`/runs/${runId}/workspace-lite`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
           api("/sending/global-performance", { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
         ]);
+        metricsSilentFailureLastLogAtRef.current = 0;
         setWorkspace((prev) => {
           const merged = mergeWorkspaceLiteInto(prev, wsLite);
           if (merged) snapshotWriteRunCards(runId, merged);
@@ -1378,13 +1875,23 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         const msg = String(e?.message || e);
         if (isConsoleOnlyApiFailure(msg)) {
-          console.warn("[refreshRunMetricsOnly]", msg);
+          const now = Date.now();
+          if (now - metricsSilentFailureLastLogAtRef.current >= METRICS_SILENT_FAILURE_LOG_INTERVAL_MS) {
+            metricsSilentFailureLastLogAtRef.current = now;
+            appendActivityLog(`Run metrics: silent error — ${msg}`, {
+              runId,
+              source: "refreshRunMetricsOnly",
+              note: "Same failure logged at most once per 45s; parallel polls disabled.",
+            });
+          }
         } else {
           setUiError(setError, e);
         }
+      } finally {
+        metricsPollInFlightRef.current = false;
       }
     })();
-  }, [setError]);
+  }, [setError, appendActivityLog]);
 
   /** Both lists — used by poll during generation and after actions that touch contacts + drafts. */
   const refreshRunContactsAndDrafts = useCallback(
@@ -1394,23 +1901,33 @@ export default function AiBizOsHumanUI() {
       const d = ++draftsListFetchSeqRef.current;
       try {
         const [contactsData, draftsData] = await Promise.all([
-          api(`/contacts/run/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
-          api(`/email-drafts/run/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
+          fetchAllPagedItems(
+            (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+            `/contacts/run/${runId}`,
+          ),
+          fetchAllPagedItems(
+            (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+            emailDraftsRunListPath(runId),
+          ),
         ]);
         if (c !== contactsListFetchSeqRef.current || d !== draftsListFetchSeqRef.current) return;
-        setContacts(normalizeContactsRunPayload(contactsData));
+        setContactsListFailedRunId(null);
+        setContacts(Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData));
         setDrafts(Array.isArray(draftsData) ? draftsData : []);
         const rid = Number(runId);
         if (Number.isFinite(rid) && rid > 0) {
+          contactsListReadyRunIdRef.current = rid;
+          draftsListReadyRunIdRef.current = rid;
           setContactsListReadyRunId(rid);
           setDraftsListReadyRunId(rid);
+          setDraftsListFailedRunId(null);
         }
         try {
-          const cp = normalizeContactsRunPayload(contactsData)
+          const cp = (Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData))
             .slice(0, MAX_CONTACTS_PANEL_LITE)
             .map(stripContactForPanelLite)
             .filter(Boolean);
-          const dp = (Array.isArray(draftsData) ? draftsData : [])
+          const dp = draftsForRunPanelLitePreview(draftsData)
             .map(stripDraftForPanelLite)
             .filter(Boolean);
           snapshotMergeWriteRunPanelLite(runId, { contactsPreview: cp, draftsPreview: dp });
@@ -1420,14 +1937,19 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         if (c !== contactsListFetchSeqRef.current || d !== draftsListFetchSeqRef.current) return;
         const msg = String(e?.message || e);
+        setContactsListFailedRunId(Number(runId));
+        setDraftsListFailedRunId(Number(runId));
         if (isConsoleOnlyApiFailure(msg)) {
-          console.warn("[refreshRunContactsAndDrafts]", msg);
+          appendActivityLog(`Contacts+drafts (poll): error — ${msg}`, {
+            runId,
+            source: "refreshRunContactsAndDrafts",
+          });
         } else {
           setUiError(setError, e);
         }
       }
     },
-    [setError],
+    [setError, appendActivityLog],
   );
 
   /** Contacts tab / contact-analyzer — full GET /contacts/run (deduped list); search is client-side. */
@@ -1435,13 +1957,32 @@ export default function AiBizOsHumanUI() {
     async (runId) => {
       if (!runId) return;
       const seq = ++contactsListFetchSeqRef.current;
+      setContactsListFailedRunId(null);
+      contactsSectionFetchDepthRef.current += 1;
+      setContactsSectionFetchBusy(true);
+      appendActivityLog(`Contacts: GET /contacts/run/${runId} (all pages, limit/offset)`);
+      const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       try {
-        const contactsData = await api(`/contacts/run/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+        const contactsData = await fetchAllPagedItems(
+          (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+          `/contacts/run/${runId}`,
+        );
         if (seq !== contactsListFetchSeqRef.current) return;
-        const arr = normalizeContactsRunPayload(contactsData);
+        const arr = Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData);
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLog(`Contacts: received ${arr.length} rows.`, {
+          runId,
+          clientMs,
+          rows: arr.length,
+          source: "refreshRunContactsOnly",
+        });
         setContacts(arr);
         const rid = Number(runId);
-        if (Number.isFinite(rid) && rid > 0) setContactsListReadyRunId(rid);
+        if (Number.isFinite(rid) && rid > 0) {
+          contactsListReadyRunIdRef.current = rid;
+          setContactsListReadyRunId(rid);
+        }
         try {
           const cp = arr
             .slice(0, MAX_CONTACTS_PANEL_LITE)
@@ -1454,14 +1995,25 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         if (seq !== contactsListFetchSeqRef.current) return;
         const msg = String(e?.message || e);
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLog(`Contacts: error — ${detailFromApiErrorMessage(msg) || msg}`, {
+          runId,
+          clientMs,
+          source: "refreshRunContactsOnly",
+        });
+        setContactsListFailedRunId(Number(runId));
         if (isConsoleOnlyApiFailure(msg)) {
-          console.warn("[refreshRunContactsOnly]", msg);
+          /* already logged above */
         } else {
           setUiError(setError, e);
         }
+      } finally {
+        contactsSectionFetchDepthRef.current = Math.max(0, contactsSectionFetchDepthRef.current - 1);
+        setContactsSectionFetchBusy(contactsSectionFetchDepthRef.current > 0);
       }
     },
-    [setError],
+    [setError, appendActivityLog],
   );
 
   /** Drafts tab — DB read for this section only. */
@@ -1469,15 +2021,37 @@ export default function AiBizOsHumanUI() {
     async (runId) => {
       if (!runId) return;
       const seq = ++draftsListFetchSeqRef.current;
+      draftsSectionFetchDepthRef.current += 1;
+      setDraftsSectionFetchBusy(true);
+      appendActivityLog(`Drafts: GET ${emailDraftsRunListPath(runId)} (body field in list)`);
+      const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       try {
-        const draftsData = await api(`/email-drafts/run/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+        const draftsData = await fetchAllPagedItems(
+          (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+          emailDraftsRunListPath(runId),
+        );
         if (seq !== draftsListFetchSeqRef.current) return;
         const arr = Array.isArray(draftsData) ? draftsData : [];
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        const sent = arr.filter((d) => String(d?.status) === "sent").length;
+        appendActivityLog(`Drafts: received ${arr.length} items.`, {
+          runId,
+          clientMs,
+          rows: arr.length,
+          sent,
+          reviewVisibleApprox: arr.length - sent,
+          source: "refreshRunDraftsOnly",
+        });
         setDrafts(arr);
         const rid = Number(runId);
-        if (Number.isFinite(rid) && rid > 0) setDraftsListReadyRunId(rid);
+        if (Number.isFinite(rid) && rid > 0) {
+          draftsListReadyRunIdRef.current = rid;
+          setDraftsListReadyRunId(rid);
+          setDraftsListFailedRunId(null);
+        }
         try {
-          const dp = arr.map(stripDraftForPanelLite).filter(Boolean);
+          const dp = draftsForRunPanelLitePreview(arr).map(stripDraftForPanelLite).filter(Boolean);
           snapshotMergeWriteRunPanelLite(runId, { draftsPreview: dp });
         } catch {
           /* best-effort */
@@ -1485,22 +2059,125 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         if (seq !== draftsListFetchSeqRef.current) return;
         const msg = String(e?.message || e);
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLog(`Drafts: error — ${detailFromApiErrorMessage(msg) || msg}`, {
+          runId,
+          clientMs,
+          source: "refreshRunDraftsOnly",
+        });
+        setDraftsListFailedRunId(Number(runId));
         if (isConsoleOnlyApiFailure(msg)) {
-          console.warn("[refreshRunDraftsOnly]", msg);
+          /* already logged */
         } else {
           setUiError(setError, e);
         }
+      } finally {
+        draftsSectionFetchDepthRef.current = Math.max(0, draftsSectionFetchDepthRef.current - 1);
+        setDraftsSectionFetchBusy(draftsSectionFetchDepthRef.current > 0);
       }
     },
-    [setError],
+    [setError, appendActivityLog],
+  );
+
+  /**
+   * After POST 202 queued: Gmail runs in a worker thread — poll until this draft is terminal (sent/failed).
+   */
+  const reconcileAfterSingleDraftSend = useCallback(
+    async (runId, draftId) => {
+      if (!runId || draftId == null) return;
+      const did = Number(draftId);
+      if (!Number.isFinite(did)) return;
+      for (let i = 0; i < OUTBOUND_SEND_POLL_MAX; i++) {
+        try {
+          const d = await api(`/email-drafts/${did}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+          if (d && ["sent", "failed"].includes(d.status)) {
+            break;
+          }
+        } catch {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, OUTBOUND_SEND_POLL_MS));
+      }
+      await refreshRunContactsAndDrafts(runId);
+      refreshRunMetricsOnly(runId);
+    },
+    [refreshRunContactsAndDrafts, refreshRunMetricsOnly],
+  );
+
+  /** Bulk 202: poll draft list until nothing is still `sending` (sequential Gmail in worker). */
+  const reconcileAfterBulkSend = useCallback(
+    async (runId, options = {}) => {
+      if (!runId) return;
+      const initialSentIds =
+        options.initialSentIds instanceof Set
+          ? new Set(options.initialSentIds)
+          : new Set();
+      await new Promise((r) => setTimeout(r, 500));
+      for (let i = 0; i < 90; i++) {
+        try {
+          const draftsData = await fetchAllPagedItems(
+            (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+            emailDraftsRunListPath(runId),
+          );
+          const arr = Array.isArray(draftsData) ? draftsData : [];
+          const stillSending = arr.some((x) => x.status === "sending");
+          for (const row of arr) {
+            if (String(row?.status) !== "sent") continue;
+            const did = Number(row.id);
+            if (!Number.isFinite(did) || initialSentIds.has(did)) continue;
+            initialSentIds.add(did);
+            appendActivityLog(
+              `→ Sent: draft_id=${did} · ${String(row.company || "—")} · ${String(row.to_email || "—")}`,
+              {
+                runId,
+                draftId: did,
+                company: row.company ?? null,
+                to_email: row.to_email ?? null,
+                source: "reconcileAfterBulkSend",
+              },
+            );
+          }
+          if (i >= 2 && !stillSending) break;
+        } catch {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      appendActivityLog(`Send all approved: draft poll finished (run_id=${runId}).`, {
+        runId,
+        source: "reconcileAfterBulkSend",
+      });
+      await refreshRunContactsAndDrafts(runId);
+      refreshRunMetricsOnly(runId);
+    },
+    [appendActivityLog, refreshRunContactsAndDrafts, refreshRunMetricsOnly],
   );
 
   const onStaticAssetsSynced = useCallback(({ assets, packets, runId: rid }) => {
-    setAssetsLibrary(Array.isArray(assets) ? assets : []);
-    setRunAssetPackets(Array.isArray(packets) ? packets : []);
+    const current = selectedRunIdRef.current;
+    const a = Array.isArray(assets) ? assets : [];
+    const p = Array.isArray(packets) ? packets : [];
+    if (rid != null && current != null && Number(rid) !== Number(current)) {
+      appendRunTraceLog("onStaticAssetsSynced skipped (stale run)", {
+        payloadRunId: rid,
+        selectedRunId: current,
+        assetsCount: a.length,
+        packetsCount: p.length,
+      });
+      return;
+    }
+    appendRunTraceLog("onStaticAssetsSynced apply", {
+      runId: rid ?? current,
+      assetsCount: a.length,
+      packetsCount: p.length,
+      packetIds: p.slice(0, 8).map((x) => x?.id),
+    });
+    setAssetsLibrary(a);
+    setRunAssetPackets(p);
     assetsLibraryFetchedRef.current = true;
     assetPacketsLoadedForRunIdRef.current = rid ?? null;
-  }, []);
+  }, [appendRunTraceLog]);
 
   const loadContactAnalyzer = useCallback(async () => {
     const rid = selectedRun?.id;
@@ -1510,16 +2187,19 @@ export default function AiBizOsHumanUI() {
     }
     setAnalyzerBulkNote("");
     setAnalyzerLoading(true);
+    appendActivityLog(`Contact analyzer: GET /runs/${rid}/contact-analyzer`);
     try {
       const data = await api(`/runs/${rid}/contact-analyzer`);
       setAnalyzerRows(Array.isArray(data?.rows) ? data.rows : []);
+      appendActivityLog(`Contact analyzer: ${Array.isArray(data?.rows) ? data.rows.length : 0} rows.`);
     } catch (e) {
+      appendActivityLog(`Contact analyzer: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
       setUiError(setError, e);
       setAnalyzerRows([]);
     } finally {
       setAnalyzerLoading(false);
     }
-  }, [selectedRun?.id]);
+  }, [selectedRun?.id, appendActivityLog]);
 
   useEffect(() => {
     if (!editingContact?.id) return;
@@ -1552,14 +2232,16 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         if (!cancelled) {
           const msg = detailFromApiErrorMessage(e?.message || e);
-          console.warn("[Total performance] initial fetch failed:", msg);
+          appendActivityLog(`Total performance: initial load — ${msg}`, {
+            source: "initialGlobalPerformance",
+          });
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [appendActivityLog]);
 
   useEffect(() => {
     void loadSetupIntegration();
@@ -1569,33 +2251,100 @@ export default function AiBizOsHumanUI() {
     if (mainNav === "drafts") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
 
-  /** Asset library + run packets once per session / run (not on every loadRunDetails or Drafts tab visit). */
+  const prevRunIdDebugRef = useRef(null);
+  useEffect(() => {
+    const id = selectedRun?.id ?? null;
+    const prev = prevRunIdDebugRef.current;
+    if (prev === id) return;
+    appendRunTraceLog("run switch (context)", {
+      runIdFrom: prev,
+      runIdTo: id,
+      mainNav,
+      section:
+        mainNav === "runs"
+          ? "Runs list"
+          : mainNav === "contacts"
+            ? "Review contacts"
+            : mainNav === "drafts"
+              ? "Review drafts"
+              : mainNav === "companies"
+                ? "Companies"
+                : mainNav === "contact-analyzer"
+                  ? "Contact analyzer"
+                  : `Tracking / ${String(mainNav)}`,
+    });
+    prevRunIdDebugRef.current = id;
+  }, [selectedRun?.id, mainNav, appendRunTraceLog]);
+
+  /** Asset library + packets — refetch when selected run id changes. Do not clear lists before
+   * the request finishes (avoids empty UI while in flight); drop stale responses via generation. */
   useEffect(() => {
     const rid = selectedRun?.id;
-    if (!rid) return;
-    let cancelled = false;
+    if (!rid) {
+      assetsFetchGenerationRef.current += 1;
+      appendRunTraceLog("assets/packets effect: no run — clear library + packets state", {
+        gen: assetsFetchGenerationRef.current,
+      });
+      setRunAssetPackets([]);
+      setAssetsLibrary([]);
+      assetPacketsLoadedForRunIdRef.current = null;
+      return;
+    }
+    const gen = ++assetsFetchGenerationRef.current;
+    appendRunTraceLog("assets/packets effect: fetch start (parent)", {
+      runId: rid,
+      gen,
+      requests: ["GET /assets", `GET /asset-packets/run/${rid}`],
+    });
     void (async () => {
       try {
-        if (!assetsLibraryFetchedRef.current) {
-          const assetsData = await api(`/assets`);
-          if (cancelled) return;
-          setAssetsLibrary(Array.isArray(assetsData) ? assetsData : []);
-          assetsLibraryFetchedRef.current = true;
+        const [assetsData, packetsData] = await Promise.all([
+          api(`/assets`),
+          api(`/asset-packets/run/${rid}`),
+        ]);
+        if (gen !== assetsFetchGenerationRef.current) {
+          appendRunTraceLog("assets/packets effect: discard (stale gen after await)", {
+            runId: rid,
+            gen,
+            currentGen: assetsFetchGenerationRef.current,
+          });
+          return;
         }
-        if (assetPacketsLoadedForRunIdRef.current !== rid) {
-          const packetsData = await api(`/asset-packets/run/${rid}`);
-          if (cancelled) return;
-          setRunAssetPackets(Array.isArray(packetsData) ? packetsData : []);
-          assetPacketsLoadedForRunIdRef.current = rid;
+        const al = Array.isArray(assetsData) ? assetsData : [];
+        const pk = Array.isArray(packetsData) ? packetsData : [];
+        appendRunTraceLog("assets/packets effect: apply (parent)", {
+          runId: rid,
+          gen,
+          assetsCount: al.length,
+          packetsCount: pk.length,
+          packetIds: pk.slice(0, 8).map((x) => x?.id),
+        });
+        setAssetsLibrary(al);
+        setRunAssetPackets(pk);
+        assetsLibraryFetchedRef.current = true;
+        assetPacketsLoadedForRunIdRef.current = rid;
+      } catch (e) {
+        if (gen !== assetsFetchGenerationRef.current) {
+          appendRunTraceLog("assets/packets effect: error ignored (stale gen)", {
+            runId: rid,
+            gen,
+            err: String(e?.message || e),
+          });
+          return;
         }
-      } catch {
-        /* keep previous */
+        appendRunTraceLog("assets/packets effect: GET failed — keep previous lists (no clear)", {
+          runId: rid,
+          gen,
+          err: String(e?.message || e),
+        });
+        const msg = detailFromApiErrorMessage(e?.message || e) || String(e?.message || e || "");
+        activityLogAppendRef?.(`Assets/packets GET failed (run_id=${rid}): ${msg || "unknown error"}`, {
+          runId: rid,
+          source: "assetsPacketsFetch",
+        });
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedRun?.id]);
+  }, [selectedRun?.id, appendRunTraceLog]);
 
   useEffect(() => {
     if (mainNav === "assets") void loadSetupIntegration();
@@ -1631,30 +2380,110 @@ export default function AiBizOsHumanUI() {
   }, [loadSetupIntegration]);
 
   useEffect(() => {
-    if (!selectedRun?.id || mainNav !== "companies") {
-      setCompaniesPanel(null);
+    prevCompaniesCollectedRef.current = null;
+  }, [selectedRun?.id]);
+
+  /**
+   * When collect finishes or grows the list, workspace-lite bumps companies_collected — refresh the table
+   * via nonce. Do not put that number on the GET effect deps: every poll + pagination was racing (seq
+   * cancelled in-flight page loads and made Next feel broken).
+   */
+  useEffect(() => {
+    if (mainNav !== "companies" || !selectedRun?.id) return;
+    const raw = workspace?.setup_summary?.companies_collected;
+    const v = typeof raw === "number" && Number.isFinite(raw) ? raw : Number(raw);
+    if (!Number.isFinite(v)) return;
+    const prev = prevCompaniesCollectedRef.current;
+    if (prev === null) {
+      prevCompaniesCollectedRef.current = v;
       return;
     }
-    const ac = new AbortController();
+    if (prev === v) return;
+    prevCompaniesCollectedRef.current = v;
+    setCompaniesRefreshNonce((n) => n + 1);
+  }, [mainNav, selectedRun?.id, workspace?.setup_summary?.companies_collected]);
+
+  useEffect(() => {
+    if (!selectedRun?.id || mainNav !== "companies") {
+      setCompaniesPanel(null);
+      if (!selectedRun?.id) companiesFetchRunIdRef.current = null;
+      return;
+    }
+    const rid = Number(selectedRun.id);
+    const runJustChanged = companiesFetchRunIdRef.current !== rid;
+    if (runJustChanged) {
+      companiesFetchRunIdRef.current = rid;
+      setCompaniesPanel(null);
+    }
+
+    const seq = ++companiesListFetchSeqRef.current;
+    setCompaniesListFailedRunId(null);
     setCompaniesLoading(true);
+    appendActivityLog(
+      `Companies: GET /runs/${rid}/companies?limit=${COMPANIES_FETCH_MAX}&offset=0 (client-side pages of ${WORKSPACE_TABLE_PAGE_SIZE})`,
+    );
     (async () => {
+      const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       try {
-        const data = await api(`/runs/${selectedRun.id}/companies`, { signal: ac.signal });
-        if (!ac.signal.aborted) setCompaniesPanel(data);
+        const ps = new URLSearchParams();
+        ps.set("limit", String(COMPANIES_FETCH_MAX));
+        ps.set("offset", "0");
+        const data = await api(`/runs/${rid}/companies?${ps}`, {
+          timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+        });
+        if (seq !== companiesListFetchSeqRef.current) return;
+        {
+          const cur = selectedRunIdRef.current;
+          if (cur != null && rid != null && Number(cur) !== Number(rid)) return;
+        }
+        const normalized = normalizeCompaniesPanelResponse(data, 0);
+        const { companies, companies_total } = normalized;
+        setCompaniesPanel(normalized);
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLog(
+          `Companies: OK (total=${companies_total}, loaded_rows=${companies.length}, client=${clientMs ?? "?"}ms, collect=${data?.collect_step_status ?? "—"}, find=${data?.find_step_status ?? "—"}, limit=${COMPANIES_FETCH_MAX}, offset=0).`,
+          {
+            runId: rid,
+            companies_total,
+            pageLen: companies.length,
+            clientMs,
+            collect_step_status: data?.collect_step_status,
+            find_step_status: data?.find_step_status,
+            limit: COMPANIES_FETCH_MAX,
+            offset: 0,
+            source: "companiesTab",
+          },
+        );
       } catch (e) {
+        if (seq !== companiesListFetchSeqRef.current) return;
+        {
+          const cur = selectedRunIdRef.current;
+          if (cur != null && rid != null && Number(cur) !== Number(rid)) return;
+        }
         const msg = String(e?.message || e);
-        if (isConsoleOnlyApiFailure(msg)) {
-          console.warn("[AiBizOsHumanUI] companies load", msg, e);
-        } else {
-          setCompaniesPanel(null);
-          setError(msg);
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLog(
+          `Companies: error — ${detailFromApiErrorMessage(msg) || msg} (client ${clientMs ?? "?"}ms, rid=${rid}, limit=${COMPANIES_FETCH_MAX}, offset=0)`,
+          {
+            runId: rid,
+            message: msg,
+            clientMs,
+            errorName: e?.name,
+            source: "companiesTab",
+          },
+        );
+        setCompaniesPanel(null);
+        setCompaniesListFailedRunId(rid);
+        if (!isConsoleOnlyApiFailure(msg)) {
+          setUiError(setError, e);
         }
       } finally {
-        if (!ac.signal.aborted) setCompaniesLoading(false);
+        if (seq === companiesListFetchSeqRef.current) setCompaniesLoading(false);
       }
     })();
-    return () => ac.abort();
-  }, [selectedRun?.id, mainNav, steps]);
+  }, [selectedRun?.id, mainNav, appendActivityLog, companiesRefreshNonce]);
 
   useEffect(() => {
     setCompanyFindUnavailable({});
@@ -1682,8 +2511,19 @@ export default function AiBizOsHumanUI() {
       setSelectedRun(runRowEarly);
       setWorkspace(snapshotMergeWorkspaceFromRunCards(cardSnapEarly, runRowEarly));
     } else {
-      setSelectedRun(null);
-      setWorkspace(null);
+      setSelectedRun((prev) => {
+        if (prev && Number(prev.project_id) !== Number(pid)) {
+          return prev;
+        }
+        return null;
+      });
+      setWorkspace((ws) => {
+        const sr = selectedRun;
+        if (sr && Number(sr.project_id) !== Number(pid)) {
+          return ws;
+        }
+        return null;
+      });
     }
 
     const ac = new AbortController();
@@ -1706,17 +2546,27 @@ export default function AiBizOsHumanUI() {
           setWorkspace(snapshotMergeWorkspaceFromRunCards(cardSnap, runRow));
           await loadRunDetails(targetId, runRow);
         } else {
-          setSelectedRun(null);
-          setSteps([]);
-          setContacts([]);
-          setDrafts([]);
-          setWorkspace(null);
+          const sr = selectedRunRef.current;
+          const orphan = sr && Number(sr.project_id) !== Number(pid);
+          if (orphan) {
+            setSelectedRun(sr);
+            setSteps([]);
+            setContacts([]);
+            setDrafts([]);
+            void loadRunDetails(sr.id, sr, { includeLists: false });
+          } else {
+            setSelectedRun(null);
+            setSteps([]);
+            setContacts([]);
+            setDrafts([]);
+            setWorkspace(null);
+          }
         }
       } catch (e) {
         if (ac.signal.aborted) return;
         const msg = String(e?.message || e);
         if (isConsoleOnlyApiFailure(msg)) {
-          console.warn("[AiBizOsHumanUI] runs list", msg, e);
+          appendActivityLog(`Runs list: ${msg}`, { projectId: pid, source: "runsProjectList" });
         } else {
           setRunsList([]);
           setError(msg);
@@ -1724,7 +2574,7 @@ export default function AiBizOsHumanUI() {
       }
     })();
     return () => ac.abort();
-  }, [selectedProject]);
+  }, [selectedProject, appendActivityLog]);
 
   useEffect(() => {
     const pid = selectedProject ? projectPk(selectedProject) : null;
@@ -1751,6 +2601,7 @@ export default function AiBizOsHumanUI() {
 
   useEffect(() => {
     if (!selectedRun?.id) return;
+    if (selectedRun?.id != null && restartsInFlight[selectedRun.id]) return;
     const id = selectedRun.id;
     const phase = workspace?.display_phase;
     // Active: slightly faster metrics tick; Preparing/Ready: slower — lists do not reload here.
@@ -1761,7 +2612,7 @@ export default function AiBizOsHumanUI() {
       refreshRunMetricsOnly(id);
     }, ms);
     return () => clearInterval(interval);
-  }, [selectedRun?.id, workspace?.display_phase, refreshRunMetricsOnly]);
+  }, [selectedRun?.id, workspace?.display_phase, refreshRunMetricsOnly, restartsInFlight]);
 
   /**
    * Per-section list load from DB. Depends on *ready run id* so we re-fetch when lists were cleared
@@ -1783,7 +2634,7 @@ export default function AiBizOsHumanUI() {
     void refreshRunContactsOnly(rid);
   }, [selectedRun?.id, mainNav, contactsListReadyRunId, refreshRunContactsOnly]);
 
-  /** Clear “generating draft” when a draft row appears for that contact. */
+  /** Clear “generating draft” when a reviewable draft row appears for that contact (not `sent` — those are hidden from Review). */
   useEffect(() => {
     if (!Array.isArray(drafts)) return;
     setPendingOutboundDraftByContactId((prev) => {
@@ -1791,7 +2642,10 @@ export default function AiBizOsHumanUI() {
       let changed = false;
       for (const k of Object.keys(next)) {
         const cid = Number(k);
-        if (drafts.some((d) => Number(d.contact_id) === cid)) {
+        const hasReviewableDraft = drafts.some(
+          (d) => Number(d.contact_id) === cid && !isOutboundDraftClosedForReview(d),
+        );
+        if (hasReviewableDraft) {
           delete next[k];
           changed = true;
           if (outboundDraftGenTimeoutRef.current[cid]) {
@@ -2068,6 +2922,7 @@ export default function AiBizOsHumanUI() {
     try {
       setOpenRunEditLoading(true);
       setError("");
+      appendActivityLog(`Edit run: GET /runs/${runRow.id}`);
       const run = await api(`/runs/${runRow.id}`);
       const seeded = seedNewRunFormFromRun(run);
       setNewRunForm(seeded);
@@ -2081,7 +2936,9 @@ export default function AiBizOsHumanUI() {
       });
       refreshRunMetricsOnly(run.id);
       setNewRunOpen(true);
+      appendActivityLog("Run form opened.");
     } catch (e) {
+      appendActivityLog(`Run open error: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
       setUiError(setError, e);
     } finally {
       setOpenRunEditLoading(false);
@@ -2127,9 +2984,9 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const openRunById = async (runId) => {
+  const openRunById = async (runId, runRowHint) => {
     setSwitchRunOpen(false);
-    await loadRunDetails(runId);
+    await loadRunDetails(runId, runRowHint);
     if (selectedProject) {
       try {
         const pid = projectPk(selectedProject);
@@ -2153,56 +3010,81 @@ export default function AiBizOsHumanUI() {
     setRestartDialogRun(null);
   };
 
+  const startRestartRunPolling = (runId) => {
+    if (restartPollIntervalsRef.current[runId]) return;
+    const tick = async () => {
+      try {
+        const run = await api(`/runs/${runId}`, { timeoutMs: 20000 });
+        const st = run?.status;
+        if (st === "needs_review" || st === "failed") {
+          clearInterval(restartPollIntervalsRef.current[runId]);
+          delete restartPollIntervalsRef.current[runId];
+          setRestartsInFlight((prev) => {
+            const n = { ...prev };
+            delete n[runId];
+            return n;
+          });
+          appendActivityLog(`Continue outreach: finished for run_id=${runId} (status=${st}).`);
+          const proj = selectedProjectRef.current;
+          const pid = proj ? projectPk(proj) : null;
+          if (pid) {
+            try {
+              setRunsList(
+                orderRunsOpenFirst(
+                  await api(`/runs/project/${pid}`, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+                ),
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+          if (selectedRunIdRef.current === runId) {
+            void loadRunDetails(runId, undefined, {
+              requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+              includeLists: true,
+            });
+          }
+          void loadSetupIntegration();
+        }
+      } catch {
+        /* poll again */
+      }
+    };
+    restartPollIntervalsRef.current[runId] = setInterval(() => void tick(), 2000);
+    void tick();
+  };
+
   const confirmRestartRun = async () => {
-    if (!selectedProject || !restartDialogRun || pendingRestart) return;
+    if (!selectedProject || !restartDialogRun) return;
     const { id: runId, name: runName } = restartDialogRun;
+    if (restartsInFlight[runId]) return;
     setError("");
     setRestartDialogOpen(false);
     setRestartDialogRun(null);
-    setPendingRestart({ id: runId, name: runName });
-    let restartPostOk = false;
+    /** Invalidate in-flight loadRunDetails so their catch does not log spurious timeouts while restart runs. */
+    runDetailsLoadGenRef.current += 1;
+    setRunDetailsLoading(false);
     try {
-      const pid = projectPk(selectedProject);
-      await api(`/runs/${runId}/restart`, { method: "POST", timeoutMs: RESTART_RUN_TIMEOUT_MS });
-      restartPostOk = true;
-      // Restart can run a long setup on the server; the follow-up bundle must not use the default 25s ceiling.
-      setRunsList(
-        orderRunsOpenFirst(
-          await api(`/runs/project/${pid}`, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
-        ),
+      appendActivityLog(
+        `Continue outreach: POST /runs/${runId}/restart (background — you may switch to other runs)`,
       );
-      const ws = await loadRunDetails(runId, undefined, {
-        requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
-        includeLists: true,
-      });
-      if (ws) {
-        setRunsList((prev) =>
-          prev.map((r) =>
-            r.id !== runId
-              ? r
-              : {
-                  ...r,
-                  display_phase: ws.display_phase,
-                  companies_count: ws.setup_summary?.companies_collected ?? r.companies_count,
-                  contacts_count: ws.setup_summary?.contacts_found ?? r.contacts_count,
-                  emails_sent: ws.performance?.emails_sent ?? r.emails_sent,
-                  replies: ws.performance?.replies ?? r.replies,
-                  active_threads: ws.performance?.active_threads ?? r.active_threads,
-                },
-          ),
-        );
+      const res = await api(`/runs/${runId}/restart`, { method: "POST", timeoutMs: 120000 });
+      if (!res?.accepted) {
+        appendActivityLog(`Continue outreach: unexpected API response for run_id=${runId}`);
+        return;
       }
-      void loadSetupIntegration();
+      setRestartsInFlight((prev) => ({ ...prev, [runId]: { name: runName } }));
+      appendActivityLog(`Continue outreach: accepted (run_id=${runId}), waiting for background completion…`);
+      startRestartRunPolling(runId);
     } catch (e) {
-      setUiError(setError, e);
-      if (restartPostOk) {
-        void loadRunDetails(runId, undefined, {
-          requestTimeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
-          includeLists: true,
-        }).catch((err) => setUiError(setError, err));
+      const raw = String(e?.message || e);
+      const msg = detailFromApiErrorMessage(raw) || raw;
+      if (raw.includes("409") || /already running/i.test(msg)) {
+        appendActivityLog(`Continue outreach: already in progress for run_id=${runId}`);
+      } else {
+        appendActivityLog(`Continue outreach: error — ${msg}`, { runId });
+        setUiError(setError, e);
       }
-    } finally {
-      setPendingRestart(null);
     }
   };
 
@@ -2419,11 +3301,16 @@ export default function AiBizOsHumanUI() {
 
   const deleteDeadMailboxDraft = async (draftId) => {
     if (!selectedRun) return;
+    const nid = Number(draftId);
     try {
       setError("");
       await api(`/email-drafts/${draftId}`, { method: "DELETE" });
-      if (editDraft?.id === draftId) setEditDraft(null);
-      const nid = Number(draftId);
+      if (Number(editDraft?.id) === nid || editDraftOpenTargetIdRef.current === nid) {
+        editDraftFetchSeqRef.current += 1;
+        editDraftOpenTargetIdRef.current = null;
+        setEditDraft(null);
+        setEditDraftLoading(false);
+      }
       setDrafts((prev) => prev.filter((d) => Number(d.id) !== nid));
       if (selectedRun?.id) {
         void refreshRunContactsAndDrafts(selectedRun.id);
@@ -2441,12 +3328,11 @@ export default function AiBizOsHumanUI() {
       return;
     }
     const idKey = String(draftId);
+    const runId = selectedRun.id;
     setSendingOutboundDraftIds((p) => ({ ...p, [idKey]: true }));
     try {
       setError("");
       await api(`/sending/drafts/${draftId}/send`, { method: "POST" });
-      refreshRunMetricsOnly(selectedRun.id);
-      void refreshRunContactsAndDrafts(selectedRun.id);
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -2457,6 +3343,7 @@ export default function AiBizOsHumanUI() {
         return next;
       });
     }
+    void reconcileAfterSingleDraftSend(runId, draftId);
   };
 
   const sendAllApproved = async () => {
@@ -2465,12 +3352,30 @@ export default function AiBizOsHumanUI() {
       openGmailSetup();
       return;
     }
+    const runId = selectedRun.id;
+    const sentIdsBeforeQueue = new Set(
+      (Array.isArray(drafts) ? drafts : [])
+        .filter((d) => String(d?.status) === "sent")
+        .map((d) => Number(d.id))
+        .filter((id) => Number.isFinite(id)),
+    );
     setSendAllApprovedBusy(true);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     try {
       setError("");
-      await api(`/sending/runs/${selectedRun.id}/send`, { method: "POST" });
-      refreshRunMetricsOnly(selectedRun.id);
-      void refreshRunContactsAndDrafts(selectedRun.id);
+      appendActivityLog(`Send all approved: POST /sending/runs/${runId}/send`, { runId });
+      const res = await api(`/sending/runs/${runId}/send`, {
+        method: "POST",
+        timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS,
+      });
+      const n = res && typeof res.draft_count === "number" ? res.draft_count : null;
+      appendActivityLog(
+        n != null
+          ? `→ Queued for send: ${n} draft(s) (Gmail in background, HTTP 202).`
+          : `→ Request accepted (HTTP 202), sending in background.`,
+        { runId, draft_count: n, response: res, source: "sendAllApproved" },
+      );
+      await reconcileAfterBulkSend(runId, { initialSentIds: sentIdsBeforeQueue });
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -2489,7 +3394,10 @@ export default function AiBizOsHumanUI() {
     setTestSendBusy(true);
     try {
       setError("");
-      await api(`/sending/runs/${selectedRun.id}/mock-send-preview`, { method: "POST" });
+      await api(`/sending/runs/${selectedRun.id}/mock-send-preview`, {
+        method: "POST",
+        timeoutMs: MOCK_SEND_PREVIEW_POST_TIMEOUT_MS,
+      });
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
@@ -2641,21 +3549,94 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  const closeEditDraftModal = () => {
+    if (editDraftSaving) return;
+    editDraftGetAbortRef.current?.abort();
+    editDraftGetAbortRef.current = null;
+    editDraftFetchSeqRef.current += 1;
+    editDraftOpenTargetIdRef.current = null;
+    setEditDraft(null);
+    setEditDraftLoading(false);
+  };
+
   const openEditDraft = (d) => {
-    setApplyAssetsToAllPendingDrafts(false);
-    setEditDraft(d);
+    const nid = Number(d?.id);
+    if (!Number.isFinite(nid)) {
+      appendActivityLog("Edit draft: missing or invalid id", { raw: d?.id });
+      return;
+    }
+    const seq = ++editDraftFetchSeqRef.current;
+    editDraftGetAbortRef.current?.abort();
+    editDraftGetAbortRef.current = null;
+    setApplyAssetsEditScope("none");
+    editDraftOpenTargetIdRef.current = nid;
+
+    const rowWithBody =
+      typeof d?.body === "string"
+        ? d
+        : Array.isArray(drafts)
+          ? drafts.find((x) => Number(x.id) === nid)
+          : null;
+    if (rowWithBody && typeof rowWithBody.body === "string") {
+      setEditDraftLoading(false);
+      setEditDraft(rowWithBody);
+      setDraftForm({
+        subject: rowWithBody.subject ?? "",
+        body: rowWithBody.body ?? "",
+        attached_asset_ids: normalizeAttachedAssetIds(rowWithBody.attached_asset_ids),
+      });
+      appendActivityLog(`Edit draft: using list row (draft_id=${nid}) — no extra GET`, {
+        source: "openEditDraft",
+      });
+      return;
+    }
+
+    const ac = new AbortController();
+    editDraftGetAbortRef.current = ac;
+    setEditDraft(null);
+    setEditDraftLoading(true);
     setDraftForm({
-      subject: d.subject ?? "",
-      body: d.body ?? "",
-      attached_asset_ids: normalizeAttachedAssetIds(d.attached_asset_ids),
+      subject: d?.subject ?? "",
+      body: "",
+      attached_asset_ids: normalizeAttachedAssetIds(d?.attached_asset_ids),
     });
+    appendActivityLog(
+      `Edit draft: GET /email-drafts/${nid} (timeout ${Math.round(EMAIL_DRAFT_GET_FOR_EDIT_TIMEOUT_MS / 1000)}s, Cancel aborts)`,
+    );
+    void (async () => {
+      try {
+        setError("");
+        const full = await api(`/email-drafts/${nid}`, {
+          signal: ac.signal,
+          timeoutMs: EMAIL_DRAFT_GET_FOR_EDIT_TIMEOUT_MS,
+        });
+        if (seq !== editDraftFetchSeqRef.current) return;
+        setEditDraft(full);
+        setDraftForm({
+          subject: full.subject ?? "",
+          body: full.body ?? "",
+          attached_asset_ids: normalizeAttachedAssetIds(full.attached_asset_ids),
+        });
+      } catch (e) {
+        if (seq !== editDraftFetchSeqRef.current) return;
+        setUiError(setError, e);
+        setEditDraft(null);
+        editDraftOpenTargetIdRef.current = null;
+      } finally {
+        if (editDraftGetAbortRef.current === ac) editDraftGetAbortRef.current = null;
+        if (seq !== editDraftFetchSeqRef.current) return;
+        setEditDraftLoading(false);
+      }
+    })();
   };
 
   const saveEditDraft = async () => {
-    if (!editDraft || !selectedRun || editDraftSaving) return;
+    if (!editDraft || !selectedRun || editDraftSaving || editDraftLoading) return;
     const runId = selectedRun.id;
     const draftId = editDraft.id;
-    const applyAll = applyAssetsToAllPendingDrafts;
+    const applyPending = applyAssetsEditScope === "pending";
+    const applyApproved = applyAssetsEditScope === "approved";
+    const applyAll = applyPending || applyApproved;
     setEditDraftSaving(true);
     let updatedDraft = null;
     try {
@@ -2666,7 +3647,8 @@ export default function AiBizOsHumanUI() {
           subject: draftForm.subject,
           body: draftForm.body,
           attached_asset_ids: draftForm.attached_asset_ids,
-          apply_assets_to_pending_drafts: applyAll,
+          apply_assets_to_pending_drafts: applyPending,
+          apply_assets_to_approved_drafts: applyApproved,
         },
         timeoutMs: applyAll ? 120000 : 60000,
       });
@@ -2676,7 +3658,9 @@ export default function AiBizOsHumanUI() {
     } finally {
       setEditDraftSaving(false);
     }
+    editDraftOpenTargetIdRef.current = null;
     setEditDraft(null);
+    setEditDraftLoading(false);
     if (updatedDraft && !applyAll) {
       const nid = Number(draftId);
       setDrafts((prev) =>
@@ -2698,113 +3682,231 @@ export default function AiBizOsHumanUI() {
     });
   };
 
+  /**
+   * Prefer GET /runs/:id/review-setup-fields (tiny JSON). If the server has not been restarted
+   * and returns 404, fall back to GET /runs/:id so the dialogs still work.
+   */
+  const fetchReviewSetupFieldsLite = useCallback(async (runId) => {
+    const timeoutCtl = new AbortController();
+    const tid = setTimeout(() => timeoutCtl.abort(), RUN_REVIEW_SETUP_LITE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${API_BASE}/runs/${runId}/review-setup-fields`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal: timeoutCtl.signal,
+      });
+      if (res.ok) {
+        const d = await res.json();
+        snapshotWriteRunSetupPrefs(runId, {
+          prompt_setup_text: d.prompt_setup_editor_text,
+          signature_html: d.sender_signature_html,
+          prompt_setup_saved: Boolean(d.prompt_setup_saved),
+          sender_signature_configured: Boolean(d.sender_signature_configured),
+        });
+        return d;
+      }
+      const errBody = await res.text();
+      if (res.status === 404) {
+        try {
+          const run = await api(`/runs/${runId}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+          setSelectedRun((prev) =>
+            prev && Number(prev.id) === Number(run.id) ? { ...prev, ...run } : prev,
+          );
+          snapshotMergeRunSetupBodiesFromRun(runId, run);
+          return {
+            prompt_setup_editor_text: getPromptSetupEditorInitialText(run),
+            sender_signature_html: String(run.sender_signature_html ?? ""),
+            prompt_setup_saved: undefined,
+            sender_signature_configured: undefined,
+          };
+        } catch {
+          throw new Error(errBody || "Not found");
+        }
+      }
+      throw new Error(errBody || `Request failed: ${res.status}`);
+    } finally {
+      clearTimeout(tid);
+    }
+  }, []);
+
+  /** Warm setup_prefs bodies before user opens Prompt/Signature dialogs (no 404 fallback here). */
+  useEffect(() => {
+    const rid = selectedRun?.id;
+    if (!rid) return;
+    let cancelled = false;
+    const ctl = new AbortController();
+    const tid = setTimeout(() => ctl.abort(), RUN_REVIEW_SETUP_LITE_TIMEOUT_MS);
+    void (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/runs/${rid}/review-setup-fields`, {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+          signal: ctl.signal,
+        });
+        if (cancelled || !res.ok) return;
+        const d = await res.json();
+        snapshotWriteRunSetupPrefs(rid, {
+          prompt_setup_text: d.prompt_setup_editor_text,
+          signature_html: d.sender_signature_html,
+          prompt_setup_saved: Boolean(d.prompt_setup_saved),
+          sender_signature_configured: Boolean(d.sender_signature_configured),
+        });
+      } catch {
+        /* ignore — open dialog will call fetchReviewSetupFieldsLite */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      clearTimeout(tid);
+      ctl.abort();
+    };
+  }, [selectedRun?.id]);
+
   const openSignatureSetup = async () => {
     if (!selectedRun?.id) return;
-    setSignatureSetupOpenLoading(true);
+    setSignatureFormHtml(getSignatureDialogSeed(selectedRun.id, selectedRun, workspace));
+    setSignatureEditorKey((k) => k + 1);
+    setSignatureSetupOpen(true);
+    mountSignatureEditorDeferred();
     try {
-      const run = await api(`/runs/${selectedRun.id}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
-      setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
-      setSignatureFormHtml(String(run.sender_signature_html ?? ""));
-      setSignatureEditorKey((k) => k + 1);
-      setSignatureSetupOpen(true);
-      mountSignatureEditorDeferred();
+      const d = await fetchReviewSetupFieldsLite(selectedRun.id);
+      if (typeof d?.sender_signature_html === "string") {
+        setSignatureFormHtml(d.sender_signature_html);
+        setSignatureEditorKey((k) => k + 1);
+      }
     } catch (e) {
       setUiError(setError, e);
-      setSignatureFormHtml(String(selectedRun?.sender_signature_html ?? ""));
-      setSignatureEditorKey((k) => k + 1);
-      setSignatureSetupOpen(true);
-      mountSignatureEditorDeferred();
-    } finally {
-      setSignatureSetupOpenLoading(false);
     }
   };
 
   const openPromptSetup = async () => {
     if (!selectedRun?.id) return;
     setPromptSetupSaving(false);
-    setPromptSetupOpenLoading(true);
+    setPromptSetupText(getPromptSetupDialogSeed(selectedRun.id, selectedRun));
+    setPromptSetupOpen(true);
     try {
-      const run = await api(`/runs/${selectedRun.id}`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
-      setSelectedRun((prev) => (prev && prev.id === run.id ? { ...prev, ...run } : prev));
-      setPromptSetupText(getPromptSetupEditorInitialText(run));
-      setPromptSetupOpen(true);
+      const d = await fetchReviewSetupFieldsLite(selectedRun.id);
+      if (typeof d?.prompt_setup_editor_text === "string") {
+        setPromptSetupText(d.prompt_setup_editor_text);
+      }
     } catch (e) {
       setUiError(setError, e);
-      setPromptSetupText(getPromptSetupEditorInitialText(selectedRun));
-      setPromptSetupOpen(true);
-    } finally {
-      setPromptSetupOpenLoading(false);
     }
   };
 
-  const savePromptSetup = async () => {
+  const savePromptSetup = () => {
     if (!selectedRun?.id) return;
     const rid = selectedRun.id;
-    try {
-      setPromptSetupSaving(true);
-      setError("");
-      const updated = await api(`/runs/${rid}/prompt-setup`, {
-        method: "PATCH",
-        body: { prompt_setup_text: promptSetupText },
-        timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
-      });
-      snapshotWriteRunSetupPrefs(rid, {
-        prompt_setup_saved: promptSetupText.trim().length > 0,
-      });
-      setRunSetupPrefsRev((x) => x + 1);
-      setSelectedRun((prev) => {
-        if (!prev || prev.id !== rid) return prev;
-        const nextCtx = { ...(prev.context_json || {}) };
-        if (promptSetupText.trim().length === 0) {
-          delete nextCtx[PROMPT_SETUP_STORAGE_KEY];
-        } else {
-          nextCtx[PROMPT_SETUP_STORAGE_KEY] = promptSetupText;
-        }
-        return {
-          ...prev,
-          context_json: nextCtx,
-          prompt_setup_saved: Boolean(updated?.prompt_setup_saved),
-        };
-      });
-      setPromptSetupOpen(false);
-      refreshRunMetricsOnly(rid);
-    } catch (e) {
-      setUiError(setError, e);
-    } finally {
-      setPromptSetupSaving(false);
-    }
+    const textSnapshot = promptSetupText;
+    const prefsBefore = snapshotReadRunSetupPrefs(rid);
+    const prevPromptSaved = selectedRun?.prompt_setup_saved;
+    const prevPromptText = selectedRun?.prompt_setup_text;
+    const prevRunRef = selectedRun;
+
+    setError("");
+    snapshotWriteRunSetupPrefs(rid, {
+      prompt_setup_saved: textSnapshot.trim().length > 0,
+      prompt_setup_text: textSnapshot,
+    });
+    setRunSetupPrefsRev((x) => x + 1);
+    setSelectedRun((prev) => {
+      if (!prev || prev.id !== rid) return prev;
+      return {
+        ...prev,
+        prompt_setup_text: textSnapshot.trim().length > 0 ? textSnapshot : "",
+        prompt_setup_saved: textSnapshot.trim().length > 0,
+      };
+    });
+    setPromptSetupOpen(false);
+    setPromptSetupSaving(false);
+
+    void (async () => {
+      try {
+        const updated = await api(`/runs/${rid}/prompt-setup`, {
+          method: "PATCH",
+          body: { prompt_setup_text: textSnapshot },
+          timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
+        });
+        setSelectedRun((prev) => {
+          if (!prev || prev.id !== rid) return prev;
+          return {
+            ...prev,
+            prompt_setup_saved: Boolean(updated?.prompt_setup_saved),
+            prompt_setup_text: textSnapshot,
+          };
+        });
+        refreshRunMetricsOnly(rid);
+      } catch (e) {
+        setSelectedRun((prev) => {
+          if (!prev || prev.id !== rid) return prev;
+          return {
+            ...prev,
+            prompt_setup_text: prevPromptText,
+            prompt_setup_saved: prevPromptSaved,
+          };
+        });
+        snapshotWriteRunSetupPrefs(rid, runSetupPrefsRollbackPartial(prefsBefore, prevRunRef));
+        setRunSetupPrefsRev((x) => x + 1);
+        setUiError(setError, e);
+      }
+    })();
   };
 
-  const saveSignatureSetup = async () => {
+  const saveSignatureSetup = () => {
     if (!selectedRun?.id) return;
     const rid = selectedRun.id;
-    try {
-      setSignatureSetupSaving(true);
-      setError("");
-      const updated = await api(`/runs/${rid}/signature`, {
-        method: "PATCH",
-        body: { signature_html: signatureFormHtml },
-        timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
-      });
-      snapshotWriteRunSetupPrefs(rid, {
-        sender_signature_configured: runSignatureHasMeaningfulContent(signatureFormHtml),
-      });
-      setRunSetupPrefsRev((x) => x + 1);
-      setSelectedRun((prev) => {
-        if (!prev || prev.id !== rid) return prev;
-        return {
-          ...prev,
-          sender_signature_html: signatureFormHtml,
-          sender_signature_configured: Boolean(updated?.sender_signature_configured),
-        };
-      });
-      setSignatureSetupOpen(false);
-      refreshRunMetricsOnly(rid);
-    } catch (e) {
-      setUiError(setError, e);
-    } finally {
-      setSignatureSetupSaving(false);
-    }
+    const htmlSnapshot = signatureFormHtml;
+    const prefsBefore = snapshotReadRunSetupPrefs(rid);
+    const prevHtml = selectedRun?.sender_signature_html;
+    const prevConfigured = selectedRun?.sender_signature_configured;
+    const prevRunRef = selectedRun;
+
+    setError("");
+    snapshotWriteRunSetupPrefs(rid, {
+      sender_signature_configured: runSignatureHasMeaningfulContent(htmlSnapshot),
+      signature_html: htmlSnapshot,
+    });
+    setRunSetupPrefsRev((x) => x + 1);
+    setSelectedRun((prev) => {
+      if (!prev || prev.id !== rid) return prev;
+      return {
+        ...prev,
+        sender_signature_html: htmlSnapshot,
+        sender_signature_configured: runSignatureHasMeaningfulContent(htmlSnapshot),
+      };
+    });
+    setSignatureSetupOpen(false);
+    setSignatureSetupSaving(false);
+
+    void (async () => {
+      try {
+        const updated = await api(`/runs/${rid}/signature`, {
+          method: "PATCH",
+          body: { signature_html: htmlSnapshot },
+          timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
+        });
+        setSelectedRun((prev) => {
+          if (!prev || prev.id !== rid) return prev;
+          return {
+            ...prev,
+            sender_signature_configured: Boolean(updated?.sender_signature_configured),
+          };
+        });
+        refreshRunMetricsOnly(rid);
+      } catch (e) {
+        setSelectedRun((prev) => {
+          if (!prev || prev.id !== rid) return prev;
+          return {
+            ...prev,
+            sender_signature_html: prevHtml,
+            sender_signature_configured: prevConfigured,
+          };
+        });
+        snapshotWriteRunSetupPrefs(rid, runSetupPrefsRollbackPartial(prefsBefore, prevRunRef));
+        setRunSetupPrefsRev((x) => x + 1);
+        setUiError(setError, e);
+      }
+    })();
   };
 
   const contactsMatchingSearch = useMemo(() => {
@@ -2825,7 +3927,10 @@ export default function AiBizOsHumanUI() {
     return draftsVisibleInReview.filter((d) => {
       const q = search.trim().toLowerCase();
       return (
-        !q || [d.company, d.to_email, d.subject, d.body].some((v) => (v || "").toLowerCase().includes(q))
+        !q ||
+          [d.company, d.to_email, d.subject, d.body ?? d.body_preview].some((v) =>
+            (v || "").toLowerCase().includes(q),
+          )
       );
     });
   }, [draftsVisibleInReview, search]);
@@ -2860,7 +3965,11 @@ export default function AiBizOsHumanUI() {
   const contactHasBadEmailHealth = (c) =>
     c.email_health === "dead_mailbox" || c.email_health === "bounced";
 
-  const contactHasEmail = (c) => Boolean((c?.email || "").trim());
+  /** True when email looks usable for sending — must match `contactReviewTabBucket` (contains `@`). */
+  const contactHasEmail = (c) => {
+    const em = String(c?.email ?? "").trim().toLowerCase();
+    return em.includes("@");
+  };
 
   /** Normalized company name only — for “touched” badge across split website-based groups. */
   const contactCompanyNameOnlyKey = (c) =>
@@ -2924,8 +4033,9 @@ export default function AiBizOsHumanUI() {
   /** Approved but no draft row yet — background LLM after Approve on contact. */
   const contactsAwaitingOutboundDraftPlaceholder = useMemo(() => {
     if (!Array.isArray(contacts) || !Array.isArray(drafts)) return [];
-    const draftContactIds = new Set(
+    const reviewableDraftContactIds = new Set(
       drafts
+        .filter((d) => !isOutboundDraftClosedForReview(d))
         .map((d) => d.contact_id)
         .filter((id) => id != null)
         .map((id) => Number(id)),
@@ -2936,7 +4046,7 @@ export default function AiBizOsHumanUI() {
       if (!["approved", "edited"].includes(c.review_status)) return false;
       if (c.status !== "valid") return false;
       if (!String(c.email || "").trim()) return false;
-      if (draftContactIds.has(Number(c.id))) return false;
+      if (reviewableDraftContactIds.has(Number(c.id))) return false;
       return true;
     });
   }, [contacts, drafts, pendingOutboundDraftByContactId]);
@@ -2993,9 +4103,28 @@ export default function AiBizOsHumanUI() {
   const displayDraftReviewCounts = useMemo(() => {
     const live = liveDraftReviewCounts;
     if (draftsListReadyRunId === Number(selectedRun?.id)) return live;
-    const snap = selectedRun?.id ? snapshotReadInnerTabCounts(selectedRun.id)?.drafts : null;
-    return mergeDraftReviewSnap(snap, live);
-  }, [liveDraftReviewCounts, draftsListReadyRunId, selectedRun?.id]);
+    const rid = selectedRun?.id;
+    const snap = rid ? snapshotReadInnerTabCounts(rid)?.drafts : null;
+    const merged = mergeDraftReviewSnap(snap, live);
+    /**
+     * While GET /email-drafts/run has not hydrated `drafts`, live counts are 0 and merge falls back to
+     * inner-tab snapshot — which can say Approved (0) even though panel lite preview rows still show
+     * approved/edited. Align tab badges with the same preview list used for cached cards.
+     */
+    if (rid != null && (!Array.isArray(drafts) || drafts.length === 0)) {
+      const previewList = draftsForRunPanelLitePreview(snapshotReadRunPanelLite(rid)?.draftsPreview);
+      if (previewList.length > 0) {
+        const pendingReview = previewList.filter(
+          (d) => d.review_status === "pending" || d.review_status === "rejected",
+        ).length;
+        const approved = previewList.filter((d) =>
+          ["approved", "edited"].includes(d.review_status),
+        ).length;
+        return { pendingReview, approved };
+      }
+    }
+    return merged;
+  }, [liveDraftReviewCounts, draftsListReadyRunId, selectedRun?.id, drafts]);
 
   /** Pending count for hero line — from tab strip counts, not from filtered `contacts` (avoids 0 when another tab is selected). */
   const pendingContactsLeft = displayContactReviewCounts.pending;
@@ -3011,20 +4140,33 @@ export default function AiBizOsHumanUI() {
     );
   }, [displayContactReviewCounts]);
 
+  /** GET /contacts/run for this run not applied yet — list may be empty while tab counts still come from snapshot. */
+  const contactsReviewListLoading =
+    mainNav === "contacts" &&
+    selectedRun?.id != null &&
+    contactsListReadyRunId !== Number(selectedRun.id) &&
+    contactsListFailedRunId !== Number(selectedRun.id);
+
+  /** Tab strip was gated on contactsVisible.length only, so snapshot counts could not show the row until fetch finished. */
+  const showContactReviewTabStrip =
+    contactsVisible.length > 0 || totalContactsReviewRollup > 0 || contactsReviewListLoading;
+
   const draftsReviewHydrated =
-    mainNav !== "drafts" || draftsListReadyRunId === Number(selectedRun?.id);
+    mainNav !== "drafts" ||
+    draftsListReadyRunId === Number(selectedRun?.id) ||
+    draftsListFailedRunId === Number(selectedRun?.id);
   const reviewDraftsSnapModeVal = useMemo(() => {
     const draftsSnap = selectedRun?.id ? snapshotReadInnerTabCounts(selectedRun.id)?.drafts : null;
     return reviewDraftsSnapMode(draftsSnap);
-  }, [draftsListReadyRunId, selectedRun?.id]);
+  }, [draftsListReadyRunId, draftsListFailedRunId, selectedRun?.id]);
 
   const runPanelLiteHuman = useMemo(
     () => (selectedRun?.id ? snapshotReadRunPanelLite(selectedRun.id) : null),
-    [selectedRun?.id, runDetailsHydratedId, contactsListReadyRunId, draftsListReadyRunId],
+    [selectedRun?.id, runDetailsHydratedId, contactsListReadyRunId, draftsListReadyRunId, draftsListFailedRunId],
   );
 
   const draftsPanelLiteFiltered = useMemo(() => {
-    const list = runPanelLiteHuman?.draftsPreview || [];
+    const list = draftsForRunPanelLitePreview(runPanelLiteHuman?.draftsPreview);
     if (!list.length) return [];
     if (draftReviewTab === "pending") {
       return list.filter((d) => d.review_status === "pending" || d.review_status === "rejected");
@@ -3063,16 +4205,26 @@ export default function AiBizOsHumanUI() {
     });
   }, [contactsByReviewTab, contactReviewTab]);
 
-  const companiesListForPage = companiesPanel?.companies;
-  const companiesPageCount = Math.max(
-    1,
-    Math.ceil((companiesListForPage?.length ?? 0) / WORKSPACE_TABLE_PAGE_SIZE),
-  );
-  const companiesPageSlice = useMemo(() => {
-    const list = companiesListForPage ?? [];
+  const companiesListFull = companiesPanel?.companies ?? [];
+  const companiesLoadedCount = companiesListFull.length;
+  const companiesTotalRaw = Number(companiesPanel?.companies_total);
+  const companiesTotalFromField =
+    Number.isFinite(companiesTotalRaw) && companiesTotalRaw >= 0
+      ? companiesTotalRaw
+      : companiesLoadedCount;
+  const companiesTotalForUi = Math.max(companiesTotalFromField, companiesLoadedCount);
+  const maxPageFromLoaded = Math.max(1, Math.ceil(companiesLoadedCount / WORKSPACE_TABLE_PAGE_SIZE) || 1);
+  const maxPageFromTotal = Math.max(1, Math.ceil(companiesTotalForUi / WORKSPACE_TABLE_PAGE_SIZE) || 1);
+  const companiesPageCount = Math.min(maxPageFromLoaded, maxPageFromTotal);
+  const companiesRows = useMemo(() => {
     const start = (companiesPage - 1) * WORKSPACE_TABLE_PAGE_SIZE;
-    return list.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
-  }, [companiesListForPage, companiesPage]);
+    return companiesListFull.slice(start, start + WORKSPACE_TABLE_PAGE_SIZE);
+  }, [companiesListFull, companiesPage]);
+  const companiesRangeStart =
+    companiesLoadedCount === 0 ? 0 : (companiesPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1;
+  const companiesRangeEnd = Math.min(companiesPage * WORKSPACE_TABLE_PAGE_SIZE, companiesLoadedCount);
+  const companiesListTruncated =
+    companiesLoadedCount === COMPANIES_FETCH_MAX && companiesTotalForUi > companiesLoadedCount;
 
   const contactsReviewPageCount = Math.max(
     1,
@@ -3085,12 +4237,12 @@ export default function AiBizOsHumanUI() {
   }, [contactReviewTabGroups, contactsReviewPage]);
 
   useEffect(() => {
-    setCompaniesPage((p) => Math.min(Math.max(1, p), companiesPageCount));
-  }, [companiesPageCount, companiesListForPage]);
-
-  useEffect(() => {
     setContactsReviewPage((p) => Math.min(Math.max(1, p), contactsReviewPageCount));
   }, [contactsReviewPageCount, contactReviewTabGroups]);
+
+  useEffect(() => {
+    setCompaniesPage((p) => Math.min(Math.max(1, p), companiesPageCount));
+  }, [companiesPageCount]);
 
   useEffect(() => {
     setCompaniesPage(1);
@@ -3124,12 +4276,14 @@ export default function AiBizOsHumanUI() {
     const snap = snapshotReadRunSetupPrefs(rid);
     if (snap) return Boolean(snap.prompt_setup_saved);
     if (typeof selectedRun?.prompt_setup_saved === "boolean") return selectedRun.prompt_setup_saved;
-    const raw = selectedRun?.context_json?.[PROMPT_SETUP_STORAGE_KEY];
-    return typeof raw === "string" && raw.trim().length > 0;
+    if (typeof selectedRun?.prompt_setup_text === "string" && selectedRun.prompt_setup_text.trim().length > 0) {
+      return true;
+    }
+    return false;
   }, [
     selectedRun?.id,
-    selectedRun?.context_json,
     selectedRun?.prompt_setup_saved,
+    selectedRun?.prompt_setup_text,
     runDetailsHydratedId,
     runSetupPrefsRev,
   ]);
@@ -3284,7 +4438,7 @@ export default function AiBizOsHumanUI() {
                       : pretty(contact.email_health)}
                 </Badge>
               ) : null}
-              {!contact.email ? <Badge variant="destructive">No email</Badge> : null}
+              {!hasEmail ? <Badge variant="destructive">No email</Badge> : null}
               {(contact.confidence || "").toLowerCase() === "low" ? (
                 <Badge variant="secondary">Low confidence</Badge>
               ) : null}
@@ -3594,6 +4748,14 @@ export default function AiBizOsHumanUI() {
       draft.generation_meta_json && typeof draft.generation_meta_json === "object"
         ? draft.generation_meta_json
         : null;
+    const promptUsedForDraft =
+      (typeof draft.prompt_setup_text_used === "string" && draft.prompt_setup_text_used.trim()) ||
+      (genMeta && typeof genMeta.prompt_setup_text_used === "string" && genMeta.prompt_setup_text_used.trim()) ||
+      null;
+    const genMetaDetailsJson =
+      genMeta && typeof genMeta === "object"
+        ? Object.fromEntries(Object.entries(genMeta).filter(([k]) => k !== "prompt_setup_text_used"))
+        : null;
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
@@ -3689,6 +4851,7 @@ export default function AiBizOsHumanUI() {
                       </Button>
                       {canRegenerateOutboundDraft(draft) ? (
                         <Button
+                          type="button"
                           size="sm"
                           variant="outline"
                           disabled={isRegeneratingOutbound || isDraftReviewBusy}
@@ -3715,6 +4878,7 @@ export default function AiBizOsHumanUI() {
                     <>
                       {canRegenerateOutboundDraft(draft) ? (
                         <Button
+                          type="button"
                           size="sm"
                           variant="outline"
                           disabled={isRegeneratingOutbound || isDraftReviewBusy}
@@ -3752,6 +4916,7 @@ export default function AiBizOsHumanUI() {
                   ) : null}
                   {canSendDraft(draft) ? (
                     <Button
+                      type="button"
                       size="sm"
                       className="gap-1.5"
                       disabled={isSendingOutbound}
@@ -3779,12 +4944,14 @@ export default function AiBizOsHumanUI() {
               <div>
                 <span className="font-medium">Subject:</span> {draft.subject}
               </div>
+              {promptUsedForDraft ? (
+                <DraftCollapsibleSection title="Prompt used for this email">
+                  <div className="whitespace-pre-wrap break-words text-sm text-foreground">{promptUsedForDraft}</div>
+                </DraftCollapsibleSection>
+              ) : null}
               {contactPers &&
               (contactPers.why_this_company || contactPers.offer_fit || contactPers.role_angle) ? (
-                <div className="rounded-lg border border-border bg-muted/25 p-3">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Why this company
-                  </div>
+                <DraftCollapsibleSection title="Why this company" className="bg-muted/25">
                   <dl className="space-y-2 text-sm">
                     {contactPers.why_this_company ? (
                       <div>
@@ -3805,7 +4972,7 @@ export default function AiBizOsHumanUI() {
                       </div>
                     ) : null}
                   </dl>
-                </div>
+                </DraftCollapsibleSection>
               ) : null}
               {genMeta ? (
                 <div className="rounded-lg border border-border p-3">
@@ -3845,7 +5012,7 @@ export default function AiBizOsHumanUI() {
                       Details (reasoning, issues)
                     </summary>
                     <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-muted/50 p-2 text-[11px] leading-relaxed">
-                      {JSON.stringify(genMeta, null, 2)}
+                      {JSON.stringify(genMetaDetailsJson, null, 2)}
                     </pre>
                   </details>
                 </div>
@@ -3872,7 +5039,7 @@ export default function AiBizOsHumanUI() {
             </div>
           ) : null}
           <EmailDraftBodyPreview
-            body={draft.body}
+            body={draft.body ?? draft.body_preview}
             showSignaturePlaceholder={runSignatureHasMeaningfulContent(
               selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "",
             )}
@@ -3885,8 +5052,79 @@ export default function AiBizOsHumanUI() {
     );
   };
 
+  const activityLogBusy =
+    loading ||
+    runDetailsLoading ||
+    openRunEditLoading ||
+    companiesLoading ||
+    analyzerLoading ||
+    continueCompanyFindLoading ||
+    draftsSectionFetchBusy ||
+    contactsSectionFetchBusy ||
+    Object.keys(restartsInFlight).length > 0;
+  const showActivityLogPanel =
+    !activityLogDismissed && (activityLogBusy || activityLogLines.length > 0);
+
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {showActivityLogPanel ? (
+        <div
+          className="fixed top-4 right-4 z-[100] flex max-h-[min(840px,110vh)] w-[min(100vw-2rem,22rem)] flex-col overflow-hidden rounded-2xl border-2 border-border bg-card shadow-lg"
+          role="log"
+          aria-live="polite"
+          aria-label="Activity log"
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-muted/40 px-3 py-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              {activityLogBusy ? (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
+              ) : null}
+              <span className="min-w-0 break-words text-sm font-semibold">Activity</span>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2 text-xs"
+                onClick={() => {
+                  setActivityLogLines([]);
+                  setActivityLogDismissed(true);
+                }}
+              >
+                Clear
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                aria-label="Close activity log"
+                onClick={() => setActivityLogDismissed(true)}
+              >
+                <X className="h-4 w-4" aria-hidden />
+              </Button>
+            </div>
+          </div>
+          <ScrollArea className="min-h-0 min-w-0 flex-1 overflow-x-auto">
+            <ol className="list-none space-y-1.5 p-3 font-mono text-[11px] leading-relaxed text-foreground [overflow-wrap:anywhere]">
+              {activityLogLines.map((line) => (
+                <li key={line.id} className="max-w-full whitespace-pre-wrap break-words">
+                  <span className="tabular-nums text-muted-foreground">
+                    {new Date(line.t).toLocaleTimeString(undefined, {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })}
+                  </span>{" "}
+                  {line.text}
+                </li>
+              ))}
+              <div ref={activityLogEndRef} className="h-0 w-full" aria-hidden />
+            </ol>
+          </ScrollArea>
+        </div>
+      ) : null}
       <div className="mx-auto max-w-7xl p-6 md:p-8">
         <div className="mb-6 space-y-4">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -3920,18 +5158,72 @@ export default function AiBizOsHumanUI() {
             </div>
           </div>
 
-          {pendingRestart ? (
+          {Object.keys(restartsInFlight).length > 0 ? (
             <div
               role="status"
               className="flex items-start gap-3 rounded-2xl border-2 border-border bg-muted/30 px-4 py-3 text-sm"
             >
               <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
               <p className="text-muted-foreground">
-                <span className="font-medium text-foreground">Restarting {pendingRestart.name}</span>
+                <span className="font-medium text-foreground">Continue outreach in background</span>
+                {": "}
+                {Object.entries(restartsInFlight)
+                  .map(([, x]) => x.name)
+                  .join(" · ")}
                 {" — "}
-                the server is re-running company search and validation. You can keep using the dashboard; run stats
-                will refresh when it completes.
+                you can switch runs; only these runs have Continue outreach disabled until finished.
               </p>
+            </div>
+          ) : null}
+
+          {runProjectMismatch && selectedProject && selectedProject.is_archived ? (
+            <div
+              role="status"
+              className="flex items-start gap-3 rounded-2xl border-2 border-border bg-muted/30 px-4 py-3 text-sm"
+            >
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              <p className="text-muted-foreground">
+                This run belongs to another project. Restore this project from the archive, then use{" "}
+                <span className="font-medium text-foreground">Move run to this project</span> in an active project.
+              </p>
+            </div>
+          ) : null}
+
+          {runProjectMismatch && selectedProject && !selectedProject.is_archived ? (
+            <div
+              role="status"
+              className="flex flex-col gap-3 rounded-2xl border-2 border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="flex items-start gap-3">
+                <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden />
+                <p className="text-muted-foreground">
+                  <span className="font-medium text-foreground">This run is stored under another project</span>
+                  {runOtherProjectLabel ? (
+                    <>
+                      {" "}
+                      (<span className="text-foreground">{runOtherProjectLabel}</span>)
+                    </>
+                  ) : null}
+                  . Move it to <span className="font-medium text-foreground">{selectedProject.name}</span> so it
+                  appears in the sidebar list.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                className="shrink-0 border-amber-600/30 bg-background hover:bg-amber-500/15"
+                disabled={runProjectMoveInFlight}
+                onClick={() => void moveRunToCurrentProject()}
+              >
+                {runProjectMoveInFlight ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                    Moving…
+                  </>
+                ) : (
+                  "Move run to this project"
+                )}
+              </Button>
             </div>
           ) : null}
 
@@ -3975,7 +5267,7 @@ export default function AiBizOsHumanUI() {
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={!selectedProject || runsList.length === 0}
+                  disabled={!selectedProject || (runsList.length === 0 && !selectedRun)}
                   onClick={() => setSwitchRunOpen(true)}
                 >
                   <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
@@ -4075,7 +5367,7 @@ export default function AiBizOsHumanUI() {
                                 Run
                               </div>
                               {selectedRun != null && selectedRun.project_id !== project.id ? (
-                                <div className="mt-0.5 text-muted-foreground">Loading…</div>
+                                <div className="mt-0.5 text-muted-foreground">Other project</div>
                               ) : selectedRun != null && selectedRun.project_id === project.id ? (
                                 <>
                                   <div
@@ -4305,20 +5597,27 @@ export default function AiBizOsHumanUI() {
               {visibleMainNavItems.map((item) => {
                 const active = mainNav === item.value;
                 return (
-                  <Button
-                    key={item.value}
-                    type="button"
-                    size="sm"
-                    variant={active ? "default" : "ghost"}
-                    className={cn(
-                      "rounded-xl",
-                      !active &&
-                        "border-2 border-transparent shadow-none hover:border-primary hover:bg-transparent",
-                    )}
-                    onClick={() => setMainNav(item.value)}
-                  >
-                    {item.label}
-                  </Button>
+                  <Fragment key={item.value}>
+                    {item.value === "assets" ? (
+                      <div
+                        className="h-0 w-full shrink-0 basis-full"
+                        aria-hidden
+                      />
+                    ) : null}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={active ? "default" : "ghost"}
+                      className={cn(
+                        "rounded-xl",
+                        !active &&
+                          "border-2 border-transparent shadow-none hover:border-primary hover:bg-transparent",
+                      )}
+                      onClick={() => setMainNav(item.value)}
+                    >
+                      {item.label}
+                    </Button>
+                  </Fragment>
                 );
               })}
             </div>
@@ -4386,7 +5685,7 @@ export default function AiBizOsHumanUI() {
                               size="sm"
                               variant="outline"
                               className="shrink-0 whitespace-nowrap"
-                              disabled={r.display_phase === "Closed" || pendingRestart != null}
+                              disabled={r.display_phase === "Closed" || Boolean(restartsInFlight[r.id])}
                               onClick={() => openRestartDialog(r)}
                             >
                               Continue outreach
@@ -4398,9 +5697,9 @@ export default function AiBizOsHumanUI() {
                               className="shrink-0 whitespace-nowrap"
                               title="Switch to this run"
                               disabled={
-                                selectedRun?.id === r.id || pendingRestart != null || openRunEditLoading
+                                selectedRun?.id === r.id || openRunEditLoading
                               }
-                              onClick={() => void openRunById(r.id)}
+                              onClick={() => void openRunById(r.id, r)}
                             >
                               <RefreshCw className="mr-1 h-4 w-4 shrink-0" aria-hidden />
                               Switch
@@ -4455,7 +5754,7 @@ export default function AiBizOsHumanUI() {
                       {companiesPanel?.companies?.some((c) => c.contact_status === "pending") &&
                       selectedRun &&
                       !selectedRun.closed_at &&
-                      pendingRestart == null ? (
+                      !restartsInFlight[selectedRun.id] ? (
                         <Button
                           type="button"
                           variant="secondary"
@@ -4480,7 +5779,7 @@ export default function AiBizOsHumanUI() {
                       ) &&
                       selectedRun &&
                       !selectedRun.closed_at &&
-                      pendingRestart == null ? (
+                      !restartsInFlight[selectedRun.id] ? (
                         <Button
                           type="button"
                           variant="outline"
@@ -4509,48 +5808,96 @@ export default function AiBizOsHumanUI() {
                 <CardContent>
                   {!selectedRun ? (
                     <p className="text-sm text-muted-foreground">Select a run first.</p>
+                  ) : companiesListFailedRunId === Number(selectedRun.id) ? (
+                    <div className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 p-4 text-sm">
+                      <p className="text-muted-foreground">
+                        Could not load the companies table (network or server error). Run setup numbers may still show
+                        from the last successful metrics refresh.
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="w-fit"
+                        onClick={() => setCompaniesRefreshNonce((n) => n + 1)}
+                      >
+                        Retry
+                      </Button>
+                    </div>
                   ) : companiesLoading && !companiesPanel ? (
                     <p className="text-sm text-muted-foreground">Loading companies...</p>
+                  ) : companiesPanel &&
+                    !companiesPanel.companies?.length &&
+                    Number(companiesPanel.companies_total) === 0 &&
+                    Number(workspace?.setup_summary?.companies_collected) > 0 ? (
+                    <div className="space-y-2 text-sm text-muted-foreground">
+                      <p>
+                        Run setup reports{" "}
+                        <span className="font-medium text-foreground">
+                          {workspace.setup_summary.companies_collected}
+                        </span>{" "}
+                        companies in setup metrics, but the{" "}
+                        <span className="font-medium text-foreground">run_companies</span> table is empty for this run.
+                        Try Refresh metrics, reopen this run, or run the one-off legacy migration script if you upgraded
+                        from an older DB.
+                      </p>
+                    </div>
                   ) : !companiesPanel?.companies?.length ? (
                     <p className="text-sm text-muted-foreground">
-                      No companies in this run&apos;s collect step yet. They appear after search adds them (or restart
-                      the run).
+                      No companies stored for this run yet. They appear after search adds them (or restart the run).
                     </p>
                   ) : (
                     <div className="space-y-4">
-                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                        <span className="inline-flex items-center gap-1.5">
-                          <Badge variant="default" className="shrink-0 whitespace-nowrap font-normal">
-                            Contacts found
-                          </Badge>
-                          <span>
-                            At least one matching person has a usable email in find-contacts output. If{" "}
-                            <strong>all</strong> contacts for that company become bounced or dead mailbox, the row shows{" "}
-                            <strong>Not available</strong> instead.
+                      <details className="rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground">
+                        <summary className="cursor-pointer select-none font-medium text-muted-foreground outline-none hover:text-foreground">
+                          What status labels mean
+                        </summary>
+                        <div className="mt-3 flex flex-col gap-3">
+                          <span className="inline-flex flex-wrap items-start gap-1.5">
+                            <Badge
+                              className="inline-flex shrink-0 items-center gap-1 border border-red-950 bg-red-950/95 font-normal text-red-50 dark:border-red-800 dark:bg-red-950/90"
+                            >
+                              <CircleAlert className="h-3 w-3 shrink-0" aria-hidden />
+                              LLM error
+                            </Badge>
+                            <span>
+                              Company/website failed validation (unreachable or invalid URL). No contact search — use a
+                              real brand in a new collect round.
+                            </span>
                           </span>
-                        </span>
-                        <span className="inline-flex items-center gap-1.5">
-                          <Badge variant="secondary" className="font-normal">
-                            Not found
-                          </Badge>
-                          <span>Find-contacts finished; no matching row for this company.</span>
-                        </span>
-                        <span className="inline-flex items-center gap-1.5">
-                          <Badge variant="destructive" className="font-normal">
-                            Not available
-                          </Badge>
-                          <span>
-                            Find returned people without emails, or retry added nothing — further retries are hidden
-                            for that row.
+                          <span className="inline-flex flex-wrap items-start gap-1.5">
+                            <Badge variant="default" className="shrink-0 whitespace-nowrap font-normal">
+                              Contacts found
+                            </Badge>
+                            <span>
+                              At least one matching person has a usable email in find-contacts output. If{" "}
+                              <strong>all</strong> contacts for that company become bounced or dead mailbox, the row shows{" "}
+                              <strong>Not available</strong> instead.
+                            </span>
                           </span>
-                        </span>
-                        <span className="inline-flex items-center gap-1.5">
-                          <Badge variant="outline" className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100">
-                            Not searched yet
-                          </Badge>
-                          <span>Find-contacts still running or not completed — more results may arrive.</span>
-                        </span>
-                      </div>
+                          <span className="inline-flex flex-wrap items-start gap-1.5">
+                            <Badge variant="secondary" className="font-normal">
+                              Not found
+                            </Badge>
+                            <span>Find-contacts finished; no matching row for this company.</span>
+                          </span>
+                          <span className="inline-flex flex-wrap items-start gap-1.5">
+                            <Badge variant="destructive" className="font-normal">
+                              Not available
+                            </Badge>
+                            <span>
+                              Find returned people without emails, or retry added nothing — further retries are hidden
+                              for that row.
+                            </span>
+                          </span>
+                          <span className="inline-flex flex-wrap items-start gap-1.5">
+                            <Badge variant="outline" className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100">
+                              Not searched yet
+                            </Badge>
+                            <span>Find-contacts still running or not completed — more results may arrive.</span>
+                          </span>
+                        </div>
+                      </details>
                       <div className="overflow-x-auto rounded-xl border-2 border-border">
                         <table className="w-full min-w-[520px] text-left text-sm">
                           <thead className="border-b border-border bg-muted/40 text-xs font-semibold text-muted-foreground">
@@ -4561,13 +5908,21 @@ export default function AiBizOsHumanUI() {
                             </tr>
                           </thead>
                           <tbody>
-                            {companiesPageSlice.map((row) => {
+                            {companiesRows.map((row) => {
                               const st = row.contact_status;
                               const unavailable = !!companyFindUnavailable[row.collect_index];
                               const onlyBouncedOrDead =
                                 st === "found" && companyHasOnlyBouncedOrDeadContacts(contacts, row);
                               const badge =
-                                onlyBouncedOrDead ? (
+                                st === "llm_error" ? (
+                                  <Badge
+                                    className="inline-flex items-center gap-1 border border-red-950 bg-red-950/95 font-normal text-red-50 dark:border-red-800 dark:bg-red-950/90"
+                                    title="Invalid or unreachable website — marked as LLM hallucination"
+                                  >
+                                    <CircleAlert className="h-3 w-3 shrink-0" aria-hidden />
+                                    LLM error
+                                  </Badge>
+                                ) : onlyBouncedOrDead ? (
                                   <Badge variant="destructive" className="font-normal">
                                     Not available
                                   </Badge>
@@ -4598,10 +5953,11 @@ export default function AiBizOsHumanUI() {
                               const retryingRow = !!companyRetryLoading[row.collect_index];
                               const canRetryCompanyFind =
                                 (st === "none" || st === "no_email") &&
+                                st !== "llm_error" &&
                                 !unavailable &&
                                 selectedRun &&
                                 !selectedRun.closed_at &&
-                                pendingRestart == null;
+                                !restartsInFlight[selectedRun.id];
                               return (
                                 <tr
                                   key={`company-${row.collect_index}`}
@@ -4652,19 +6008,27 @@ export default function AiBizOsHumanUI() {
                           </tbody>
                         </table>
                       </div>
-                      {companiesListForPage && companiesListForPage.length > WORKSPACE_TABLE_PAGE_SIZE ? (
+                      {companiesTotalForUi > WORKSPACE_TABLE_PAGE_SIZE ? (
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
                           <span>
-                            {(companiesPage - 1) * WORKSPACE_TABLE_PAGE_SIZE + 1}–
-                            {Math.min(companiesPage * WORKSPACE_TABLE_PAGE_SIZE, companiesListForPage.length)} of{" "}
-                            {companiesListForPage.length}
+                            {companiesRangeStart > 0 && companiesRangeEnd > 0 ? (
+                              <>
+                                {companiesRangeStart}–{companiesRangeEnd} of {companiesTotalForUi}
+                                {companiesListTruncated ? (
+                                  <span className="text-foreground">
+                                    {" "}
+                                    (showing first {companiesLoadedCount} loaded)
+                                  </span>
+                                ) : null}
+                              </>
+                            ) : null}
                           </span>
                           <div className="flex flex-wrap gap-2">
                             <Button
                               type="button"
                               variant="outline"
                               size="sm"
-                              disabled={companiesPage <= 1}
+                              disabled={companiesPage <= 1 || companiesLoading}
                               onClick={() => setCompaniesPage((p) => Math.max(1, p - 1))}
                             >
                               Previous
@@ -4673,17 +6037,17 @@ export default function AiBizOsHumanUI() {
                               type="button"
                               variant="outline"
                               size="sm"
-                              disabled={companiesPage >= companiesPageCount}
+                              disabled={companiesPage >= companiesPageCount || companiesLoading}
                               onClick={() => setCompaniesPage((p) => Math.min(companiesPageCount, p + 1))}
                             >
                               Next
                             </Button>
                           </div>
                         </div>
-                      ) : companiesListForPage && companiesListForPage.length > 0 ? (
+                      ) : companiesTotalForUi > 0 ? (
                         <p className="text-xs text-muted-foreground">
-                          {companiesListForPage.length}{" "}
-                          {companiesListForPage.length === 1 ? "company" : "companies"} total.
+                          {companiesTotalForUi}{" "}
+                          {companiesTotalForUi === 1 ? "company" : "companies"} total.
                         </p>
                       ) : null}
                     </div>
@@ -4734,12 +6098,9 @@ export default function AiBizOsHumanUI() {
                         size="sm"
                         className="gap-1.5"
                         onClick={() => void openPromptSetup()}
-                        disabled={!selectedRun || promptSetupOpenLoading}
-                        aria-busy={promptSetupOpenLoading}
+                        disabled={!selectedRun}
                       >
-                        {promptSetupOpenLoading ? (
-                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-                        ) : promptSetupSavedFilled ? (
+                        {promptSetupSavedFilled ? (
                           <CircleCheck
                             className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500"
                             aria-hidden
@@ -4758,12 +6119,9 @@ export default function AiBizOsHumanUI() {
                         size="sm"
                         className="gap-1.5"
                         onClick={() => void openSignatureSetup()}
-                        disabled={!selectedRun || signatureSetupOpenLoading}
-                        aria-busy={signatureSetupOpenLoading}
+                        disabled={!selectedRun}
                       >
-                        {signatureSetupOpenLoading ? (
-                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-                        ) : signatureSetupFilled ? (
+                        {signatureSetupFilled ? (
                           <CircleCheck
                             className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500"
                             aria-hidden
@@ -4854,7 +6212,7 @@ export default function AiBizOsHumanUI() {
                       </div>
                     ) : null}
 
-                    {contactsVisible.length > 0 ? (
+                    {showContactReviewTabStrip ? (
                       <div className="space-y-3">
                         <div
                           className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
@@ -4959,7 +6317,34 @@ export default function AiBizOsHumanUI() {
                           </Button>
                         </div>
 
-                        {contactReviewTabGroups.length === 0 ? (
+                        {contactsListFailedRunId === Number(selectedRun?.id) ? (
+                          <div
+                            className="flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
+                            role="alert"
+                          >
+                            <p className="max-w-md text-muted-foreground">
+                              Could not load contacts (network or server error). Tab counts may still show cached
+                              numbers from a previous session.
+                            </p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void refreshRunContactsOnly(selectedRun.id)}
+                            >
+                              Retry
+                            </Button>
+                          </div>
+                        ) : contactsReviewListLoading ? (
+                          <div
+                            className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
+                            role="status"
+                            aria-live="polite"
+                          >
+                            <Loader2 className="h-8 w-8 shrink-0 animate-spin text-primary" aria-hidden />
+                            <p>Loading contacts…</p>
+                          </div>
+                        ) : contactReviewTabGroups.length === 0 ? (
                           <div className="text-sm text-muted-foreground">
                             {contactReviewTab === "pending"
                               ? "No pending contacts here — try another tab or clear search."
@@ -5061,7 +6446,27 @@ export default function AiBizOsHumanUI() {
                         Send all approved
                       </Button>
                     </div>
-                    {drafts.length > 0 || contactsAwaitingOutboundDraftPlaceholder.length > 0 ? (
+                    {draftsListFailedRunId === Number(selectedRun?.id) ? (
+                      <div
+                        className="flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
+                        role="alert"
+                      >
+                        <p className="max-w-md text-muted-foreground">
+                          Could not load email drafts (network, timeout, or server error). Cached counts in the
+                          header may still reflect an earlier load.
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={draftsSectionFetchBusy}
+                          aria-busy={draftsSectionFetchBusy}
+                          onClick={() => void refreshRunDraftsOnly(selectedRun.id)}
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    ) : drafts.length > 0 || contactsAwaitingOutboundDraftPlaceholder.length > 0 ? (
                       <div className="space-y-3">
                         <div
                           className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
@@ -5217,9 +6622,29 @@ export default function AiBizOsHumanUI() {
                         </div>
                         {reviewDraftsSnapModeVal === "loading" && draftsPanelLiteFiltered.length > 0 ? (
                           <>
-                            <p className="text-xs text-muted-foreground" role="status">
-                              Showing cached drafts — refreshing…
-                            </p>
+                            {draftsSectionFetchBusy || runDetailsLoading ? (
+                              <p className="text-xs text-muted-foreground" role="status">
+                                Showing cached preview — loading full list…
+                              </p>
+                            ) : (
+                              <div
+                                className="flex flex-wrap items-center gap-2"
+                                role="status"
+                              >
+                                <p className="text-xs text-amber-600 dark:text-amber-400">
+                                  Couldn&apos;t load full drafts — cached preview only (timeouts or network).
+                                </p>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={draftsSectionFetchBusy}
+                                  onClick={() => void refreshRunDraftsOnly(selectedRun.id)}
+                                >
+                                  Retry
+                                </Button>
+                              </div>
+                            )}
                             <div className="max-h-[min(60vh,480px)] space-y-2 overflow-y-auto rounded-xl border border-border p-2">
                               {draftsPanelLiteFiltered.map((d) => (
                                 <div
@@ -5236,6 +6661,19 @@ export default function AiBizOsHumanUI() {
                                     <Badge variant="outline" className="text-[10px] font-normal">
                                       {d.tracking_status || d.status}
                                     </Badge>
+                                  </div>
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-7 gap-1 text-xs"
+                                      title="Loads full draft from the server if the list is not hydrated yet."
+                                      onClick={() => openEditDraft(d)}
+                                    >
+                                      <Pencil className="h-3 w-3 shrink-0" aria-hidden />
+                                      Edit
+                                    </Button>
                                   </div>
                                 </div>
                               ))}
@@ -5455,6 +6893,7 @@ export default function AiBizOsHumanUI() {
                 onActiveTabChange={(tab) => setMainNav(trackingTabToMainNav(tab))}
                 onRunWorkspaceRefresh={() => refreshRunMetricsOnly(selectedRun.id)}
                 onStaticAssetsSynced={onStaticAssetsSynced}
+                onRunTraceLog={appendTrackingRunTraceLog}
                 workspaceDisplayPhase={workspace?.display_phase ?? selectedRun?.display_phase}
                 cdnR2UploadReady={setupIntegration?.cdn_r2_upload_ready === true}
                 pollLiveEnabled={mainNav === "events" || mainNav === "threads"}
@@ -5667,38 +7106,28 @@ export default function AiBizOsHumanUI() {
           </DialogHeader>
           <ScrollArea className="max-h-[360px] pr-3">
             <div className="space-y-2 py-2">
-              {runsList.map((r) => {
-                const isCurrent = selectedRun?.id === r.id;
-                return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    aria-current={isCurrent ? "true" : undefined}
-                    className={`w-full rounded-2xl border-2 p-3 text-left text-sm transition-colors hover:bg-muted/50 ${
-                      isCurrent ? "border-primary bg-primary/5" : "border-border"
-                    }`}
-                    onClick={() => void openRunById(r.id)}
+              {switchRunOpenList.map((r) => (
+                <SwitchRunListRow key={r.id} run={r} selectedRun={selectedRun} onSelect={openRunById} />
+              ))}
+              {switchRunClosedList.length > 0 ? (
+                <div className="space-y-2 pt-2">
+                  <div
+                    className="rounded-xl border border-border/80 bg-muted/30 px-3 py-2.5"
+                    role="group"
+                    aria-label="Closed runs"
                   >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{r.name}</span>
-                      {isCurrent ? (
-                        <Badge variant="secondary" className="font-normal text-xs">
-                          Current
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="space-y-0.5 text-xs text-muted-foreground">
-                      <div>{r.display_phase}</div>
-                      <div>
-                        Companies {r.companies_count} · Contacts {r.contacts_count}
-                      </div>
-                      <div>
-                        Sent {r.emails_sent} · Replies {r.replies} · Threads {r.active_threads}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Closed runs
+                    </p>
+                    <p className="mt-1 text-sm text-muted-foreground leading-snug">
+                      These runs are closed — no new outreach sending. Threads, replies, and history stay available.
+                    </p>
+                  </div>
+                  {switchRunClosedList.map((r) => (
+                    <SwitchRunListRow key={r.id} run={r} selectedRun={selectedRun} onSelect={openRunById} />
+                  ))}
+                </div>
+              ) : null}
               {!runsList.length ? (
                 <p className="text-sm text-muted-foreground">No runs in this project.</p>
               ) : null}
@@ -5732,7 +7161,7 @@ export default function AiBizOsHumanUI() {
         </DialogContent>
       </Dialog>
 
-      {editDraft ? (
+      {editDraft || editDraftLoading ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <button
             type="button"
@@ -5740,38 +7169,54 @@ export default function AiBizOsHumanUI() {
             aria-label="Close"
             disabled={editDraftSaving}
             onClick={() => {
-              if (!editDraftSaving) setEditDraft(null);
+              if (!editDraftSaving) closeEditDraftModal();
             }}
           />
           <div
             className="relative z-50 flex h-[80vh] max-h-[80vh] w-full max-w-[63rem] flex-col overflow-hidden rounded-xl border-2 border-border bg-card shadow-lg"
             role="dialog"
             aria-labelledby="edit-email-draft-title"
+            aria-busy={editDraftLoading}
           >
             <h2 id="edit-email-draft-title" className="shrink-0 px-6 pt-6 text-lg font-semibold">
               Edit email draft
             </h2>
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
-              <div className="grid gap-3">
-                <Input
-                  placeholder="Subject"
-                  value={draftForm.subject}
-                  onChange={(e) => setDraftForm((f) => ({ ...f, subject: e.target.value }))}
-                />
-                <EmailDraftRichTextEditor
-                  key={editDraft.id}
-                  initialBody={draftForm.body}
-                  onChange={(body) => setDraftForm((f) => ({ ...f, body }))}
-                />
-                <DraftAssetAttachmentsField
-                  assets={assetsLibrary}
-                  assetPackets={runAssetPackets}
-                  selectedIds={draftForm.attached_asset_ids}
-                  onSelectedIdsChange={(attached_asset_ids) =>
-                    setDraftForm((f) => ({ ...f, attached_asset_ids }))
-                  }
-                />
-              </div>
+              {editDraftLoading && !editDraft ? (
+                <div
+                  className="flex min-h-[min(40vh,320px)] flex-col items-center justify-center gap-3 py-12 text-center"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Loader2 className="h-10 w-10 shrink-0 animate-spin text-primary" aria-hidden />
+                  <p className="text-sm text-muted-foreground">Loading draft from server…</p>
+                  <p className="max-w-sm text-xs text-muted-foreground">
+                    Usually under a few seconds. If it hangs, click Cancel — or wait; the request stops
+                    automatically after about {Math.round(EMAIL_DRAFT_GET_FOR_EDIT_TIMEOUT_MS / 1000)}s.
+                  </p>
+                </div>
+              ) : editDraft ? (
+                <div className="grid gap-3">
+                  <Input
+                    placeholder="Subject"
+                    value={draftForm.subject}
+                    onChange={(e) => setDraftForm((f) => ({ ...f, subject: e.target.value }))}
+                  />
+                  <EmailDraftRichTextEditor
+                    key={editDraft.id}
+                    initialBody={draftForm.body}
+                    onChange={(body) => setDraftForm((f) => ({ ...f, body }))}
+                  />
+                  <DraftAssetAttachmentsField
+                    assets={assetsLibrary}
+                    assetPackets={runAssetPackets}
+                    selectedIds={draftForm.attached_asset_ids}
+                    onSelectedIdsChange={(attached_asset_ids) =>
+                      setDraftForm((f) => ({ ...f, attached_asset_ids }))
+                    }
+                  />
+                </div>
+              ) : null}
             </div>
             <div className="shrink-0 border-t border-border px-6 py-4">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -5779,24 +7224,34 @@ export default function AiBizOsHumanUI() {
                   <input
                     type="checkbox"
                     className="mt-0.5 h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
-                    checked={applyAssetsToAllPendingDrafts}
-                    disabled={editDraftSaving}
-                    onChange={(e) => setApplyAssetsToAllPendingDrafts(e.target.checked)}
+                    checked={
+                      draftReviewTab === "approved"
+                        ? applyAssetsEditScope === "approved"
+                        : applyAssetsEditScope === "pending"
+                    }
+                    disabled={editDraftSaving || editDraftLoading || !editDraft}
+                    onChange={(e) => {
+                      if (!e.target.checked) setApplyAssetsEditScope("none");
+                      else
+                        setApplyAssetsEditScope(draftReviewTab === "approved" ? "approved" : "pending");
+                    }}
                   />
                   <span>
                     <span className="font-medium text-foreground">Apply assets to all drafts</span>
                     <span className="mt-0.5 block text-xs">
-                      Pending review only — same attachments as here after Save.
+                      {draftReviewTab === "approved"
+                        ? "Approved only — same attachments as here after Save."
+                        : "Pending review only — same attachments as here after Save."}
                     </span>
                   </span>
                 </label>
                 <div className="flex shrink-0 justify-end gap-2">
-                  <Button variant="outline" disabled={editDraftSaving} onClick={() => setEditDraft(null)}>
+                  <Button variant="outline" disabled={editDraftSaving} onClick={() => closeEditDraftModal()}>
                     Cancel
                   </Button>
                   <Button
                     type="button"
-                    disabled={editDraftSaving}
+                    disabled={editDraftSaving || editDraftLoading || !editDraft}
                     aria-busy={editDraftSaving}
                     onClick={() => void saveEditDraft()}
                   >
@@ -5825,15 +7280,21 @@ export default function AiBizOsHumanUI() {
             <p className="mt-1 text-sm text-muted-foreground">
               <span className="font-medium text-foreground">{restartDialogRun.name}</span>
               {" — "}
-              company search and contact validation will run again on top of what you already have (same brief). Existing
-              contacts, drafts, and tracking data stay in place; new companies or contacts are merged in. After you
-              confirm, this window closes; progress appears as a slim banner under the page title.
+              company search and contact validation run in the <strong>background</strong> on the server — you can switch
+              to other runs and start Continue outreach there too; only runs with an active job keep this button
+              disabled. Same brief, extra rounds to grow the list. Existing contacts, drafts, and tracking stay in place;
+              new rows are merged in. After you confirm, this window closes; a banner under the title lists in-flight
+              runs.
             </p>
             <div className="mt-6 flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={closeRestartDialog}>
                 Cancel
               </Button>
-              <Button type="button" onClick={() => void confirmRestartRun()} disabled={pendingRestart != null}>
+              <Button
+                type="button"
+                onClick={() => void confirmRestartRun()}
+                disabled={Boolean(restartDialogRun && restartsInFlight[restartDialogRun.id])}
+              >
                 Continue...
               </Button>
             </div>

@@ -219,6 +219,8 @@ export function stripDraftForPanelLite(d) {
     review_notes: d.review_notes ?? null,
     error_message: d.error_message ?? null,
     attached_asset_ids: d.attached_asset_ids ?? null,
+    prompt_setup_text_used:
+      typeof d.prompt_setup_text_used === "string" ? d.prompt_setup_text_used : null,
     generation_meta_json:
       d.generation_meta_json && typeof d.generation_meta_json === "object"
         ? {
@@ -226,6 +228,7 @@ export function stripDraftForPanelLite(d) {
             style_mode: d.generation_meta_json.style_mode,
             pipeline_source: d.generation_meta_json.pipeline_source,
             is_valid: d.generation_meta_json.is_valid,
+            prompt_setup_text_used: d.generation_meta_json.prompt_setup_text_used,
           }
         : null,
   };

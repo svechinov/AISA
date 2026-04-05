@@ -56,6 +56,7 @@ import {
   filterThreadPanelLiteByTab,
   sortThreadPanelLiteRows,
 } from "@/lib/runPanelLite";
+import { fetchAllPagedItems } from "@/lib/paginatedApi";
 
 /** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
 function threadMessageBodyLooksLikeHtml(s) {
@@ -263,6 +264,8 @@ export default function TrackingView({
   onRunWorkspaceRefresh,
   /** Sync Human UI draft chips / library when assets or run packets change (not polled with threads/events). */
   onStaticAssetsSynced,
+  /** Optional: same Activity panel as Human UI — run switch / fetchStaticAssets trace. */
+  onRunTraceLog,
   /** From workspace / run card: Preparing | Ready | Active | Closed — tighter poll only when Active. */
   workspaceDisplayPhase,
   /** From GET /setup/status — R2 env complete for POST /assets/upload */
@@ -278,6 +281,8 @@ export default function TrackingView({
   const [tasks, setTasks] = useState([]);
   const [threads, setThreads] = useState([]);
   const [runMessages, setRunMessages] = useState([]);
+  /** Full bodies for thread modal — GET /email-threads/{id}/messages; run-wide list is preview-only. */
+  const [threadModalMessagesFull, setThreadModalMessagesFull] = useState(null);
   const [threadModalId, setThreadModalId] = useState(null);
   /** "bounced" | "dead_mailbox" — second-step confirm for irreversible delivery marking */
   const [threadManualMarkConfirm, setThreadManualMarkConfirm] = useState(null);
@@ -318,6 +323,16 @@ export default function TrackingView({
   /** After first successful load for this run — thread/event sub-tab counts use live data, not snapshot. */
   const [trackingCountsReady, setTrackingCountsReady] = useState(false);
   const [innerTab, setInnerTab] = useState("events");
+  /** Latest runId for stale guards after await in fetchStaticAssets / load. */
+  const runIdRef = useRef(runId);
+  runIdRef.current = runId;
+
+  const trace = useCallback(
+    (message, detail) => {
+      onRunTraceLog?.(message, detail);
+    },
+    [onRunTraceLog],
+  );
 
   useEffect(() => {
     setInnerTab(activeTab || "events");
@@ -342,44 +357,83 @@ export default function TrackingView({
 
   const fetchLiveData = useCallback(async () => {
     if (!runId) return;
-    const [er, sr, dr, cr, tr, th, msg, rep, rem] = await Promise.all([
-      fetch(`${API_BASE}/email-events/run/${runId}`),
-      fetch(`${API_BASE}/sending/runs/${runId}/summary`),
-      fetch(`${API_BASE}/email-drafts/run/${runId}`),
-      fetch(`${API_BASE}/contacts/run/${runId}`),
-      fetch(`${API_BASE}/research-tasks/run/${runId}`),
-      fetch(`${API_BASE}/email-threads/run/${runId}`),
-      fetch(`${API_BASE}/email-threads/run/${runId}/messages`),
-      fetch(`${API_BASE}/reply-drafts/run/${runId}`),
-      fetch(`${API_BASE}/reminders/run/${runId}`),
+    const getJson = async (pathWithQuery) => {
+      const r = await fetch(`${API_BASE}${pathWithQuery}`);
+      return r.ok ? r.json() : [];
+    };
+    /** Paged lists must not take down the whole Tracking bundle if one endpoint errors or times out. */
+    const safePaged = async (basePath) => {
+      try {
+        return await fetchAllPagedItems(getJson, basePath);
+      } catch {
+        return [];
+      }
+    };
+    const [er, sr, rt, msg, rep, rem, c, d, threadsRows] = await Promise.all([
+      fetch(`${API_BASE}/email-events/run/${runId}`).catch(() => null),
+      fetch(`${API_BASE}/sending/runs/${runId}/summary`).catch(() => null),
+      fetch(`${API_BASE}/research-tasks/run/${runId}`).catch(() => null),
+      fetch(`${API_BASE}/email-threads/run/${runId}/messages`).catch(() => null),
+      fetch(`${API_BASE}/reply-drafts/run/${runId}`).catch(() => null),
+      fetch(`${API_BASE}/reminders/run/${runId}`).catch(() => null),
+      safePaged(`/contacts/run/${runId}`),
+      safePaged(`/email-drafts/run/${runId}`),
+      safePaged(`/email-threads/run/${runId}`),
     ]);
-    if (!er.ok) throw new Error(`Events: ${er.status}`);
-    if (!sr.ok) throw new Error(`Summary: ${sr.status}`);
-    const [e, s] = await Promise.all([er.json(), sr.json()]);
+    let e = [];
+    try {
+      e = er && er.ok ? await er.json() : [];
+    } catch {
+      e = [];
+    }
     setEvents(Array.isArray(e) ? e : []);
+
+    let s = null;
+    try {
+      s = sr && sr.ok ? await sr.json() : null;
+    } catch {
+      s = null;
+    }
     setSummary(s || null);
 
-    const d = dr.ok ? await dr.json() : [];
     setDrafts(Array.isArray(d) ? d : []);
 
-    const c = cr.ok ? await cr.json() : [];
     setContacts(Array.isArray(c) ? c : []);
 
-    const t = tr.ok ? await tr.json() : [];
+    let t = [];
+    try {
+      t = rt && rt.ok ? await rt.json() : [];
+    } catch {
+      t = [];
+    }
     setTasks(Array.isArray(t) ? t : []);
 
-    const threadData = th.ok ? await th.json() : [];
-    setThreads(Array.isArray(threadData) ? threadData : []);
-    const msgData = msg.ok ? await msg.json() : [];
+    setThreads(Array.isArray(threadsRows) ? threadsRows : []);
+    let msgData = [];
+    try {
+      msgData = msg && msg.ok ? await msg.json() : [];
+    } catch {
+      msgData = [];
+    }
     setRunMessages(Array.isArray(msgData) ? msgData : []);
-    const repData = rep.ok ? await rep.json() : [];
+    let repData = [];
+    try {
+      repData = rep && rep.ok ? await rep.json() : [];
+    } catch {
+      repData = [];
+    }
     setReplyDrafts(Array.isArray(repData) ? repData : []);
-    const remData = rem.ok ? await rem.json() : [];
+    let remData = [];
+    try {
+      remData = rem && rem.ok ? await rem.json() : [];
+    } catch {
+      remData = [];
+    }
     setReminders(Array.isArray(remData) ? remData : []);
     try {
       const threadsLite = sortThreadPanelLiteRows(
         buildThreadPanelLiteRows(
-          Array.isArray(threadData) ? threadData : [],
+          Array.isArray(threadsRows) ? threadsRows : [],
           Array.isArray(c) ? c : [],
           Array.isArray(d) ? d : [],
           Array.isArray(msgData) ? msgData : [],
@@ -402,54 +456,104 @@ export default function TrackingView({
 
   const fetchStaticAssets = useCallback(async () => {
     if (!runId) return;
+    const startedRun = runId;
+    trace("fetchStaticAssets start", {
+      startedRun,
+      requests: ["GET /assets", `GET /asset-packets/run/${startedRun}`],
+    });
     try {
       const [ast, apk] = await Promise.all([
         fetch(`${API_BASE}/assets`),
-        fetch(`${API_BASE}/asset-packets/run/${runId}`),
+        fetch(`${API_BASE}/asset-packets/run/${startedRun}`),
       ]);
-      const astData = ast.ok ? await ast.json() : [];
-      const apkData = apk.ok ? await apk.json() : [];
+      if (runIdRef.current !== startedRun) {
+        trace("fetchStaticAssets discard (run changed after fetch headers)", {
+          startedRun,
+          currentRun: runIdRef.current,
+        });
+        return;
+      }
+      if (!ast.ok || !apk.ok) {
+        const parts = [];
+        if (!ast.ok) {
+          parts.push(`GET /assets ${ast.status}: ${(await ast.text()).slice(0, 240)}`);
+        }
+        if (!apk.ok) {
+          parts.push(
+            `GET /asset-packets/run/${startedRun} ${apk.status}: ${(await apk.text()).slice(0, 240)}`,
+          );
+        }
+        if (ast.ok && !apk.ok) {
+          try {
+            await ast.json();
+          } catch {
+            /* discard body */
+          }
+        }
+        if (apk.ok && !ast.ok) {
+          try {
+            await apk.json();
+          } catch {
+            /* discard body */
+          }
+        }
+        if (runIdRef.current !== startedRun) {
+          trace("fetchStaticAssets discard after HTTP error bodies", {
+            startedRun,
+            currentRun: runIdRef.current,
+          });
+          return;
+        }
+        trace("fetchStaticAssets HTTP error (local UI keeps prior rows until success)", {
+          startedRun,
+          message: parts.join(" · "),
+        });
+        setError(parts.join(" · "));
+        return;
+      }
+      const astData = await ast.json();
+      const apkData = await apk.json();
+      if (runIdRef.current !== startedRun) {
+        trace("fetchStaticAssets discard (run changed after JSON)", {
+          startedRun,
+          currentRun: runIdRef.current,
+        });
+        return;
+      }
       const assets = Array.isArray(astData) ? astData : [];
       const packets = Array.isArray(apkData) ? apkData : [];
+      trace("fetchStaticAssets apply", {
+        startedRun,
+        assetsCount: assets.length,
+        packetsCount: packets.length,
+        packetIds: packets.slice(0, 8).map((p) => p?.id),
+      });
       setAssets(assets);
       setAssetPackets(packets);
-      onStaticAssetsSynced?.({ assets, packets, runId });
-    } catch {
-      /* keep previous lists */
+      onStaticAssetsSynced?.({ assets, packets, runId: startedRun });
+    } catch (e) {
+      if (runIdRef.current !== startedRun) {
+        trace("fetchStaticAssets catch ignored (stale run)", {
+          startedRun,
+          currentRun: runIdRef.current,
+        });
+        return;
+      }
+      trace("fetchStaticAssets catch", { startedRun, err: String(e?.message || e) });
+      setError(String(e?.message || e || "Failed to load assets / packets"));
     }
-  }, [runId, onStaticAssetsSynced]);
+  }, [runId, onStaticAssetsSynced, trace]);
 
   const load = useCallback(async () => {
     if (!runId) return;
+    trace("load() start", { runId });
     setLoading(true);
     setError("");
     let ok = false;
     try {
-      await Promise.all([fetchLiveData(), fetchStaticAssets()]);
-      ok = true;
-    } catch (err) {
-      const msg = String(err?.message || err || "");
-      const transient =
-        /failed to fetch/i.test(msg) ||
-        /load failed|networkerror|network request failed|aborted|abort$/i.test(msg);
-      if (transient) {
-        console.warn("[TrackingView] refresh skipped (transient):", msg);
-      } else {
-        setError(msg);
-      }
-    } finally {
-      setLoading(false);
-      if (ok) setTrackingCountsReady(true);
-    }
-  }, [runId, fetchLiveData, fetchStaticAssets]);
-
-  /** Threads, events, drafts, reminders — polled; does not hit /assets or /asset-packets. */
-  const loadLive = useCallback(async () => {
-    if (!runId) return;
-    setLoading(true);
-    setError("");
-    let ok = false;
-    try {
+      // Load assets/packets first so the Assets tab is not blocked by many parallel /run/* requests
+      // (browser HTTP/1.1 connection limits can delay starting GET /assets otherwise).
+      await fetchStaticAssets();
       await fetchLiveData();
       ok = true;
     } catch (err) {
@@ -465,8 +569,43 @@ export default function TrackingView({
     } finally {
       setLoading(false);
       if (ok) setTrackingCountsReady(true);
+      if (ok) trace("load() finished OK", { runId });
     }
-  }, [runId, fetchLiveData]);
+  }, [runId, fetchLiveData, fetchStaticAssets, trace]);
+
+  /** Threads, events, drafts, reminders — polled; does not hit /assets or /asset-packets. */
+  const loadLive = useCallback(async () => {
+    if (!runId) return;
+    setLoading(true);
+    setError("");
+    let ok = false;
+    try {
+      await fetchLiveData();
+      if (threadModalId != null) {
+        try {
+          const tr = await fetch(`${API_BASE}/email-threads/${threadModalId}/messages`);
+          const tm = tr.ok ? await tr.json() : [];
+          setThreadModalMessagesFull(Array.isArray(tm) ? tm : []);
+        } catch {
+          /* keep modal list */
+        }
+      }
+      ok = true;
+    } catch (err) {
+      const msg = String(err?.message || err || "");
+      const transient =
+        /failed to fetch/i.test(msg) ||
+        /load failed|networkerror|network request failed|aborted|abort$/i.test(msg);
+      if (transient) {
+        console.warn("[TrackingView] refresh skipped (transient):", msg);
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+      if (ok) setTrackingCountsReady(true);
+    }
+  }, [runId, fetchLiveData, threadModalId]);
 
   useEffect(() => {
     setTrackingCountsReady(false);
@@ -478,6 +617,7 @@ export default function TrackingView({
       setTasks([]);
       setThreads([]);
       setRunMessages([]);
+      setThreadModalMessagesFull(null);
       setReplyDrafts([]);
       setReminders([]);
       setAssets([]);
@@ -495,8 +635,13 @@ export default function TrackingView({
       setEventBucketTab("active");
       return;
     }
+    trace("Tracking mount effect: runId changed — load() (do not clear assets/packets before fetch)", {
+      runId,
+    });
     void load();
-  }, [runId, load, activeTab]);
+    // Do not depend on activeTab: each inner-tab switch re-ran load(), overlapping requests and
+    // fighting with the parent Human UI assets fetch. runId + load is enough.
+  }, [runId, load, trace]);
 
   useEffect(() => {
     if (!runId || !pollLiveEnabled) return;
@@ -510,6 +655,7 @@ export default function TrackingView({
 
   useEffect(() => {
     if (threadModalId == null) {
+      setThreadModalMessagesFull(null);
       setThreadRemindAtLocal("");
       return;
     }
@@ -517,6 +663,20 @@ export default function TrackingView({
     d.setDate(d.getDate() + 3);
     d.setHours(9, 0, 0, 0);
     setThreadRemindAtLocal(toDatetimeLocalValue(d));
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/email-threads/${threadModalId}/messages`);
+        if (!r.ok || cancelled) return;
+        const rows = await r.json();
+        if (!cancelled) setThreadModalMessagesFull(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (!cancelled) setThreadModalMessagesFull(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [threadModalId]);
 
   useEffect(() => {
@@ -784,8 +944,9 @@ export default function TrackingView({
     return groupedEvents.filter((g) => eventGroupTabBucket(g) === eventBucketTab);
   }, [groupedEvents, eventBucketTab, eventGroupTabBucket]);
 
+  /** Align with Run performance «Dead mailboxes» (dead-mailbox delivery) — not «bounced» (separate Contacts tab). */
   const deadContacts = useMemo(() => {
-    return contacts.filter((c) => c.email_health === "dead_mailbox" || c.email_health === "bounced");
+    return contacts.filter((c) => c.email_health === "dead_mailbox");
   }, [contacts]);
 
   const replacementQueueTasks = useMemo(() => {
@@ -822,9 +983,49 @@ export default function TrackingView({
     [contacts],
   );
 
+  async function waitForDraftTerminalAfterQueuedSend(draftId) {
+    await new Promise((r) => setTimeout(r, 400));
+    for (let i = 0; i < 35; i++) {
+      try {
+        const res = await fetch(`${API_BASE}/email-drafts/${draftId}`, { cache: "no-store" });
+        if (!res.ok) break;
+        const d = await res.json();
+        if (d && ["sent", "failed"].includes(d.status)) break;
+      } catch {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
+  async function waitForBulkSendNoSending(runId) {
+    await new Promise((r) => setTimeout(r, 500));
+    for (let i = 0; i < 60; i++) {
+      try {
+        const res = await fetch(`${API_BASE}/email-drafts/run/${runId}?limit=500&offset=0`, {
+          cache: "no-store",
+        });
+        if (!res.ok) break;
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : data?.items ?? [];
+        if (i >= 2 && !items.some((x) => x.status === "sending")) break;
+      } catch {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
   async function sendSingleDraft(draftId) {
     try {
-      await fetch(`${API_BASE}/sending/drafts/${draftId}/send`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/sending/drafts/${draftId}/send`, { method: "POST" });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setError(detail?.detail ? String(detail.detail) : `Send failed (${res.status})`);
+        return;
+      }
+      await res.json();
+      await waitForDraftTerminalAfterQueuedSend(draftId);
       await loadLive();
     } catch {
       setError("Send failed — check network / backend.");
@@ -834,7 +1035,14 @@ export default function TrackingView({
   async function sendApprovedDrafts() {
     if (!runId) return;
     try {
-      await fetch(`${API_BASE}/sending/runs/${runId}/send`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/sending/runs/${runId}/send`, { method: "POST" });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setError(detail?.detail ? String(detail.detail) : `Batch send failed (${res.status})`);
+        return;
+      }
+      await res.json();
+      await waitForBulkSendNoSending(runId);
       await loadLive();
     } catch {
       setError("Batch send failed — check network / backend.");
@@ -1224,7 +1432,11 @@ export default function TrackingView({
   }
 
   function beginPacketAssetEdit(p) {
-    const inner = Array.isArray(p?.packet_json?.assets) ? p.packet_json.assets : [];
+    const inner = Array.isArray(p?.assets)
+      ? p.assets
+      : Array.isArray(p?.packet_json?.assets)
+        ? p.packet_json.assets
+        : [];
     setPacketEditState({
       packetId: p.id,
       titleDraft: p.title ?? "",
@@ -2179,14 +2391,23 @@ export default function TrackingView({
                             size="sm"
                             variant="outline"
                             className="shrink-0"
-                            onClick={() =>
-                              setReplyEditing({
-                                id: rd.id,
-                                subject: rd.subject ?? "",
-                                body: rd.body ?? "",
-                                attached_asset_ids: normalizeAttachedAssetIds(rd.attached_asset_ids),
-                              })
-                            }
+                            onClick={() => {
+                              void (async () => {
+                                try {
+                                  const r = await fetch(`${API_BASE}/reply-drafts/${rd.id}`);
+                                  if (!r.ok) return;
+                                  const full = await r.json();
+                                  setReplyEditing({
+                                    id: full.id,
+                                    subject: full.subject ?? "",
+                                    body: full.body ?? "",
+                                    attached_asset_ids: normalizeAttachedAssetIds(full.attached_asset_ids),
+                                  });
+                                } catch {
+                                  /* keep collapsed */
+                                }
+                              })();
+                            }}
                           >
                             <Pencil className="mr-1 h-3 w-3" />
                             Edit
@@ -2314,7 +2535,7 @@ export default function TrackingView({
                                 ) : (
                                   <>
                                     Packet #{pv.attached_packet_id} is attached, but{" "}
-                                    <code className="text-[11px]">packet_json.assets</code> is empty — add assets to the
+                                    the packet <code className="text-[11px]">assets</code> list is empty — add assets to the
                                     library and rebuild the packet.
                                   </>
                                 )}
@@ -2699,7 +2920,11 @@ export default function TrackingView({
               })()}
               {assetPackets.map((p) => {
                 const c = p.contact_id != null ? contactById.get(p.contact_id) : null;
-                const inner = Array.isArray(p.packet_json?.assets) ? p.packet_json.assets : [];
+                const inner = Array.isArray(p.assets)
+                  ? p.assets
+                  : Array.isArray(p.packet_json?.assets)
+                    ? p.packet_json.assets
+                    : [];
                 const packetThreadIdNum =
                   p.thread_id != null && String(p.thread_id).trim() !== ""
                     ? Number(p.thread_id)
@@ -2995,7 +3220,9 @@ export default function TrackingView({
             <CardHeader>
               <CardTitle>Dead mailboxes</CardTitle>
               <CardDescription>
-                Contacts marked with dead-mailbox email health. Create replacement task from Re-search queue.
+                Rows are contacts with dead-mailbox health. Run performance shows how many dead-mailbox events were
+                recorded (can exceed unique contacts if there were multiple sends). Bounced recipients are under Contacts →
+                Bounced. Use Re-search queue for replacements.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
@@ -3385,9 +3612,10 @@ export default function TrackingView({
               );
             })()}
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-              {runMessages
-                .filter((m) => m.thread_id === threadModalId)
-                .map((m) => (
+              {(threadModalMessagesFull ?? runMessages.filter((m) => m.thread_id === threadModalId)).map(
+                (m) => {
+                  const rawBody = m.body ?? m.body_preview ?? "";
+                  return (
                   <div
                     key={m.id}
                     className={`max-w-[95%] rounded-2xl border-2 p-3 text-sm ${
@@ -3404,22 +3632,26 @@ export default function TrackingView({
                     <div className="mt-1 text-xs text-muted-foreground">
                       {m.from_email || "—"} → {m.to_email || "—"}
                     </div>
-                    {threadMessageBodyLooksLikeHtml(m.body) ? (
+                    {threadMessageBodyLooksLikeHtml(rawBody) ? (
                       <div
                         className="email-thread-body mt-2 max-h-[28rem] overflow-y-auto break-words text-sm leading-relaxed [&_a]:break-all [&_a]:underline [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-muted-foreground/40 [&_blockquote]:pl-3 [&_p]:my-1.5 [&_p]:first:mt-0 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
                         dangerouslySetInnerHTML={{
-                          __html: DOMPurify.sanitize(m.body, {
+                          __html: DOMPurify.sanitize(rawBody, {
                             FORBID_TAGS: ["img"],
                             ADD_ATTR: ["target", "rel", "style"],
                           }),
                         }}
                       />
                     ) : (
-                      <p className="mt-2 whitespace-pre-wrap leading-relaxed">{m.body}</p>
+                      <p className="mt-2 whitespace-pre-wrap leading-relaxed">{rawBody}</p>
                     )}
                   </div>
-                ))}
-              {!runMessages.some((m) => m.thread_id === threadModalId) ? (
+                );
+                },
+              )}
+              {!(
+                threadModalMessagesFull ?? runMessages.filter((m) => m.thread_id === threadModalId)
+              ).length ? (
                 <div className="text-sm text-muted-foreground">No messages in this thread.</div>
               ) : null}
             </div>

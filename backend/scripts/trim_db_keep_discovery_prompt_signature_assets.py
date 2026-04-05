@@ -4,11 +4,10 @@ Remove most run-related data; keep companies, contacts (review/health reset), Pr
 Signature, assets, and asset packets.
 
 Keeps:
-  - Step rows collect_companies + find_contacts (and their output_json — «найденные компании»
-    in collect output, find output still reflects found people before reconcile with DB).
+  - Step rows collect_companies + find_contacts (companies live in run_companies; find output_json has contacts).
   - contacts (same rows; review + delivery fields reset)
-  - runs — trimmed: only context_json[\"prompt_setup_text\"] kept, sender_signature_html kept;
-    master email / master_prompt cleared; status set to needs_review if the run has contacts
+  - runs — trimmed: prompt/signature preserved in ``run_setups`` (legacy context_json key + runs.sender_signature_html
+    merged in); master email / master_prompt cleared; status set to needs_review if the run has contacts
   - assets, asset_packets (packet FKs to threads/contacts/reply_drafts nulled first)
 
 Deletes:
@@ -56,12 +55,13 @@ try:
     from app.models.reply_draft import ReplyDraft
     from app.models.research_task import ResearchTask
     from app.models.run import Run
+    from app.models.run_setup import RunSetup
     from app.models.step import Step
 except ModuleNotFoundError as e:
     print(f"{e}\nUse a venv and pip install -r requirements.txt", file=sys.stderr)
     raise SystemExit(1) from e
 
-# Must match app.services.run_context_service._PROMPT_SETUP_JSON_KEY
+# Legacy context_json key (merged into run_setups during trim).
 PROMPT_SETUP_TEXT_KEY = "prompt_setup_text"
 
 KEEP_STEP_NAMES = frozenset({"collect_companies", "find_contacts"})
@@ -103,11 +103,16 @@ def trim_db() -> None:
 
         for run in db.query(Run).all():
             cj = run.context_json if isinstance(run.context_json, dict) else {}
-            raw_prompt = cj.get(PROMPT_SETUP_TEXT_KEY)
-            if isinstance(raw_prompt, str) and raw_prompt.strip():
-                run.context_json = {PROMPT_SETUP_TEXT_KEY: raw_prompt}
-            else:
-                run.context_json = {}
+            legacy_prompt = cj.get(PROMPT_SETUP_TEXT_KEY)
+            rs = db.query(RunSetup).filter(RunSetup.run_id == run.id).first()
+            prompt = (rs.prompt_setup_text.strip() if rs and rs.prompt_setup_text else None) or (
+                legacy_prompt.strip() if isinstance(legacy_prompt, str) and legacy_prompt.strip() else None
+            )
+            sig_raw = (rs.sender_signature_html if rs else None) or run.sender_signature_html
+            sig = (sig_raw or "").strip() or None
+
+            run.context_json = {}
+            run.sender_signature_html = None
 
             run.master_prompt = None
             run.master_email = None
@@ -117,6 +122,15 @@ def trim_db() -> None:
 
             n_contacts = db.query(Contact).filter(Contact.run_id == run.id).count()
             run.status = "needs_review" if n_contacts else "pending"
+
+            if prompt or sig:
+                if rs is None:
+                    rs = RunSetup(run_id=run.id)
+                    db.add(rs)
+                rs.prompt_setup_text = prompt
+                rs.sender_signature_html = sig
+            elif rs is not None:
+                db.delete(rs)
 
             db.add(run)
 

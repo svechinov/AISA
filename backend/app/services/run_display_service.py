@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import func
+from sqlalchemy import func, select, union_all
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
@@ -18,11 +18,12 @@ from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
 from app.repositories.step_repo import get_step_by_run_and_name, list_steps_by_run
 from app.repositories.email_thread_repo import (
+    bulk_resolve_thread_outbound_draft_ids,
     list_email_threads_by_run,
-    resolve_thread_outbound_draft_id,
 )
 from app.repositories.run_repo import get_run
 from app.services.run_companies_status_service import _norm, _strip_url
+from app.services.run_context_service import get_prompt_setup_text, get_sender_signature_html
 from app.services.run_summary_service import get_run_summary
 from app.setup_milestones import (
     SETUP_MILESTONE_COMPANIES,
@@ -32,15 +33,6 @@ from app.setup_milestones import (
 
 # Still approved/edited in DB, but not counted as “ready contacts” in setup summary.
 _UNDELIVERABLE_EMAIL_HEALTH = frozenset({"bounced", "dead_mailbox"})
-
-_PROMPT_SETUP_KEY = "prompt_setup_text"
-
-
-def prompt_setup_saved_from_context(context_json: dict | None) -> bool:
-    if not context_json:
-        return False
-    raw = context_json.get(_PROMPT_SETUP_KEY)
-    return isinstance(raw, str) and len(raw.strip()) > 0
 
 
 def signature_html_has_meaningful_content(html: str | None) -> bool:
@@ -54,6 +46,59 @@ def signature_html_has_meaningful_content(html: str | None) -> bool:
     text = re.sub(r"&nbsp;|&#160;", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).replace("\u00a0", " ").strip()
     return len(text) > 0
+
+
+_DEFAULT_OUTREACH_BRIEF = (
+    "Offer:\nTarget:\nRoles:\nGoal:\nTone: Professional\nNotes:\n"
+)
+
+
+def _context_from_run_for_prompt_ui(run) -> dict | None:
+    """Mirror AiBizOsHumanUI `contextFromRun` for Prompt setup editor default."""
+    cj = run.context_json
+    if not isinstance(cj, dict):
+        return None
+    inner = cj.get("context")
+    use = inner if isinstance(inner, dict) else cj
+    ij = run.input_json if isinstance(run.input_json, dict) else {}
+    goal = (
+        str(use.get("goal") or use.get("outreach_goal") or "").strip()
+        or str(ij.get("goal") or "").strip()
+    )
+    return {
+        "offer": str(use.get("offer") or use.get("product") or "").strip(),
+        "target_entities": str(use.get("target_entities") or "").strip(),
+        "target_roles": str(use.get("target_roles") or "").strip(),
+        "goal": goal,
+        "tone": str(use.get("tone") or "Professional").strip() or "Professional",
+        "notes": str(use.get("notes") or use.get("extra_context") or "").strip(),
+    }
+
+
+def _context_to_outreach_brief_text(ctx: dict | None) -> str:
+    """Mirror AiBizOsHumanUI `contextToOutreachBriefText`."""
+    if not ctx:
+        return _DEFAULT_OUTREACH_BRIEF
+    return (
+        f"Offer: {ctx['offer']}\n"
+        f"Target: {ctx['target_entities']}\n"
+        f"Roles: {ctx['target_roles']}\n"
+        f"Goal: {ctx['goal']}\n"
+        f"Tone: {ctx['tone']}\n"
+        f"Notes: {ctx['notes']}\n"
+        "\n"
+    )
+
+
+def get_prompt_setup_editor_initial_text_for_ui(run) -> str:
+    """Same string the Human UI Prompt setup dialog would show (saved textarea or derived brief)."""
+    saved = get_prompt_setup_text(run)
+    if saved.strip():
+        return saved
+    ctx = _context_from_run_for_prompt_ui(run)
+    if ctx is None:
+        return _DEFAULT_OUTREACH_BRIEF
+    return _context_to_outreach_brief_text(ctx)
 
 
 def count_emails_sent_in_last_hours(db: Session, run_id: int, *, hours: int = 24) -> int:
@@ -108,60 +153,87 @@ def hourly_send_counts_24h_utc(db: Session, run_id: int) -> list[int]:
             return
         buckets[idx] += 1
 
-    for st in (
-        db.query(EmailDraft.sent_at)
-        .filter(
+    stmt = union_all(
+        select(EmailDraft.sent_at).where(
             EmailDraft.run_id == run_id,
             EmailDraft.status == "sent",
             EmailDraft.sent_at.isnot(None),
             EmailDraft.sent_at >= start,
             EmailDraft.sent_at <= now,
-        )
-        .all()
-    ):
-        bump(st[0])
-
-    for st in (
-        db.query(ReplyDraft.sent_at)
-        .filter(
+        ),
+        select(ReplyDraft.sent_at).where(
             ReplyDraft.run_id == run_id,
             ReplyDraft.status == "sent",
             ReplyDraft.sent_at.isnot(None),
             ReplyDraft.sent_at >= start,
             ReplyDraft.sent_at <= now,
-        )
-        .all()
-    ):
-        bump(st[0])
+        ),
+    )
+    for (st,) in db.execute(stmt):
+        bump(st)
 
     return buckets
 
 
-def _count_contacts_approved_reachable(db: Session, run_id: int) -> int:
-    """Approved or edited contacts that are not bounced / dead mailbox."""
-    contacts = list_contacts_by_run(db, run_id)
-    return sum(
-        1
-        for c in contacts
-        if c.review_status in {"approved", "edited"}
-        and (c.email_health or "unknown") not in _UNDELIVERABLE_EMAIL_HEALTH
+def _setup_contact_metrics_from_deduped_list(contacts: list[Contact]) -> tuple[int, int, int, int]:
+    """From list_contacts_by_run output: approved_reachable, valid/invalid+email count, distinct companies, no_email."""
+    approved_reachable = 0
+    valid_invalid_with_email = 0
+    distinct_keys: set[str] = set()
+    no_email = 0
+    for c in contacts:
+        email = (c.email or "").strip()
+        if not email:
+            no_email += 1
+        else:
+            if c.status in ("valid", "invalid"):
+                valid_invalid_with_email += 1
+                if k := _canonical_company_key_from_orm_contact(c):
+                    distinct_keys.add(k)
+        if (
+            c.review_status in {"approved", "edited"}
+            and (c.email_health or "unknown") not in _UNDELIVERABLE_EMAIL_HEALTH
+        ):
+            approved_reachable += 1
+    return approved_reachable, valid_invalid_with_email, len(distinct_keys), no_email
+
+
+def _validate_step_email_and_distinct_company_counts(st) -> tuple[int | None, int | None]:
+    """Single pass over validate_contacts step JSON: (rows with email, distinct companies) or (None, None)."""
+    if not st or not isinstance(st.output_json, dict):
+        return None, None
+    v = st.output_json.get("valid_contacts")
+    i = st.output_json.get("invalid_contacts")
+    if not isinstance(v, list) or not isinstance(i, list):
+        return None, None
+    email_count = sum(1 for x in v if _contact_row_has_email(x)) + sum(
+        1 for x in i if _contact_row_has_email(x)
     )
+    keys: set[str] = set()
+    for row in (*v, *i):
+        if not isinstance(row, dict) or not _contact_row_has_email(row):
+            continue
+        if k := _canonical_company_key_from_contact_row(row):
+            keys.add(k)
+    return email_count, len(keys)
 
 
 def _live_company_count(db: Session, run_id: int) -> int:
-    st = get_step_by_run_and_name(db, run_id, "collect_companies")
-    if not st:
-        return 0
-    companies = (st.output_json or {}).get("companies")
-    return len(companies) if isinstance(companies, list) else 0
+    """Count collected company rows (run_companies)."""
+    from app.repositories.run_company_repo import count_run_companies
+
+    return count_run_companies(db, run_id)
 
 
 def _live_contact_count(db: Session, run_id: int) -> int:
-    st = get_step_by_run_and_name(db, run_id, "find_contacts")
-    if not st:
-        return 0
-    contacts = (st.output_json or {}).get("contacts")
-    return len(contacts) if isinstance(contacts, list) else 0
+    """Contacts for the run — from ``contacts`` table (not find_contacts step JSON)."""
+    n = (
+        db.query(func.count())
+        .select_from(Contact)
+        .filter(Contact.run_id == run_id)
+        .scalar()
+    )
+    return int(n or 0)
 
 
 def _canonical_company_key_from_contact_row(c: dict) -> str | None:
@@ -195,73 +267,14 @@ def _contact_row_has_email(row: dict) -> bool:
     return isinstance(row, dict) and bool(str(row.get("email") or "").strip())
 
 
-def _live_validated_step_count_with_email(db: Session, run_id: int) -> int | None:
-    """validate_contacts JSON lists — only rows with a non-empty email (no-email ≠ validated for summary)."""
-    st = get_step_by_run_and_name(db, run_id, "validate_contacts")
-    if not st or not isinstance(st.output_json, dict):
-        return None
-    v = st.output_json.get("valid_contacts")
-    i = st.output_json.get("invalid_contacts")
-    if not isinstance(v, list) or not isinstance(i, list):
-        return None
-    return (
-        sum(1 for x in v if _contact_row_has_email(x))
-        + sum(1 for x in i if _contact_row_has_email(x))
-    )
-
-
-def _count_db_contacts_valid_or_invalid_with_email(db: Session, run_id: int) -> int:
-    contacts = list_contacts_by_run(db, run_id)
-    return sum(
-        1
-        for c in contacts
-        if c.status in ("valid", "invalid") and (c.email or "").strip()
-    )
-
-
-def _count_db_contacts_no_email(db: Session, run_id: int) -> int:
-    contacts = list_contacts_by_run(db, run_id)
-    return sum(1 for c in contacts if not (c.email or "").strip())
-
-
-def _live_distinct_companies_validated_with_email_step(db: Session, run_id: int) -> int | None:
-    """Distinct companies among valid+invalid rows in validate output that have an email."""
-    st = get_step_by_run_and_name(db, run_id, "validate_contacts")
-    if not st or not isinstance(st.output_json, dict):
-        return None
-    v = st.output_json.get("valid_contacts")
-    i = st.output_json.get("invalid_contacts")
-    if not isinstance(v, list) or not isinstance(i, list):
-        return None
-    keys: set[str] = set()
-    for row in (*v, *i):
-        if not isinstance(row, dict) or not _contact_row_has_email(row):
-            continue
-        if k := _canonical_company_key_from_contact_row(row):
-            keys.add(k)
-    return len(keys)
-
-
-def _count_db_distinct_companies_validated_with_email(db: Session, run_id: int) -> int:
-    contacts = list_contacts_by_run(db, run_id)
-    keys: set[str] = set()
-    for c in contacts:
-        if c.status not in ("valid", "invalid") or not (c.email or "").strip():
-            continue
-        if k := _canonical_company_key_from_orm_contact(c):
-            keys.add(k)
-    return len(keys)
-
-
 def _thread_is_bounced_or_dead_mailbox_row(
-    db: Session,
     thread: EmailThread,
     contacts: dict[int, Contact],
     drafts: dict[int, EmailDraft],
+    eff: int | None,
 ) -> bool:
     """Matches Human UI Threads tab: bounced / dead mailbox from draft + contact.email_health."""
     contact = contacts.get(thread.contact_id)
-    eff = resolve_thread_outbound_draft_id(db, thread)
     linked = drafts.get(int(eff)) if eff is not None else None
 
     if linked is not None:
@@ -285,12 +298,16 @@ def _thread_is_bounced_or_dead_mailbox_row(
 def _active_threads_count_for_performance(db: Session, run_id: int) -> int:
     """Threads not in Bounced / Dead mailbox buckets (same as TrackingView threadBucketCounts.active)."""
     threads = list_email_threads_by_run(db, run_id)
+    if not threads:
+        return 0
     contacts = {c.id: c for c in list_contacts_by_run(db, run_id)}
-    drafts = {d.id: d for d in list_email_drafts_by_run(db, run_id)}
+    drafts_list = list_email_drafts_by_run(db, run_id)
+    drafts = {d.id: d for d in drafts_list}
+    eff_by_tid = bulk_resolve_thread_outbound_draft_ids(db, run_id, threads, contacts, drafts_list)
     return sum(
         1
         for t in threads
-        if not _thread_is_bounced_or_dead_mailbox_row(db, t, contacts, drafts)
+        if not _thread_is_bounced_or_dead_mailbox_row(t, contacts, drafts, eff_by_tid.get(t.id))
     )
 
 
@@ -307,24 +324,26 @@ def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int
 
 def get_run_setup_summary(db: Session, run_id: int) -> dict:
     """Live counts from step output_json (works while status is running) plus DB fallbacks."""
-    summary = get_run_summary(db, run_id)
+    contacts = list_contacts_by_run(db, run_id)
     n_co = _live_company_count(db, run_id)
     n_fi = _live_contact_count(db, run_id)
-    contacts_found = max(n_fi, summary["contacts_found"])
-    step_validated_with_email = _live_validated_step_count_with_email(db, run_id)
-    db_validated_with_email = _count_db_contacts_valid_or_invalid_with_email(db, run_id)
+    contacts_found = max(n_fi, len(contacts))
+    st_validate = get_step_by_run_and_name(db, run_id, "validate_contacts")
+    step_validated_with_email, step_distinct_companies = _validate_step_email_and_distinct_company_counts(
+        st_validate
+    )
+    appr, db_validated_with_email, db_distinct_companies, contacts_with_no_email = (
+        _setup_contact_metrics_from_deduped_list(contacts)
+    )
     contacts_validated = max(step_validated_with_email or 0, db_validated_with_email)
-    step_v_dc = _live_distinct_companies_validated_with_email_step(db, run_id)
-    db_v_dc = _count_db_distinct_companies_validated_with_email(db, run_id)
-    contacts_validated_distinct_companies = max(step_v_dc or 0, db_v_dc)
-    contacts_with_no_email = _count_db_contacts_no_email(db, run_id)
+    contacts_validated_distinct_companies = max(step_distinct_companies or 0, db_distinct_companies)
     return {
         "companies_collected": n_co,
         "contacts_found": contacts_found,
         "contacts_validated": contacts_validated,
         "contacts_validated_distinct_companies": contacts_validated_distinct_companies,
         "contacts_with_no_email": contacts_with_no_email,
-        "contacts_approved": _count_contacts_approved_reachable(db, run_id),
+        "contacts_approved": appr,
     }
 
 
@@ -376,7 +395,13 @@ def get_run_display_phase_lite(db: Session, run) -> str:
     return "Preparing"
 
 
-def get_run_performance_lite(db: Session, run_id: int) -> dict:
+def get_run_performance_lite(
+    db: Session,
+    run_id: int,
+    *,
+    active_threads: int | None = None,
+    replies_received: int | None = None,
+) -> dict:
     """Same keys as get_run_performance_rows; COUNT-based (no get_run_summary)."""
     drafts_sent = int(
         db.query(func.count())
@@ -385,13 +410,15 @@ def get_run_performance_lite(db: Session, run_id: int) -> dict:
         .scalar()
         or 0
     )
-    events_replied = int(
-        db.query(func.count())
-        .select_from(EmailEvent)
-        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "replied")
-        .scalar()
-        or 0
-    )
+    if replies_received is None:
+        replies_received = int(
+            db.query(func.count())
+            .select_from(EmailEvent)
+            .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "replied")
+            .scalar()
+            or 0
+        )
+    events_replied = replies_received
     threads_interested = int(
         db.query(func.count())
         .select_from(EmailThread)
@@ -420,7 +447,8 @@ def get_run_performance_lite(db: Session, run_id: int) -> dict:
         .scalar()
         or 0
     )
-    active_threads = _active_threads_count_for_performance(db, run_id)
+    if active_threads is None:
+        active_threads = _active_threads_count_for_performance(db, run_id)
     return {
         "emails_sent": drafts_sent,
         "emails_sent_24h": count_emails_sent_in_last_hours(db, run_id, hours=24),
@@ -433,16 +461,24 @@ def get_run_performance_lite(db: Session, run_id: int) -> dict:
     }
 
 
-def get_conversations_lite(db: Session, run_id: int) -> dict:
+def get_conversations_lite(
+    db: Session,
+    run_id: int,
+    *,
+    active_threads: int | None = None,
+    replies_received: int | None = None,
+) -> dict:
     """Same keys as get_conversations_snapshot; avoids get_run_summary."""
-    active_threads = _active_threads_count_for_performance(db, run_id)
-    replies_received = int(
-        db.query(func.count())
-        .select_from(EmailEvent)
-        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "replied")
-        .scalar()
-        or 0
-    )
+    if active_threads is None:
+        active_threads = _active_threads_count_for_performance(db, run_id)
+    if replies_received is None:
+        replies_received = int(
+            db.query(func.count())
+            .select_from(EmailEvent)
+            .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "replied")
+            .scalar()
+            or 0
+        )
     reply_drafts = int(
         db.query(func.count()).select_from(ReplyDraft).filter(ReplyDraft.run_id == run_id).scalar() or 0
     )
@@ -461,12 +497,24 @@ def get_conversations_lite(db: Session, run_id: int) -> dict:
 def build_run_workspace_lite(db: Session, run) -> dict:
     phase = get_run_display_phase_lite(db, run)
     rid = run.id
+    active_threads = _active_threads_count_for_performance(db, rid)
+    replies_received = int(
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == rid, EmailEvent.event_type == "replied")
+        .scalar()
+        or 0
+    )
     return {
         "display_phase": phase,
         "setup_state_message": setup_state_message_from_phase(phase),
         "setup_summary": get_run_setup_summary(db, rid),
-        "performance": get_run_performance_lite(db, rid),
-        "conversations": get_conversations_lite(db, rid),
+        "performance": get_run_performance_lite(
+            db, rid, active_threads=active_threads, replies_received=replies_received
+        ),
+        "conversations": get_conversations_lite(
+            db, rid, active_threads=active_threads, replies_received=replies_received
+        ),
         "hourly_sends_24h": hourly_send_counts_24h_utc(db, rid),
     }
 
@@ -650,8 +698,8 @@ def enrich_run_for_card(db: Session, run) -> dict:
         "active_threads": active_threads,
         "updated_at": updated_at,
         "created_at": run.created_at,
-        "prompt_setup_saved": prompt_setup_saved_from_context(run.context_json),
-        "sender_signature_configured": signature_html_has_meaningful_content(run.sender_signature_html),
+        "prompt_setup_saved": bool(get_prompt_setup_text(run).strip()),
+        "sender_signature_configured": signature_html_has_meaningful_content(get_sender_signature_html(run)),
     }
 
 

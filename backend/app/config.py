@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # Background Gmail sync: poll threads + bounces (seconds). 0 = disabled (use POST /gmail-sync/*).
     GMAIL_SYNC_INTERVAL_SECONDS: int = 120
 
+    # collect_companies: drop LLM rows whose website does not respond (GET + stream prefix, concurrent).
+    COLLECT_COMPANIES_HTTP_CHECK_ENABLED: bool = True
+    COLLECT_COMPANIES_HTTP_TIMEOUT_SEC: float = 8.0
+    COLLECT_COMPANIES_HTTP_MAX_WORKERS: int = 8
+
     model_config = SettingsConfigDict(**_model_cfg)
 
 

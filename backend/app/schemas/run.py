@@ -8,13 +8,16 @@ class RunCompanyRow(BaseModel):
     collect_index: int
     name: str
     website: str
-    contact_status: Literal["found", "none", "pending", "no_email"]
+    contact_status: Literal["found", "none", "pending", "no_email", "llm_error"]
 
 
 class RunCompaniesRead(BaseModel):
     companies: list[RunCompanyRow]
     collect_step_status: str | None = None
     find_step_status: str | None = None
+    companies_total: int = 0
+    limit: int | None = None
+    offset: int = 0
 
 
 class RetryCompanyFindBody(BaseModel):
@@ -62,10 +65,26 @@ class RunRead(BaseModel):
     master_email_subject: str | None = None
     master_email_body: str | None = None
     sender_signature_html: str | None = None
+    #: Canonical prompt textarea (run_setups); empty when unset.
+    prompt_setup_text: str | None = None
     email_style_mode: str | None = None
 
     class Config:
         from_attributes = True
+
+
+def run_read_from_orm(run: Any) -> RunRead:
+    """Serialize Run with prompt/signature from run_setups (legacy columns may be cleared)."""
+    from app.services.run_context_service import get_prompt_setup_text, get_sender_signature_html
+
+    rd = RunRead.model_validate(run)
+    pt = get_prompt_setup_text(run)
+    return rd.model_copy(
+        update={
+            "sender_signature_html": get_sender_signature_html(run),
+            "prompt_setup_text": pt if pt else None,
+        },
+    )
 
 
 class RunSignaturePatch(BaseModel):
@@ -73,7 +92,7 @@ class RunSignaturePatch(BaseModel):
 
 
 class RunPromptSetupPatch(BaseModel):
-    """Labeled brief textarea (Offer/Target/Roles/…); stored under context_json.prompt_setup_text."""
+    """Labeled brief textarea; stored in run_setups.prompt_setup_text."""
     prompt_setup_text: str = ""
 
 
@@ -88,6 +107,15 @@ class RunSignaturePatchResult(BaseModel):
     """Minimal PATCH response — avoids serializing full Run row."""
 
     id: int
+    sender_signature_configured: bool
+
+
+class RunReviewSetupFieldsRead(BaseModel):
+    """Tiny GET for Prompt setup + Signature dialogs — no full Run / context_json blob."""
+
+    prompt_setup_editor_text: str
+    sender_signature_html: str = ""
+    prompt_setup_saved: bool
     sender_signature_configured: bool
 
 
@@ -110,6 +138,12 @@ class RunOutreachPatch(BaseModel):
     notes: str | None = None
     segment: str = ""
     outreach_brief: str = ""
+
+
+class RunProjectPatch(BaseModel):
+    """Move run to another project (sidebar list is keyed by project_id)."""
+
+    project_id: int = Field(..., ge=1)
 
 
 class TotalPerformanceRead(BaseModel):
@@ -137,7 +171,7 @@ class RunCardRead(BaseModel):
     active_threads: int
     updated_at: datetime | None = None
     created_at: datetime
-    #: Human UI: prompt setup textarea saved under context_json (no heavy payload on list).
+    #: Human UI: prompt setup text stored in run_setups (no heavy payload on list).
     prompt_setup_saved: bool = False
     #: Human UI: signature HTML has visible text (same idea as dashboard check).
     sender_signature_configured: bool = False

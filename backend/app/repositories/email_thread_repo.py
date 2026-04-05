@@ -1,11 +1,13 @@
 from datetime import datetime
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
 from app.models.email_message import EmailMessage
 from app.models.email_thread import EmailThread
+from app.repositories.email_draft_repo import list_email_drafts_by_run
 
 
 def _normalize_subject_for_thread_draft_match(s: str | None) -> str:
@@ -96,8 +98,38 @@ def list_email_threads_by_run(db: Session, run_id: int) -> list[EmailThread]:
     )
 
 
-def resolve_thread_outbound_draft_id(db: Session, thread: EmailThread) -> int | None:
-    """When email_threads.draft_id is null (e.g. thread created by Gmail import), infer the outreach draft.
+def list_email_threads_by_run_paginated(
+    db: Session,
+    run_id: int,
+    *,
+    limit: int,
+    offset: int,
+    q: str | None,
+) -> tuple[list[EmailThread], int]:
+    """Same sort as list_email_threads_by_run (id desc). Optional search on subject and provider_thread_id."""
+    qy = db.query(EmailThread).filter(EmailThread.run_id == run_id)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        qy = qy.filter(
+            or_(
+                EmailThread.subject.ilike(like),
+                EmailThread.provider_thread_id.ilike(like),
+            )
+        )
+    total = int(qy.count() or 0)
+    rows = (
+        qy.order_by(EmailThread.id.desc()).offset(max(0, offset)).limit(max(1, limit)).all()
+    )
+    return rows, total
+
+
+def _resolve_thread_outbound_draft_id_in_memory(
+    thread: EmailThread,
+    msgs: list[EmailMessage],
+    contacts_by_id: dict[int, Contact],
+    drafts_list: list[EmailDraft],
+) -> int | None:
+    """Shared logic for resolve_thread_outbound_draft_id / bulk (no DB queries).
 
     Order: outbound message ``draft_id`` → Gmail ``thread_id`` (same contact, else same run) →
     ``provider_message_id`` (same contact, else same run) → outbound ``To:`` vs sent drafts →
@@ -106,102 +138,63 @@ def resolve_thread_outbound_draft_id(db: Session, thread: EmailThread) -> int | 
     if thread.draft_id:
         return thread.draft_id
 
-    msg_with_draft = (
-        db.query(EmailMessage)
-        .filter(
-            EmailMessage.thread_id == thread.id,
-            EmailMessage.direction == "outbound",
-            EmailMessage.draft_id.isnot(None),
-        )
-        .order_by(EmailMessage.id.asc())
-        .first()
+    msgs_out = sorted(
+        [m for m in msgs if m.direction == "outbound"],
+        key=lambda m: m.id,
     )
-    if msg_with_draft and msg_with_draft.draft_id:
-        return int(msg_with_draft.draft_id)
+    for m in msgs_out:
+        if m.draft_id:
+            return int(m.draft_id)
 
     g_tid = (thread.provider_thread_id or "").strip()
     if g_tid:
-        d = (
-            db.query(EmailDraft)
-            .filter(
-                EmailDraft.run_id == thread.run_id,
-                EmailDraft.contact_id == thread.contact_id,
-                EmailDraft.thread_id == g_tid,
-            )
-            .order_by(EmailDraft.id.desc())
-            .first()
-        )
-        if d:
-            return int(d.id)
-        d = (
-            db.query(EmailDraft)
-            .filter(
-                EmailDraft.run_id == thread.run_id,
-                EmailDraft.thread_id == g_tid,
-            )
-            .order_by(EmailDraft.id.desc())
-            .first()
-        )
-        if d:
-            return int(d.id)
+        cand = [
+            d
+            for d in drafts_list
+            if d.run_id == thread.run_id
+            and d.contact_id == thread.contact_id
+            and (d.thread_id or "") == g_tid
+        ]
+        if cand:
+            return int(max(cand, key=lambda d: d.id).id)
+        cand = [
+            d
+            for d in drafts_list
+            if d.run_id == thread.run_id and (d.thread_id or "") == g_tid
+        ]
+        if cand:
+            return int(max(cand, key=lambda d: d.id).id)
 
-    mids = [
-        row[0]
-        for row in db.query(EmailMessage.provider_message_id)
-        .filter(
-            EmailMessage.thread_id == thread.id,
-            EmailMessage.direction == "outbound",
-            EmailMessage.provider_message_id.isnot(None),
-        )
-        .all()
-        if row[0]
-    ]
+    mids = [m.provider_message_id for m in msgs_out if m.provider_message_id]
     if mids:
-        d = (
-            db.query(EmailDraft)
-            .filter(
-                EmailDraft.run_id == thread.run_id,
-                EmailDraft.contact_id == thread.contact_id,
-                EmailDraft.provider_message_id.in_(mids),
-            )
-            .order_by(EmailDraft.id.desc())
-            .first()
-        )
-        if d:
-            return int(d.id)
-        d = (
-            db.query(EmailDraft)
-            .filter(
-                EmailDraft.run_id == thread.run_id,
-                EmailDraft.provider_message_id.in_(mids),
-            )
-            .order_by(EmailDraft.id.desc())
-            .first()
-        )
-        if d:
-            return int(d.id)
+        cand = [
+            d
+            for d in drafts_list
+            if d.run_id == thread.run_id
+            and d.contact_id == thread.contact_id
+            and d.provider_message_id in mids
+        ]
+        if cand:
+            return int(max(cand, key=lambda d: d.id).id)
+        cand = [
+            d
+            for d in drafts_list
+            if d.run_id == thread.run_id and d.provider_message_id in mids
+        ]
+        if cand:
+            return int(max(cand, key=lambda d: d.id).id)
 
-    out_to_row = (
-        db.query(EmailMessage.to_email)
-        .filter(
-            EmailMessage.thread_id == thread.id,
-            EmailMessage.direction == "outbound",
-            EmailMessage.to_email.isnot(None),
-        )
-        .order_by(EmailMessage.id.asc())
-        .first()
-    )
-    if out_to_row and out_to_row[0]:
-        to_n = _norm_email_addr(out_to_row[0])
+    out_to_first: str | None = None
+    for m in msgs_out:
+        if m.to_email:
+            out_to_first = m.to_email
+            break
+    if out_to_first:
+        to_n = _norm_email_addr(out_to_first)
         if to_n:
-            sent = (
-                db.query(EmailDraft)
-                .filter(
-                    EmailDraft.run_id == thread.run_id,
-                    EmailDraft.status == "sent",
-                )
-                .order_by(EmailDraft.id.desc())
-                .all()
+            sent = sorted(
+                [d for d in drafts_list if d.run_id == thread.run_id and d.status == "sent"],
+                key=lambda d: -d.id,
             )
             matches = [x for x in sent if _norm_email_addr(x.to_email) == to_n]
             if len(matches) == 1:
@@ -212,17 +205,12 @@ def resolve_thread_outbound_draft_id(db: Session, thread: EmailThread) -> int | 
                     return int(pref[0].id)
                 return int(matches[0].id)
 
-    c_row = db.query(Contact).filter(Contact.id == thread.contact_id).first()
+    c_row = contacts_by_id.get(thread.contact_id)
     if c_row and (c_row.company or "").strip():
         co_norm = " ".join((c_row.company or "").strip().lower().split())
-        sent_co = (
-            db.query(EmailDraft)
-            .filter(
-                EmailDraft.run_id == thread.run_id,
-                EmailDraft.status == "sent",
-            )
-            .order_by(EmailDraft.id.desc())
-            .all()
+        sent_co = sorted(
+            [d for d in drafts_list if d.run_id == thread.run_id and d.status == "sent"],
+            key=lambda d: -d.id,
         )
         co_matches = [
             x
@@ -239,12 +227,7 @@ def resolve_thread_outbound_draft_id(db: Session, thread: EmailThread) -> int | 
 
     want_sub = _normalize_subject_for_thread_draft_match(thread.subject)
     if want_sub:
-        candidates = (
-            db.query(EmailDraft)
-            .filter(EmailDraft.run_id == thread.run_id)
-            .order_by(EmailDraft.id.desc())
-            .all()
-        )
+        candidates = [d for d in drafts_list if d.run_id == thread.run_id]
         candidates.sort(
             key=lambda d: (
                 0 if d.contact_id == thread.contact_id else 1,
@@ -257,6 +240,45 @@ def resolve_thread_outbound_draft_id(db: Session, thread: EmailThread) -> int | 
                 return int(d.id)
 
     return None
+
+
+def resolve_thread_outbound_draft_id(db: Session, thread: EmailThread) -> int | None:
+    """When email_threads.draft_id is null (e.g. thread created by Gmail import), infer the outreach draft."""
+    if thread.draft_id:
+        return thread.draft_id
+    drafts_list = list_email_drafts_by_run(db, thread.run_id)
+    msgs = db.query(EmailMessage).filter(EmailMessage.thread_id == thread.id).all()
+    c_row = db.query(Contact).filter(Contact.id == thread.contact_id).first()
+    contacts_by_id = {c_row.id: c_row} if c_row else {}
+    return _resolve_thread_outbound_draft_id_in_memory(thread, msgs, contacts_by_id, drafts_list)
+
+
+def bulk_resolve_thread_outbound_draft_ids(
+    db: Session,
+    run_id: int,
+    threads: list[EmailThread],
+    contacts_by_id: dict[int, Contact],
+    drafts_list: list[EmailDraft],
+) -> dict[int, int | None]:
+    """Same as ``resolve_thread_outbound_draft_id`` per thread, one bulk load of messages + in-memory resolve."""
+    if not threads:
+        return {}
+    thread_ids = [t.id for t in threads]
+    all_msgs = (
+        db.query(EmailMessage)
+        .filter(EmailMessage.thread_id.in_(thread_ids), EmailMessage.run_id == run_id)
+        .all()
+    )
+    by_thread: dict[int, list[EmailMessage]] = {}
+    for m in all_msgs:
+        by_thread.setdefault(m.thread_id, []).append(m)
+    out: dict[int, int | None] = {}
+    for t in threads:
+        msgs = by_thread.get(t.id, [])
+        out[t.id] = _resolve_thread_outbound_draft_id_in_memory(
+            t, msgs, contacts_by_id, drafts_list
+        )
+    return out
 
 
 def update_email_thread_status(db: Session, thread: EmailThread, status: str) -> EmailThread:

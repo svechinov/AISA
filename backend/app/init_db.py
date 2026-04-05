@@ -3,7 +3,6 @@ from sqlalchemy import inspect, text
 from app.db import Base, SessionLocal, engine
 from app.models.project import Project
 from app.models.run import Run
-from app.models.step import Step
 from app.models.rule import Rule
 from app.models.contact import Contact
 from app.models.template import Template
@@ -18,7 +17,14 @@ from app.models.follow_up_task import FollowUpTask  # noqa: F401 — register fo
 from app.models.reminder import Reminder  # noqa: F401 — register reminders
 from app.models.asset import Asset  # noqa: F401 — register assets
 from app.models.asset_packet import AssetPacket  # noqa: F401 — register asset_packets
+from app.models.asset_packet_asset import AssetPacketAsset  # noqa: F401 — register asset_packet_assets
+from app.models.email_draft import EmailDraft  # noqa: F401
+from app.models.email_draft_asset import EmailDraftAsset  # noqa: F401
+from app.models.reply_draft import ReplyDraft  # noqa: F401
+from app.models.reply_draft_asset import ReplyDraftAsset  # noqa: F401
 from app.models.email_attachment import EmailAttachment  # noqa: F401 — register email_attachments
+from app.models.run_setup import RunSetup  # noqa: F401 — register run_setups
+from app.models.run_company import RunCompany  # noqa: F401 — register run_companies
 
 
 def _ensure_contacts_gmail_history_columns() -> None:
@@ -380,6 +386,156 @@ def _ensure_run_scoped_performance_indexes() -> None:
             conn.execute(text(f"CREATE INDEX IF NOT EXISTS {ix_name} ON {table} {columns}"))
 
 
+def _migrate_run_setups_from_legacy() -> None:
+    """Merge prompt/signature into run_setups only; strip context_json.prompt_setup_text and runs.sender_signature_html."""
+    import logging
+
+    from app.models.run import Run
+    from app.models.run_setup import RunSetup
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        insp = inspect(engine)
+        if "run_setups" not in insp.get_table_names():
+            return
+        runs = db.query(Run).order_by(Run.id.asc()).all()
+        touched = 0
+        for run in runs:
+            ctx = dict(run.context_json or {})
+            prompt_from_json = None
+            if "prompt_setup_text" in ctx:
+                raw = ctx.pop("prompt_setup_text")
+                if isinstance(raw, str) and raw.strip():
+                    prompt_from_json = raw.strip()
+            sig_from_col = None
+            if run.sender_signature_html is not None:
+                s = (run.sender_signature_html or "").strip()
+                run.sender_signature_html = None
+                if s:
+                    sig_from_col = s
+            run.context_json = ctx
+            db.add(run)
+            if not prompt_from_json and not sig_from_col:
+                continue
+            row = db.query(RunSetup).filter(RunSetup.run_id == run.id).first()
+            if row is None:
+                db.add(
+                    RunSetup(
+                        run_id=run.id,
+                        prompt_setup_text=prompt_from_json,
+                        sender_signature_html=sig_from_col,
+                    ),
+                )
+                touched += 1
+            else:
+                if prompt_from_json and not (row.prompt_setup_text or "").strip():
+                    row.prompt_setup_text = prompt_from_json
+                    touched += 1
+                if sig_from_col and not (row.sender_signature_html or "").strip():
+                    row.sender_signature_html = sig_from_col
+                    touched += 1
+        db.commit()
+        if touched:
+            log.info("run_setups: merged legacy prompt/signature touches=%s", touched)
+    except Exception:
+        log.exception("run_setups legacy migration failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _backfill_draft_attached_assets_from_json() -> None:
+    """Move email_drafts.attached_asset_ids / reply_drafts.attached_asset_ids into junction tables."""
+    import logging
+
+    from app.repositories.draft_attachment_repo import (
+        replace_email_draft_assets,
+        replace_reply_draft_assets,
+    )
+    from app.utils.attached_asset_ids import normalize_attached_asset_ids
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        for d in db.query(EmailDraft).order_by(EmailDraft.id.asc()).all():
+            raw = normalize_attached_asset_ids(d.attached_asset_ids)
+            if not raw:
+                continue
+            replace_email_draft_assets(db, d.id, raw)
+            d.attached_asset_ids = []
+        for r in db.query(ReplyDraft).order_by(ReplyDraft.id.asc()).all():
+            raw = normalize_attached_asset_ids(r.attached_asset_ids)
+            if not raw:
+                continue
+            replace_reply_draft_assets(db, r.id, raw)
+            r.attached_asset_ids = []
+        db.commit()
+    except Exception:
+        log.exception("draft_attached_assets backfill failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _strip_assets_key_from_asset_packet_json() -> None:
+    """Remove legacy assets blob from packet_json after asset_packet_assets backfill."""
+    import logging
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.models.asset_packet import AssetPacket
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = 0
+        for p in db.query(AssetPacket).all():
+            pj = dict(p.packet_json or {})
+            if "assets" not in pj:
+                continue
+            pj.pop("assets", None)
+            p.packet_json = pj
+            flag_modified(p, "packet_json")
+            n += 1
+        if n:
+            db.commit()
+            log.info("asset_packets: stripped assets key from packet_json on %s row(s)", n)
+    except Exception:
+        log.exception("strip packet_json.assets failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _backfill_asset_packet_assets_from_json() -> None:
+    """Move packet membership from packet_json.assets only into asset_packet_assets (idempotent)."""
+    import logging
+
+    from app.models.asset_packet import AssetPacket
+    from app.repositories.asset_packet_asset_repo import (
+        count_rows_for_packet,
+        replace_asset_packet_asset_rows,
+    )
+
+    log = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        for p in db.query(AssetPacket).order_by(AssetPacket.id.asc()).all():
+            if count_rows_for_packet(db, p.id) > 0:
+                continue
+            assets = (p.packet_json or {}).get("assets") or []
+            if not isinstance(assets, list) or not assets:
+                continue
+            replace_asset_packet_asset_rows(db, p.id, assets)
+        db.commit()
+    except Exception:
+        log.exception("asset_packet_assets backfill failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _backfill_personalization_json() -> None:
     """Existing rows after ADD COLUMN get default {}; fill rule-based personalization on startup."""
     import logging
@@ -400,6 +556,7 @@ def ensure_schema() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_runs_metadata_columns()
     _ensure_run_outreach_context_columns()
+    _migrate_run_setups_from_legacy()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
     _ensure_contacts_email_health_columns()
@@ -412,6 +569,9 @@ def ensure_schema() -> None:
     _ensure_drafts_attached_asset_ids_columns()
     _ensure_asset_packets_reply_draft_id_unique()
     _ensure_personalization_and_generation_meta_columns()
+    _backfill_asset_packet_assets_from_json()
+    _strip_assets_key_from_asset_packet_json()
+    _backfill_draft_attached_assets_from_json()
     _backfill_personalization_json()
     _ensure_run_scoped_performance_indexes()
 

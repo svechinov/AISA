@@ -28,3 +28,10 @@ class EmailThreadRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PaginatedEmailThreadsResponse(BaseModel):
+    items: list[EmailThreadRead]
+    total: int
+    limit: int
+    offset: int

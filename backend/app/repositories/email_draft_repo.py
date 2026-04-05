@@ -1,9 +1,11 @@
 from datetime import datetime
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.email_draft import EmailDraft
 from app.repositories.contact_repo import get_contact
+from app.repositories.draft_attachment_repo import replace_email_draft_assets
 from app.utils.attached_asset_ids import normalize_attached_asset_ids
 
 
@@ -55,6 +57,33 @@ def list_email_drafts_by_run(db: Session, run_id: int) -> list[EmailDraft]:
         .order_by(EmailDraft.id.asc())
         .all()
     )
+
+
+def list_email_drafts_by_run_paginated(
+    db: Session,
+    run_id: int,
+    *,
+    limit: int,
+    offset: int,
+    q: str | None,
+) -> tuple[list[EmailDraft], int]:
+    """Same sort as list_email_drafts_by_run (id asc). Optional case-insensitive search on company/to/subject/body."""
+    qy = db.query(EmailDraft).filter(EmailDraft.run_id == run_id)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        qy = qy.filter(
+            or_(
+                EmailDraft.company.ilike(like),
+                EmailDraft.to_email.ilike(like),
+                EmailDraft.subject.ilike(like),
+                EmailDraft.body.ilike(like),
+            )
+        )
+    total = int(qy.count() or 0)
+    rows = (
+        qy.order_by(EmailDraft.id.asc()).offset(max(0, offset)).limit(max(1, limit)).all()
+    )
+    return rows, total
 
 
 def list_outbound_draft_bodies_for_run_excluding_contact(
@@ -207,7 +236,32 @@ def bulk_set_attached_assets_for_pending_drafts(
         .all()
     )
     for d in drafts:
-        d.attached_asset_ids = list(normalized)
+        replace_email_draft_assets(db, d.id, list(normalized))
+        d.attached_asset_ids = []
+        db.add(d)
+    if drafts:
+        db.commit()
+    return len(drafts)
+
+
+def bulk_set_attached_assets_for_approved_drafts(
+    db: Session,
+    run_id: int,
+    attached_asset_ids: list[int],
+) -> int:
+    """Same as pending bulk, but for drafts in the Approved tab (approved or edited). Returns count updated."""
+    normalized = normalize_attached_asset_ids(attached_asset_ids)
+    drafts = (
+        db.query(EmailDraft)
+        .filter(
+            EmailDraft.run_id == run_id,
+            EmailDraft.review_status.in_(["approved", "edited"]),
+        )
+        .all()
+    )
+    for d in drafts:
+        replace_email_draft_assets(db, d.id, list(normalized))
+        d.attached_asset_ids = []
         db.add(d)
     if drafts:
         db.commit()
@@ -229,7 +283,9 @@ def update_email_draft_fields(
     if review_notes is not None:
         draft.review_notes = review_notes
     if attached_asset_ids is not None:
-        draft.attached_asset_ids = normalize_attached_asset_ids(attached_asset_ids)
+        norm = normalize_attached_asset_ids(attached_asset_ids)
+        replace_email_draft_assets(db, draft.id, norm)
+        draft.attached_asset_ids = []
 
     draft.review_status = "edited"
     draft.reviewed_at = datetime.utcnow()

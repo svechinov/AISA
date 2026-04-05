@@ -1,4 +1,5 @@
 import logging
+import random
 
 from sqlalchemy.orm import Session
 
@@ -183,8 +184,16 @@ def _compose_outreach_email_payload_for_contact(
     run,
     contact: Contact,
     variants: list[dict[str, str]] | None = None,
+    *,
+    variant_selection: str = "deterministic",
+    regenerate_draft: EmailDraft | None = None,
 ) -> dict | None:
-    """Build subject/body for one contact if sendable. No 'draft already exists' check."""
+    """Build subject/body for one contact if sendable. No 'draft already exists' check.
+
+    variant_selection:
+      - "deterministic": same master variant per (run, contact) as initial generation.
+      - "random": pick a random master variant (used on Regenerate so copy is not identical).
+    """
     if contact.status != "valid":
         return None
     if contact.review_status not in {"approved", "edited"}:
@@ -201,6 +210,8 @@ def _compose_outreach_email_payload_for_contact(
                 contact,
                 prompt_setup_text=prompt_saved,
                 master_variant=None,
+                regenerate_from_subject=regenerate_draft.subject if regenerate_draft else None,
+                regenerate_from_body=regenerate_draft.body if regenerate_draft else None,
             )
             return _outreach_email_payload_dict(contact, subject, body, meta)
         except Exception as exc:
@@ -218,12 +229,17 @@ def _compose_outreach_email_payload_for_contact(
             db.refresh(run)
         variants = _variants_from_run(run)
 
-    variant, variant_idx = select_variant_for_contact(run.id, contact.id, variants)
+    if variant_selection == "random":
+        variant = random.choice(variants)
+        variant_idx = variants.index(variant)
+    else:
+        variant, variant_idx = select_variant_for_contact(run.id, contact.id, variants)
     logger.info(
-        "EMAIL VARIANT run_id=%s contact_id=%s variant_idx=%s",
+        "EMAIL VARIANT run_id=%s contact_id=%s variant_idx=%s selection=%s",
         run.id,
         contact.id,
         variant_idx,
+        variant_selection,
     )
     try:
         subject, body, meta = compose_outreach_subject_body(
@@ -367,7 +383,14 @@ def regenerate_outbound_email_draft(db: Session, draft_id: int) -> EmailDraft:
             db.refresh(run)
         variants = _variants_from_run(run)
 
-    payload = _compose_outreach_email_payload_for_contact(db, run, contact, variants)
+    payload = _compose_outreach_email_payload_for_contact(
+        db,
+        run,
+        contact,
+        variants,
+        variant_selection="random",
+        regenerate_draft=draft,
+    )
     if not payload:
         raise RuntimeError("Could not regenerate draft — approve the contact and ensure a valid email.")
 

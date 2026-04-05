@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset_packet import AssetPacket
 from app.models.reply_draft import ReplyDraft
+from app.repositories.asset_packet_asset_repo import replace_asset_packet_asset_rows
 
 
 def create_asset_packet(
@@ -16,6 +17,8 @@ def create_asset_packet(
     status: str = "draft",
     packet_json: dict | None = None,
 ) -> AssetPacket:
+    pj = dict(packet_json or {})
+    pj.pop("assets", None)
     packet = AssetPacket(
         run_id=run_id,
         packet_type=packet_type,
@@ -25,7 +28,7 @@ def create_asset_packet(
         contact_id=contact_id,
         reply_draft_id=reply_draft_id,
         status=status,
-        packet_json=packet_json or {},
+        packet_json=pj,
     )
     db.add(packet)
     db.commit()
@@ -87,7 +90,11 @@ def update_asset_packet(
     if status is not None:
         packet.status = status
     if packet_json is not None:
-        packet.packet_json = packet_json
+        pj = dict(packet_json)
+        assets = pj.pop("assets", None)
+        packet.packet_json = pj
+        if isinstance(assets, list):
+            replace_asset_packet_asset_rows(db, packet.id, assets)
     if reply_draft_id is not ...:
         packet.reply_draft_id = reply_draft_id  # type: ignore[assignment]
 

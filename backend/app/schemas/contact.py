@@ -48,6 +48,30 @@ class ContactRunBucketResponse(BaseModel):
 
     review_counts: ContactReviewCountsRead
     contacts: list[ContactRead]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaginatedContactsRunResponse(BaseModel):
+    """Deduped contacts for a run (same order as list_contacts_by_run), paginated slice."""
+
+    items: list[ContactRead]
+    total: int
+    limit: int
+    offset: int
+
+
+def contact_matches_list_search(contact: Contact, q: str | None) -> bool:
+    """Case-insensitive substring match on company, name, role, email, linkedin."""
+    if not q or not str(q).strip():
+        return True
+    needle = str(q).strip().lower()
+    for attr in ("company", "name", "role", "email", "linkedin"):
+        v = getattr(contact, attr, None) or ""
+        if needle in str(v).lower():
+            return True
+    return False
 
 
 # Keys the dashboard needs from source_json for list views (avoid multi‑MB scraper blobs in GET /contacts/run).

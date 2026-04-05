@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.asset import Asset
 from app.models.asset_packet import AssetPacket
 from app.repositories.asset_repo import get_asset
+from app.services.asset_packet_service import get_ordered_asset_refs_for_packet
 from app.services.cdn_upload_service import r2_get_object_bytes, r2_upload_ready
 
 # Conservative default; real provider can override via env later.
@@ -248,7 +249,7 @@ def resolve_sendable_attachments(
     link_only: list[dict] = []
     skipped: list[dict] = []
 
-    for ref in packet.packet_json.get("assets") or []:
+    for ref in get_ordered_asset_refs_for_packet(db, packet):
         if not isinstance(ref, dict):
             continue
         aid = ref.get("asset_id")

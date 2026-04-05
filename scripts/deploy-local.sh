@@ -23,14 +23,38 @@ echo "==> Backend: docker compose build (backend)"
 echo "==> Backend: up -d postgres redis backend"
 "${COMPOSE[@]}" up -d postgres redis backend
 
-echo "==> Backend: wait for /health (up to ~60s)"
+echo "==> Backend: wait for /health (process listening, up to ~60s)"
 for i in $(seq 1 60); do
   if curl -sf "http://127.0.0.1:8000/health" >/dev/null; then
     echo "    health OK"
     break
   fi
+  if (( i % 10 == 0 )); then
+    echo "    ... still waiting (${i}s) — check: ${COMPOSE[*]} ps  and  ${COMPOSE[*]} logs backend"
+  fi
   if [[ "$i" -eq 60 ]]; then
-    echo "error: backend did not become healthy on :8000 — try: ${COMPOSE[*]} logs backend" >&2
+    echo "error: /health did not respond on :8000 — try: ${COMPOSE[*]} logs backend" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "==> Backend: wait for /ready (DB schema + API route imports; up to ~300s)"
+echo "    (503 from /ready until then is normal — cold import can take 30–90s on first start)"
+echo "    polling every 1s; status below every 5s if still not ready"
+for i in $(seq 1 300); do
+  if curl -sf "http://127.0.0.1:8000/ready" >/dev/null; then
+    echo "    API ready (schema + routes)"
+    break
+  fi
+  if (( i % 5 == 0 )); then
+    body="$(curl -sS --max-time 2 "http://127.0.0.1:8000/ready" 2>/dev/null || true)"
+    reason="$(printf '%s' "$body" | sed -n 's/.*"reason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [[ -n "$reason" ]] || reason="(no JSON — check port / backend)"
+    echo "    ... still waiting (${i}s) — /ready says: ${reason} — ${COMPOSE[*]} logs backend"
+  fi
+  if [[ "$i" -eq 300 ]]; then
+    echo "error: /ready never returned 200 — check ensure_schema and route registration — try: ${COMPOSE[*]} logs backend" >&2
     exit 1
   fi
   sleep 1

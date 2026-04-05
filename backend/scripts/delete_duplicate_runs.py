@@ -44,10 +44,11 @@ except ModuleNotFoundError as e:
 load_env_from_file()
 
 try:
-    from sqlalchemy.orm import Session
+    from sqlalchemy.orm import Session, selectinload
 
     from app.db import SessionLocal
     from app.models.run import Run
+    from app.services.run_context_service import get_sender_signature_html
     from app.services.run_deletion_service import delete_run_cascade
 except ModuleNotFoundError as e:
     print(e, file=sys.stderr)
@@ -64,7 +65,7 @@ def _fingerprint(run: Run) -> tuple:
     me = json.dumps(run.master_email or {}, sort_keys=True, default=str)
     me_sub = (run.master_email_subject or "").strip()
     me_body = (run.master_email_body or "").strip()
-    sig = (run.sender_signature_html or "").strip()
+    sig = (get_sender_signature_html(run) or "").strip()
     return (
         run.project_id,
         run.workflow_name,
@@ -109,6 +110,7 @@ def main() -> None:
     try:
         runs = (
             db.query(Run)
+            .options(selectinload(Run.run_setup))
             .filter(Run.project_id == args.project_id)
             .order_by(Run.id.asc())
             .all()
