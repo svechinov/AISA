@@ -68,5 +68,5 @@ class Run(Base):
         cascade="all, delete-orphan",
         order_by=RunCompany.collect_index.asc(),
     )
-    # Optional voice for outbound generation: direct | warm | sharp | executive (used in later stages).
-    email_style_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Professional profile slug (see email_style_service.VALID_PROFESSIONAL_PROFILES); drives outbound voice.
+    email_style_mode: Mapped[str | None] = mapped_column(String(48), nullable=True)

@@ -105,6 +105,15 @@ def effective_generation_meta_json(draft: Any) -> dict | None:
     return None
 
 
+def effective_generation_meta_json_for_list(draft: Any) -> dict | None:
+    """GET /email-drafts/run list rows: omit ``prompt_setup_text_used`` (duplicates top-level field)."""
+    meta = effective_generation_meta_json(draft)
+    if not isinstance(meta, dict) or not meta:
+        return None
+    slim = {k: v for k, v in meta.items() if k != "prompt_setup_text_used"}
+    return slim if slim else None
+
+
 def effective_prompt_setup_text_used(draft: Any) -> str | None:
     col = getattr(draft, "prompt_setup_text_used", None)
     if isinstance(col, str) and col.strip():

@@ -8,6 +8,7 @@ from app.utils.attached_asset_ids import normalize_attached_asset_ids
 from app.utils.draft_attached_assets import effective_attached_asset_ids_for_email_draft
 from app.utils.email_draft_generation_meta import (
     effective_generation_meta_json,
+    effective_generation_meta_json_for_list,
     effective_prompt_setup_text_used,
 )
 from app.utils.email_preview import email_body_preview_text
@@ -60,16 +61,12 @@ class EmailDraftListRead(BaseModel):
     review_status: str
     review_notes: str | None
     tracking_status: str
-    provider_message_id: str | None
-    thread_id: str | None
     error_message: str | None
-    last_event_at: datetime | None
-    sent_at: datetime | None
-    reviewed_at: datetime | None
-    created_at: datetime
     attached_asset_ids: list[int] = Field(default_factory=list)
     #: Snapshot of Prompt setup text used when this draft was generated (from generation_meta_json).
     prompt_setup_text_used: str | None = None
+    #: Trimmed vs GET /email-drafts/:id — no duplicate ``prompt_setup_text_used`` (see top-level field).
+    generation_meta_json: dict | None = None
 
     @field_validator("attached_asset_ids", mode="before")
     @classmethod
@@ -112,15 +109,10 @@ def email_draft_to_list_read(
         review_status=d.review_status,
         review_notes=d.review_notes,
         tracking_status=d.tracking_status,
-        provider_message_id=d.provider_message_id,
-        thread_id=d.thread_id,
         error_message=d.error_message,
-        last_event_at=d.last_event_at,
-        sent_at=d.sent_at,
-        reviewed_at=d.reviewed_at,
-        created_at=d.created_at,
         attached_asset_ids=effective_attached_asset_ids_for_email_draft(db, d),
         prompt_setup_text_used=_prompt_setup_used_from_draft_row(d),
+        generation_meta_json=effective_generation_meta_json_for_list(d),
     )
 
 

@@ -15,14 +15,13 @@ from app.models.reply_draft import ReplyDraft
 from app.models.email_thread import EmailThread
 from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
-from app.repositories.step_repo import get_step_by_run_and_name, list_steps_by_run
+from app.repositories.step_repo import get_step_by_run_and_name
 from app.repositories.email_thread_repo import (
     bulk_resolve_thread_outbound_draft_ids,
     list_email_threads_by_run,
 )
 from app.repositories.run_repo import get_run
 from app.services.run_context_service import get_prompt_setup_text, get_sender_signature_html
-from app.services.run_summary_service import get_run_summary
 from app.setup_milestones import (
     SETUP_MILESTONE_COMPANIES,
     SETUP_MILESTONE_CONTACTS,
@@ -43,7 +42,11 @@ def signature_html_has_meaningful_content(html: str | None) -> bool:
 
 
 _DEFAULT_OUTREACH_BRIEF = (
-    "Offer:\nTarget:\nRoles:\nGoal:\nTone: Professional\nNotes:\n"
+    "Respondent's field of activity:\n\n"
+    "Narrowly focused areas of activity:\n\n"
+    "Reason for search (licensing, sales, partnership):\n\n"
+    "How long has the respondent company been in the market:\n\n"
+    "Additional information:\n\n"
 )
 
 
@@ -58,18 +61,12 @@ def _context_from_run_for_prompt_ui(run) -> dict | None:
 
 
 def _context_to_outreach_brief_text(ctx: dict | None) -> str:
-    """Mirror AiBizOsHumanUI `contextToOutreachBriefText`."""
+    """Mirror AiBizOsHumanUI `contextToOutreachBriefText` (search brief form)."""
+    from app.services.run_context_service import format_search_brief_from_inner
+
     if not ctx:
         return _DEFAULT_OUTREACH_BRIEF
-    return (
-        f"Offer: {ctx['offer']}\n"
-        f"Target: {ctx['target_entities']}\n"
-        f"Roles: {ctx['target_roles']}\n"
-        f"Goal: {ctx['goal']}\n"
-        f"Tone: {ctx['tone']}\n"
-        f"Notes: {ctx['notes']}\n"
-        "\n"
-    )
+    return format_search_brief_from_inner(ctx)
 
 
 def get_prompt_setup_editor_initial_text_for_ui(run) -> str:
@@ -332,14 +329,7 @@ def get_run_setup_summary(db: Session, run_id: int) -> dict:
 
 def get_run_display_phase(db: Session, run) -> str:
     """Preparing | Ready | Active | Closed (exact UI labels)."""
-    if run.closed_at is not None:
-        return "Closed"
-    summary = get_run_summary(db, run.id)
-    if summary["drafts_sent"] > 0 or summary["events_sent"] > 0:
-        return "Active"
-    if run.status == "drafts_ready":
-        return "Ready"
-    return "Preparing"
+    return get_run_display_phase_lite(db, run)
 
 
 def setup_state_message_from_phase(phase: str) -> str:
@@ -503,18 +493,7 @@ def build_run_workspace_lite(db: Session, run) -> dict:
 
 
 def get_conversations_snapshot(db: Session, run_id: int) -> dict:
-    summary = get_run_summary(db, run_id)
-    active_threads = _active_threads_count_for_performance(db, run_id)
-    reminders = list_reminders_by_run(db, run_id)
-    now = datetime.utcnow()
-    reminders_due, reminders_active = _reminder_due_and_active_counts(reminders, now)
-    return {
-        "active_threads": active_threads,
-        "replies_received": summary["events_replied"],
-        "reply_drafts": summary["reply_drafts_generated"],
-        "reminders_active": reminders_active,
-        "reminders_due": reminders_due,
-    }
+    return get_conversations_lite(db, run_id)
 
 
 def get_total_performance_global(db: Session) -> dict:
@@ -581,19 +560,17 @@ def get_total_performance_global(db: Session) -> dict:
 
 
 def get_run_performance_rows(db: Session, run_id: int) -> dict:
-    """Counters for Run performance card; omit keys with no data yet where appropriate."""
-    summary = get_run_summary(db, run_id)
-    active_threads = _active_threads_count_for_performance(db, run_id)
-
+    """Counters for Run performance card; COUNT-based (no full run summary)."""
+    p = get_run_performance_lite(db, run_id)
     return {
-        "emails_sent": summary["drafts_sent"],
-        "emails_sent_24h": count_emails_sent_in_last_hours(db, run_id, hours=24),
-        "replies": summary["events_replied"],
-        "active_threads": active_threads,
-        "interested": summary["threads_interested"],
-        "need_more_info": summary["threads_need_info"],
-        "dead_mailboxes": summary["events_dead_mailbox"],
-        "bounced": summary["events_bounced"],
+        "emails_sent": p["emails_sent"],
+        "emails_sent_24h": p["emails_sent_24h"],
+        "replies": p["replies"],
+        "active_threads": p["active_threads"],
+        "interested": p["interested"],
+        "need_more_info": p["need_more_info"],
+        "dead_mailboxes": p["dead_mailboxes"],
+        "bounced": p["bounced"],
     }
 
 
@@ -653,15 +630,10 @@ def get_setup_state_message(db: Session, run) -> str:
 
 
 def enrich_run_for_card(db: Session, run) -> dict:
-    summary = get_run_summary(db, run.id)
-    active_threads = _active_threads_count_for_performance(db, run.id)
-    companies = _live_company_count(db, run.id)
-    contacts_found = max(_live_contact_count(db, run.id), summary["contacts_found"])
-
-    updated_at = run.created_at
-    for s in list_steps_by_run(db, run.id):
-        if s.finished_at and (updated_at is None or s.finished_at > updated_at):
-            updated_at = s.finished_at
+    rid = run.id
+    perf = get_run_performance_lite(db, rid)
+    companies = _live_company_count(db, rid)
+    contacts_found = _live_contact_count(db, rid)
 
     name = run.name or f"Run #{run.id}"
     return {
@@ -670,16 +642,14 @@ def enrich_run_for_card(db: Session, run) -> dict:
         "name": name,
         "notes": run.notes,
         "segment": run.segment,
-        "workflow_name": run.workflow_name,
         "status": run.status,
-        "display_phase": get_run_display_phase(db, run),
+        "display_phase": get_run_display_phase_lite(db, run),
         "closed_at": run.closed_at,
         "companies_count": companies,
         "contacts_count": contacts_found,
-        "emails_sent": summary["drafts_sent"],
-        "replies": summary["events_replied"],
-        "active_threads": active_threads,
-        "updated_at": updated_at,
+        "emails_sent": perf["emails_sent"],
+        "replies": perf["replies"],
+        "active_threads": perf["active_threads"],
         "created_at": run.created_at,
         "prompt_setup_saved": bool(get_prompt_setup_text(run).strip()),
         "sender_signature_configured": signature_html_has_meaningful_content(get_sender_signature_html(run)),

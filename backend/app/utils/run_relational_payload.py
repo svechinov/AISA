@@ -57,6 +57,24 @@ def persist_run_context_extras_from_blob(db: Session, run_id: int, context_json:
     replace_kv_dict(db, SCOPE_RUN_CONTEXT_EXTRA, run_id, extras if extras else None)
 
 
+def merge_run_context_json_blob_into_kv(db: Session, run_id: int, context_json: dict | None) -> None:
+    """
+    Fold legacy ``runs.context_json`` into ``entity_json_kv`` (merge with existing extras).
+    Skips nested ``context`` (canonical copy lives in ``run_outreach_context``).
+    Used before clearing the blob so saves never drop ``_human_ui`` or other extras.
+    """
+    raw = dict(context_json or {})
+    if not raw:
+        return
+    existing = get_kv_dict(db, SCOPE_RUN_CONTEXT_EXTRA, run_id)
+    merged: dict[str, Any] = dict(existing)
+    for k, v in raw.items():
+        if k == "context":
+            continue
+        merged[k] = v
+    replace_kv_dict(db, SCOPE_RUN_CONTEXT_EXTRA, run_id, merged if merged else None)
+
+
 def persist_run_input_from_blob(db: Session, run: Run, input_json: dict | None) -> None:
     ij = dict(input_json or {})
     goal = ij.pop("goal", None)
@@ -86,20 +104,19 @@ def replace_master_email_variants(
 
 
 def effective_input_json_for_api(db: Session, run: Run) -> dict[str, Any]:
+    """Relational input only: ``input_goal`` + entity_json_kv — never merge legacy ``runs.input_json``."""
     d: dict[str, Any] = {}
     if run.input_goal:
         d["goal"] = run.input_goal
     d.update(get_kv_dict(db, SCOPE_RUN_INPUT, run.id))
-    legacy = dict(run.input_json or {})
-    if not d and legacy:
-        return legacy
-    for k, v in legacy.items():
-        d.setdefault(k, v)
     return d
 
 
 def effective_context_json_for_api(db: Session, run: Run) -> dict[str, Any]:
-    """Merged outer context_json for API (includes context.inner + extras kv; no _human_ui — added in schema)."""
+    """
+    API-shaped ``context`` dict from ``run_outreach_context`` + KV extras only.
+    Does not read legacy ``runs.context_json`` blobs.
+    """
     oc = getattr(run, "outreach_context", None)
     if oc is not None:
         inner = {
@@ -112,7 +129,15 @@ def effective_context_json_for_api(db: Session, run: Run) -> dict[str, Any]:
         }
         outer: dict[str, Any] = {"context": wrap_context(inner)["context"]}
     else:
-        outer = dict(run.context_json or {})
+        inner = {
+            "offer": "",
+            "target_entities": "",
+            "target_roles": "",
+            "goal": coalesce_str(getattr(run, "input_goal", None)),
+            "tone": "Professional",
+            "notes": "",
+        }
+        outer = {"context": wrap_context(inner)["context"]}
 
     extras = get_kv_dict(db, SCOPE_RUN_CONTEXT_EXTRA, run.id)
     if extras:
@@ -123,11 +148,9 @@ def effective_context_json_for_api(db: Session, run: Run) -> dict[str, Any]:
 
 
 def effective_master_email_for_api(db: Session, run: Run) -> dict[str, Any] | None:
+    """``run_master_email_variants`` only — never legacy ``runs.master_email`` JSON."""
     vs = list(getattr(run, "master_email_variants", None) or [])
     if vs:
         vs_sorted = sorted(vs, key=lambda x: x.position)
         return {"variants": [{"subject": x.subject, "body": x.body} for x in vs_sorted]}
-    me = getattr(run, "master_email", None)
-    if isinstance(me, dict) and me:
-        return me
     return None

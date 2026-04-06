@@ -146,19 +146,19 @@ def generate_master_email_draft(
 
     update_run_master_email_variants(db, run, variants)
     db.refresh(run)
-    logger.info("MASTER EMAIL run_id=%s: %s", run.id, run.master_email)
+    logger.info("MASTER EMAIL run_id=%s variants=%s", run.id, len(variants))
 
     return {"variants": variants, "variant_count": len(variants), "generated": True}
 
 
 def _variants_from_run(run) -> list[dict[str, str]]:
-    me = getattr(run, "master_email", None)
-    if not isinstance(me, dict):
+    vs = list(getattr(run, "master_email_variants", None) or [])
+    if not vs:
         raise ValueError(
-            "run.master_email is missing or invalid. "
-            "Complete generate_master_email_draft before generate_emails."
+            "No master email variants. Complete generate_master_email_draft before generate_emails."
         )
-    return normalize_variants_payload(me)
+    vs_sorted = sorted(vs, key=lambda x: x.position)
+    return [{"subject": (x.subject or "").strip(), "body": (x.body or "").strip()} for x in vs_sorted]
 
 
 def _outreach_email_payload_dict(
@@ -224,7 +224,7 @@ def _compose_outreach_email_payload_for_contact(
             )
 
     if variants is None:
-        if not run.master_email:
+        if not list(getattr(run, "master_email_variants", None) or []):
             generate_master_email_draft(db, run.id, run.workflow_name, {})
             db.refresh(run)
         variants = _variants_from_run(run)
@@ -291,7 +291,7 @@ def generate_emails(db: Session, run_id: int, workflow_name: str, step_input: di
     prompt_saved = get_prompt_setup_text(run)
     variants: list[dict[str, str]] | None = None
     if not prompt_saved:
-        if not run.master_email:
+        if not list(getattr(run, "master_email_variants", None) or []):
             generate_master_email_draft(db, run_id, workflow_name, {})
             db.refresh(run)
         variants = _variants_from_run(run)
@@ -378,7 +378,7 @@ def regenerate_outbound_email_draft(db: Session, draft_id: int) -> EmailDraft:
     prompt_saved = get_prompt_setup_text(run)
     variants: list[dict[str, str]] | None = None
     if not prompt_saved:
-        if not run.master_email:
+        if not list(getattr(run, "master_email_variants", None) or []):
             generate_master_email_draft(db, run.id, run.workflow_name, {})
             db.refresh(run)
         variants = _variants_from_run(run)

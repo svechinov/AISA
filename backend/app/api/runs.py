@@ -7,10 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.repositories.project_repo import get_project
+from app.repositories.run_human_ui_repo import get_event_chain_collapsed_map
 from app.repositories.run_repo import (
     close_run,
     create_run,
     get_run,
+    get_run_for_edit_form,
     list_runs_by_project,
     update_run_email_style_mode,
     update_run_human_ui_preferences,
@@ -21,9 +23,12 @@ from app.repositories.run_repo import (
 )
 from app.services.run_context_service import (
     build_master_prompt_text,
+    format_search_brief_from_inner,
+    get_inner_for_edit_form_relational_only,
     get_prompt_setup_text,
     get_sender_signature_html,
     merge_inner_from_legacy_fields,
+    outreach_brief_has_minimum_content,
     parse_outreach_brief_text,
     wrap_context,
 )
@@ -31,6 +36,7 @@ from app.schemas.run import (
     RetryCompanyFindBody,
     RetryCompanyFindResult,
     RunCardRead,
+    RunEditFormRead,
     RunProjectPatch,
     RunCompaniesRead,
     RunEmailStylePatch,
@@ -43,6 +49,7 @@ from app.schemas.run import (
     RunSignaturePatch,
     RunSignaturePatchResult,
     RunStart,
+    RunTrackingStripRead,
     RunWorkspaceLiteRead,
     RunWorkspaceRead,
     run_read_from_orm,
@@ -57,7 +64,6 @@ from app.services.retry_company_find_service import (
     retry_find_for_collected_company,
 )
 from app.services.run_companies_status_service import get_run_companies_with_status
-from app.services.personalization_service import resync_personalization_for_run
 from app.services.run_display_service import (
     build_run_workspace_lite,
     enrich_run_for_card,
@@ -117,6 +123,40 @@ def get_run_review_setup_fields_route(run_id: int, db: Session = Depends(get_db)
         prompt_setup_saved=bool(get_prompt_setup_text(run).strip()),
         sender_signature_configured=signature_html_has_meaningful_content(get_sender_signature_html(run)),
     )
+
+
+@router.get("/{run_id}/edit-form", response_model=RunEditFormRead)
+def get_run_edit_form_route(run_id: int, db: Session = Depends(get_db)):
+    """
+    New/Edit run dialog: scalar run columns + ``run_outreach_context`` only.
+    Does not read ``runs.context_json`` or ``input_json`` (see ``get_inner_for_edit_form_relational_only``).
+    """
+    run = get_run_for_edit_form(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    inner = get_inner_for_edit_form_relational_only(run)
+    return RunEditFormRead(
+        id=run.id,
+        name=run.name,
+        notes=run.notes,
+        segment=run.segment,
+        email_style_mode=run.email_style_mode,
+        outreach_brief=format_search_brief_from_inner(inner),
+    )
+
+
+@router.get("/{run_id}/tracking-strip", response_model=RunTrackingStripRead)
+def get_run_tracking_strip_route(run_id: int, db: Session = Depends(get_db)):
+    """Tracking tab only: signature HTML + ``_human_ui.event_chain_collapsed`` — no full ``RunRead``."""
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    sig = get_sender_signature_html(run) or ""
+    chain = get_event_chain_collapsed_map(db, run_id)
+    ctx: dict = {}
+    if chain:
+        ctx["_human_ui"] = {"event_chain_collapsed": {str(k): bool(v) for k, v in chain.items()}}
+    return RunTrackingStripRead(sender_signature_html=sig, context_json=ctx)
 
 
 @router.get("/{run_id}/workspace-lite", response_model=RunWorkspaceLiteRead)
@@ -193,8 +233,12 @@ def continue_company_find_route(run_id: int, db: Session = Depends(get_db)):
     return RetryCompanyFindResult(**data)
 
 
-@router.patch("/{run_id}/outreach", response_model=RunRead)
-def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session = Depends(get_db)):
+@router.patch("/{run_id}/outreach", response_model=RunEditFormRead)
+def patch_run_outreach_route(
+    run_id: int,
+    payload: RunOutreachPatch,
+    db: Session = Depends(get_db),
+):
     run = get_run(db, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -203,7 +247,7 @@ def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session
 
     seg = (payload.segment or "").strip()
     if not seg:
-        raise HTTPException(status_code=400, detail="Segment is required")
+        raise HTTPException(status_code=400, detail="Region / Country / State is required")
 
     parsed = parse_outreach_brief_text(payload.outreach_brief)
     inner = merge_inner_from_legacy_fields(
@@ -217,18 +261,17 @@ def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session
     )
     if not inner.get("notes") and payload.notes:
         inner["notes"] = payload.notes.strip()
-    if not (inner.get("goal") or inner.get("offer")):
+    if not outreach_brief_has_minimum_content(inner):
         legacy = ""
         if getattr(run, "input_goal", None):
             legacy = str(run.input_goal).strip()
-        elif isinstance(run.input_json, dict):
-            legacy = str(run.input_json.get("goal") or "").strip()
         if legacy:
             inner["goal"] = legacy
-    if not (inner.get("goal") or inner.get("offer")):
+    if not outreach_brief_has_minimum_content(inner):
         raise HTTPException(
             status_code=400,
-            detail="Outreach brief must include at least Offer or Goal (or input_json.goal).",
+            detail="Outreach brief must include searchable content (reason for search, field of activity, "
+            "or other labeled sections), or legacy Offer/Goal / input_goal.",
         )
 
     master = build_master_prompt_text(inner)
@@ -240,47 +283,54 @@ def patch_run_outreach_route(run_id: int, payload: RunOutreachPatch, db: Session
             segment=seg,
             inner=inner,
             master_prompt=master,
+            email_style_mode=payload.email_style_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not updated:
         raise HTTPException(status_code=404, detail="Run not found")
-    try:
-        n = resync_personalization_for_run(db, run_id)
-        if n:
-            _log.info("Resynced personalization_json for %s contact(s) after outreach PATCH", n)
-    except Exception:
-        _log.exception("resync_personalization_for_run failed after outreach PATCH")
-    return run_read_from_orm(updated)
+    inner_saved = get_inner_for_edit_form_relational_only(updated)
+    return RunEditFormRead(
+        id=updated.id,
+        name=updated.name,
+        notes=updated.notes,
+        segment=updated.segment,
+        email_style_mode=updated.email_style_mode,
+        outreach_brief=format_search_brief_from_inner(inner_saved),
+    )
 
 
-@router.patch("/{run_id}/email-style", response_model=RunRead)
+@router.patch("/{run_id}/email-style", response_model=RunEditFormRead)
 def patch_run_email_style_route(
     run_id: int,
     payload: RunEmailStylePatch,
     db: Session = Depends(get_db),
 ):
-    from app.services.email_style_service import VALID_EMAIL_STYLE_MODES
+    from app.services.email_style_service import VALID_PROFESSIONAL_PROFILES
 
     raw = payload.email_style_mode
-    if raw is not None and str(raw).strip() != "":
-        m = str(raw).strip().lower()
-        if m not in VALID_EMAIL_STYLE_MODES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"email_style_mode must be one of: {', '.join(sorted(VALID_EMAIL_STYLE_MODES))}",
-            )
     try:
         updated = update_run_email_style_mode(
             db,
             run_id,
-            None if raw is None or str(raw).strip() == "" else str(raw).strip().lower(),
+            None if raw is None or str(raw).strip() == "" else str(raw).strip(),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(
+            status_code=400,
+            detail=f"{str(e)} Allowed values: {', '.join(sorted(VALID_PROFESSIONAL_PROFILES))}",
+        ) from e
     if not updated:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run_read_from_orm(updated)
+    inner = get_inner_for_edit_form_relational_only(updated)
+    return RunEditFormRead(
+        id=updated.id,
+        name=updated.name,
+        notes=updated.notes,
+        segment=updated.segment,
+        email_style_mode=updated.email_style_mode,
+        outreach_brief=format_search_brief_from_inner(inner),
+    )
 
 
 @router.patch("/{run_id}/close", response_model=RunRead)
@@ -345,17 +395,18 @@ def start_run_route(payload: RunStart, db: Session = Depends(get_db)):
         tone=payload.tone,
         extra_context=payload.extra_context,
     )
-    if not (inner.get("goal") or inner.get("offer")):
+    if not outreach_brief_has_minimum_content(inner):
         legacy = (payload.input_json or {}).get("goal") if isinstance(payload.input_json, dict) else ""
         if legacy:
             inner["goal"] = str(legacy).strip()
     if not inner.get("notes") and payload.notes:
         inner["notes"] = payload.notes.strip()
 
-    if not (inner.get("goal") or inner.get("offer")):
+    if not outreach_brief_has_minimum_content(inner):
         raise HTTPException(
             status_code=400,
-            detail="Outreach brief must include at least Offer or Goal (or input_json.goal).",
+            detail="Outreach brief must include searchable content (reason for search, field of activity, "
+            "or other labeled sections), or legacy Offer/Goal / input_json.goal.",
         )
 
     master = build_master_prompt_text(inner)

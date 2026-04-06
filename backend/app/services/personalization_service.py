@@ -198,25 +198,36 @@ def resync_personalization_for_run(db: Session, run_id: int) -> int:
 
 
 def _ids_needing_personalization_backfill_sql():
-    """Dialect-specific: rows still at default empty object after ADD COLUMN."""
+    """Rows needing first-time backfill: empty legacy JSON and no relational row yet.
+
+    After ``sync_contact_personalization_row``, ``personalization_json`` is cleared to ``{}`` while
+    facts live in ``contact_personalization`` — the old predicate ``personalization_json = '{}'`` alone
+    would match forever and deadlock ``ensure_schema`` (infinite while-loop in backfill).
+    """
     dialect = engine.dialect.name
     if dialect == "postgresql":
         return text(
             """
-            SELECT id FROM contacts
-            WHERE personalization_json IS NULL
-               OR personalization_json = CAST('{}' AS jsonb)
-            ORDER BY id
+            SELECT c.id FROM contacts c
+            WHERE (c.personalization_json IS NULL
+               OR c.personalization_json = CAST('{}' AS jsonb))
+              AND NOT EXISTS (
+                SELECT 1 FROM contact_personalization cp WHERE cp.contact_id = c.id
+              )
+            ORDER BY c.id
             LIMIT :lim
             """
         )
     # SQLite (and generic): JSON stored as TEXT
     return text(
         """
-        SELECT id FROM contacts
-        WHERE personalization_json IS NULL
-           OR personalization_json = '{}'
-        ORDER BY id
+        SELECT c.id FROM contacts c
+        WHERE (c.personalization_json IS NULL
+           OR c.personalization_json = '{}')
+          AND NOT EXISTS (
+            SELECT 1 FROM contact_personalization cp WHERE cp.contact_id = c.id
+          )
+        ORDER BY c.id
         LIMIT :lim
         """
     )

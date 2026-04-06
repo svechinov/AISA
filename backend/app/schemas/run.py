@@ -47,6 +47,24 @@ class RunStart(BaseModel):
     extra_context: str = ""
 
 
+class RunEditFormRead(BaseModel):
+    """Minimal payload for the New/Edit run dialog — avoids full RunRead (large context_json, master_email, etc.)."""
+
+    id: int
+    name: str | None = None
+    notes: str | None = None
+    segment: str | None = None
+    email_style_mode: str | None = None
+    outreach_brief: str = ""
+
+
+class RunTrackingStripRead(BaseModel):
+    """Human UI Tracking tab only: signature HTML + minimal ``context_json._human_ui`` (no full run row)."""
+
+    sender_signature_html: str = ""
+    context_json: dict = Field(default_factory=dict)
+
+
 class RunRead(BaseModel):
     id: int
     project_id: int
@@ -74,7 +92,7 @@ class RunRead(BaseModel):
 
 
 def run_read_from_orm(run: Any) -> RunRead:
-    """Serialize Run with prompt/signature from run_setups (legacy columns may be cleared)."""
+    """Serialize Run from relational stores + small scalars — never pulls legacy JSON blobs via ORM validation."""
     from sqlalchemy.orm import object_session
 
     from app.repositories.run_human_ui_repo import get_event_chain_collapsed_map
@@ -85,7 +103,6 @@ def run_read_from_orm(run: Any) -> RunRead:
         effective_master_email_for_api,
     )
 
-    rd = RunRead.model_validate(run)
     pt = get_prompt_setup_text(run)
     sess = object_session(run)
     if sess is not None:
@@ -95,22 +112,47 @@ def run_read_from_orm(run: Any) -> RunRead:
             ui = dict(ctx.get("_human_ui") or {})
             ui["event_chain_collapsed"] = chain
             ctx["_human_ui"] = ui
-        return rd.model_copy(
-            update={
-                "sender_signature_html": get_sender_signature_html(run),
-                "prompt_setup_text": pt if pt else None,
-                "context_json": ctx,
-                "input_json": effective_input_json_for_api(sess, run),
-                "master_email": effective_master_email_for_api(sess, run),
-            },
+        return RunRead(
+            id=run.id,
+            project_id=run.project_id,
+            workflow_name=run.workflow_name,
+            status=run.status,
+            input_json=effective_input_json_for_api(sess, run),
+            created_at=run.created_at,
+            finished_at=run.finished_at,
+            name=run.name,
+            notes=run.notes,
+            segment=run.segment,
+            closed_at=run.closed_at,
+            context_json=ctx,
+            master_prompt=getattr(run, "master_prompt", None),
+            master_email=effective_master_email_for_api(sess, run),
+            master_email_subject=getattr(run, "master_email_subject", None),
+            master_email_body=getattr(run, "master_email_body", None),
+            sender_signature_html=get_sender_signature_html(run),
+            prompt_setup_text=pt if pt else None,
+            email_style_mode=run.email_style_mode,
         )
-    ctx = dict(rd.context_json or {})
-    return rd.model_copy(
-        update={
-            "sender_signature_html": get_sender_signature_html(run),
-            "prompt_setup_text": pt if pt else None,
-            "context_json": ctx,
-        },
+    return RunRead(
+        id=run.id,
+        project_id=run.project_id,
+        workflow_name=run.workflow_name,
+        status=run.status,
+        input_json={},
+        created_at=run.created_at,
+        finished_at=run.finished_at,
+        name=run.name,
+        notes=run.notes,
+        segment=run.segment,
+        closed_at=run.closed_at,
+        context_json={},
+        master_prompt=getattr(run, "master_prompt", None),
+        master_email=None,
+        master_email_subject=getattr(run, "master_email_subject", None),
+        master_email_body=getattr(run, "master_email_body", None),
+        sender_signature_html=get_sender_signature_html(run),
+        prompt_setup_text=pt if pt else None,
+        email_style_mode=run.email_style_mode,
     )
 
 
@@ -154,7 +196,7 @@ class RunHumanUiPatch(BaseModel):
 
 
 class RunEmailStylePatch(BaseModel):
-    """Default outbound email voice when role does not imply another style (see email_style_service)."""
+    """Target professional profile for this run (see email_style_service — Auto uses contact role heuristics)."""
 
     email_style_mode: str | None = None
 
@@ -165,6 +207,8 @@ class RunOutreachPatch(BaseModel):
     notes: str | None = None
     segment: str = ""
     outreach_brief: str = ""
+    #: Optional: set in same request as brief (Edit run — one PATCH instead of two).
+    email_style_mode: str | None = None
 
 
 class RunProjectPatch(BaseModel):
@@ -182,12 +226,14 @@ class TotalPerformanceRead(BaseModel):
 
 
 class RunCardRead(BaseModel):
+    """Sidebar + Runs tab + Switch run — trimmed vs full RunRead (no workflow_name, master payloads, updated_at)."""
+
     id: int
     project_id: int
     name: str
     notes: str | None = None
     segment: str | None = None
-    workflow_name: str
+    #: Orchestrator state — Human UI checks ``needs_review`` before workspace merge.
     status: str
     display_phase: str
     closed_at: datetime | None = None
@@ -196,7 +242,6 @@ class RunCardRead(BaseModel):
     emails_sent: int
     replies: int
     active_threads: int
-    updated_at: datetime | None = None
     created_at: datetime
     #: Human UI: prompt setup text stored in run_setups (no heavy payload on list).
     prompt_setup_saved: bool = False

@@ -1,6 +1,10 @@
+import logging
+
 from sqlalchemy import inspect, text
 
 from app.db import Base, SessionLocal, engine
+
+_logger = logging.getLogger(__name__)
 from app.models.project import Project
 from app.models.run import Run
 from app.models.rule import Rule
@@ -382,7 +386,7 @@ def _ensure_personalization_and_generation_meta_columns() -> None:
         columns = {c["name"] for c in insp.get_columns("runs")}
         if "email_style_mode" not in columns:
             with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE runs ADD COLUMN email_style_mode VARCHAR(32)"))
+                conn.execute(text("ALTER TABLE runs ADD COLUMN email_style_mode VARCHAR(48)"))
 
     if "email_drafts" in insp.get_table_names():
         columns = {c["name"] for c in insp.get_columns("email_drafts")}
@@ -912,109 +916,77 @@ def _strip_template_variables_json_blob_columns() -> None:
         db.close()
 
 
-def _strip_asset_packet_packet_json_after_kv() -> None:
-    """Clear packet_json when entity_json_kv holds metadata (after packet_json.assets backfill)."""
+def _strip_json_blob_when_kv_populated(scope: str, model_cls, blob_attr: str, log_line: str) -> None:
+    """Clear a JSON blob column when entity_json_kv already holds data for that entity (KV is canonical)."""
     import logging
 
     from sqlalchemy.orm.attributes import flag_modified
 
-    from app.constants.entity_kv_scope import SCOPE_ASSET_PACKET
     from app.utils.entity_kv_storage import get_kv_dict
 
     log = logging.getLogger(__name__)
     db = SessionLocal()
     try:
         n = 0
-        for p in db.query(AssetPacket).order_by(AssetPacket.id.asc()).all():
-            if not get_kv_dict(db, SCOPE_ASSET_PACKET, p.id):
+        for row in db.query(model_cls).order_by(model_cls.id.asc()).all():
+            if not get_kv_dict(db, scope, row.id):
                 continue
-            if not dict(p.packet_json or {}):
+            if not dict(getattr(row, blob_attr) or {}):
                 continue
-            p.packet_json = {}
-            flag_modified(p, "packet_json")
-            db.add(p)
+            setattr(row, blob_attr, {})
+            flag_modified(row, blob_attr)
+            db.add(row)
             n += 1
         if n:
             db.commit()
-            log.info("asset_packets: cleared legacy packet_json rows=%s (KV canonical)", n)
+            log.info(log_line, n)
         else:
             db.commit()
     except Exception:
-        log.exception("strip asset_packets packet_json failed")
+        log.exception("strip %s failed", blob_attr)
         db.rollback()
     finally:
         db.close()
+
+
+def _strip_asset_packet_packet_json_after_kv() -> None:
+    """Clear packet_json when entity_json_kv holds metadata (after packet_json.assets backfill)."""
+    from app.constants.entity_kv_scope import SCOPE_ASSET_PACKET
+
+    _strip_json_blob_when_kv_populated(
+        SCOPE_ASSET_PACKET,
+        AssetPacket,
+        "packet_json",
+        "asset_packets: cleared legacy packet_json rows=%s (KV canonical)",
+    )
 
 
 def _strip_asset_metadata_json_blob_if_kv() -> None:
     """Clear assets.metadata_json when entity_json_kv scope asset_metadata is populated."""
-    import logging
-
-    from sqlalchemy.orm.attributes import flag_modified
-
     from app.constants.entity_kv_scope import SCOPE_ASSET_METADATA
-    from app.utils.entity_kv_storage import get_kv_dict
 
-    log = logging.getLogger(__name__)
-    db = SessionLocal()
-    try:
-        n = 0
-        for a in db.query(Asset).order_by(Asset.id.asc()).all():
-            if not get_kv_dict(db, SCOPE_ASSET_METADATA, a.id):
-                continue
-            if not dict(a.metadata_json or {}):
-                continue
-            a.metadata_json = {}
-            flag_modified(a, "metadata_json")
-            db.add(a)
-            n += 1
-        if n:
-            db.commit()
-            log.info("assets: cleared legacy metadata_json rows=%s (KV canonical)", n)
-        else:
-            db.commit()
-    except Exception:
-        log.exception("strip assets metadata_json failed")
-        db.rollback()
-    finally:
-        db.close()
+    _strip_json_blob_when_kv_populated(
+        SCOPE_ASSET_METADATA,
+        Asset,
+        "metadata_json",
+        "assets: cleared legacy metadata_json rows=%s (KV canonical)",
+    )
 
 
 def _strip_run_company_extra_json_if_kv() -> None:
     """Clear run_companies.extra_json when entity_json_kv scope run_company_extra is populated."""
-    import logging
-
-    from sqlalchemy.orm.attributes import flag_modified
-
     from app.constants.entity_kv_scope import SCOPE_RUN_COMPANY_EXTRA
-    from app.utils.entity_kv_storage import get_kv_dict
 
-    log = logging.getLogger(__name__)
-    db = SessionLocal()
-    try:
-        n = 0
-        for rc in db.query(RunCompany).order_by(RunCompany.id.asc()).all():
-            if not get_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, rc.id):
-                continue
-            if not dict(rc.extra_json or {}):
-                continue
-            rc.extra_json = {}
-            flag_modified(rc, "extra_json")
-            db.add(rc)
-            n += 1
-        if n:
-            db.commit()
-            log.info("run_companies: cleared legacy extra_json rows=%s (KV canonical)", n)
-        else:
-            db.commit()
-    except Exception:
-        log.exception("strip run_companies extra_json failed")
-        db.rollback()
-    finally:
-        db.close()
+    _strip_json_blob_when_kv_populated(
+        SCOPE_RUN_COMPANY_EXTRA,
+        RunCompany,
+        "extra_json",
+        "run_companies: cleared legacy extra_json rows=%s (KV canonical)",
+    )
 
 
 def ensure_schema() -> None:
+    _logger.info("ensure_schema: start")
     Base.metadata.create_all(bind=engine)
     _ensure_runs_metadata_columns()
     _ensure_run_outreach_context_columns()
@@ -1038,6 +1010,8 @@ def ensure_schema() -> None:
     _backfill_email_events_payload_columns_from_json()
     _ensure_reminders_typed_columns()
     _normalize_reminders_typed_columns()
+    # Before clearing runs.context_json into KV: move event_chain into relational tables.
+    _backfill_run_event_chain_from_context_json()
     _run_domain_json_migration()
     _strip_template_variables_json_blob_columns()
     _strip_email_drafts_generation_meta_json_blob()
@@ -1049,8 +1023,8 @@ def ensure_schema() -> None:
     _backfill_draft_attached_assets_from_json()
     _backfill_personalization_json()
     _migrate_steps_trim_contacts_json_blob()
-    _backfill_run_event_chain_from_context_json()
     _ensure_run_scoped_performance_indexes()
+    _logger.info("ensure_schema: done")
 
 
 def init_db():

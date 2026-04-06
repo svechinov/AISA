@@ -238,6 +238,12 @@ export default function SetupRequiredGate({ children }) {
             The app opens after the API confirms LLM and CDN keys in <code className="text-[11px]">backend/.env</code>.
             Entries already on the server show as masked; green checks appear line by line after the status response.
           </p>
+          {checking && !status && !loadErr ? (
+            <p className="mt-2 text-xs text-muted-foreground" role="status">
+              Connecting to API… (up to {SETUP_STATUS_TIMEOUT_MS / 1000}s). If this never finishes, the backend is not
+              responding — fix the process or URL, then use Re-check.
+            </p>
+          ) : null}
           {status && !loadErr ? (
             <div className="mt-2 space-y-2 text-xs text-muted-foreground" aria-live="polite">
               <p>
@@ -493,7 +499,7 @@ export default function SetupRequiredGate({ children }) {
           <Button
             type="button"
             variant="secondary"
-            disabled={checking}
+            disabled={submitting}
             onClick={() => void refresh()}
             className="gap-2"
           >

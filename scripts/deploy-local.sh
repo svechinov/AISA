@@ -23,8 +23,11 @@ echo "==> Backend: docker compose build (backend)"
 echo "==> Backend: up -d postgres redis backend"
 "${COMPOSE[@]}" up -d postgres redis backend
 
-echo "==> Backend: wait for /health (process listening, up to ~60s)"
-for i in $(seq 1 60); do
+HEALTH_TIMEOUT="${DEPLOY_HEALTH_TIMEOUT:-60}"
+READY_TIMEOUT="${DEPLOY_READY_TIMEOUT:-300}"
+
+echo "==> Backend: wait for /health (process listening, up to ~${HEALTH_TIMEOUT}s)"
+for i in $(seq 1 "$HEALTH_TIMEOUT"); do
   if curl -sf "http://127.0.0.1:8000/health" >/dev/null; then
     echo "    health OK"
     break
@@ -32,17 +35,17 @@ for i in $(seq 1 60); do
   if (( i % 10 == 0 )); then
     echo "    ... still waiting (${i}s) — check: ${COMPOSE[*]} ps  and  ${COMPOSE[*]} logs backend"
   fi
-  if [[ "$i" -eq 60 ]]; then
+  if [[ "$i" -eq "$HEALTH_TIMEOUT" ]]; then
     echo "error: /health did not respond on :8000 — try: ${COMPOSE[*]} logs backend" >&2
     exit 1
   fi
   sleep 1
 done
 
-echo "==> Backend: wait for /ready (DB schema + API route imports; up to ~300s)"
+echo "==> Backend: wait for /ready (DB schema + API route imports; up to ~${READY_TIMEOUT}s)"
 echo "    (503 from /ready until then is normal — cold import can take 30–90s on first start)"
 echo "    polling every 1s; status below every 5s if still not ready"
-for i in $(seq 1 300); do
+for i in $(seq 1 "$READY_TIMEOUT"); do
   if curl -sf "http://127.0.0.1:8000/ready" >/dev/null; then
     echo "    API ready (schema + routes)"
     break
@@ -53,7 +56,7 @@ for i in $(seq 1 300); do
     [[ -n "$reason" ]] || reason="(no JSON — check port / backend)"
     echo "    ... still waiting (${i}s) — /ready says: ${reason} — ${COMPOSE[*]} logs backend"
   fi
-  if [[ "$i" -eq 300 ]]; then
+  if [[ "$i" -eq "$READY_TIMEOUT" ]]; then
     echo "error: /ready never returned 200 — check ensure_schema and route registration — try: ${COMPOSE[*]} logs backend" >&2
     exit 1
   fi

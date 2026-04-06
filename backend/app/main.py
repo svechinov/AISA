@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -52,6 +53,9 @@ async def _gmail_background_sync_loop(interval_sec: int) -> None:
 
 
 async def _ensure_schema_task() -> None:
+    """Idempotent DB migrations. Skipped when Docker entrypoint already ran ``ensure_schema()``."""
+    if os.environ.get("AI_BIZ_OS_SCHEMA_ALREADY_APPLIED") == "1":
+        return
     from app.init_db import ensure_schema
 
     await asyncio.to_thread(ensure_schema)

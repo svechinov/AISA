@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, defer, selectinload
 
 from app.models.run import Run
 from app.models.run_setup import RunSetup
@@ -12,10 +12,7 @@ from app.utils.run_relational_payload import (
     upsert_run_outreach_context_row,
 )
 from app.repositories.project_repo import get_project
-from app.repositories.run_human_ui_repo import (
-    delete_human_ui_from_context_json,
-    merge_event_chain_collapsed,
-)
+from app.repositories.run_human_ui_repo import merge_event_chain_collapsed
 
 
 def create_run(
@@ -53,12 +50,35 @@ def create_run(
 
 
 def get_run(db: Session, run_id: int) -> Run | None:
+    """Load run for API/workers — legacy JSON columns are deferred (never read unless explicitly accessed)."""
     return (
         db.query(Run)
         .options(
             selectinload(Run.run_setup),
             selectinload(Run.outreach_context),
             selectinload(Run.master_email_variants),
+            defer(Run.context_json),
+            defer(Run.input_json),
+            defer(Run.master_email),
+        )
+        .filter(Run.id == run_id)
+        .first()
+    )
+
+
+def get_run_for_edit_form(db: Session, run_id: int) -> Run | None:
+    """Load run + outreach_context only — no run_setup / master_email_variants (faster GET /edit-form)."""
+    return (
+        db.query(Run)
+        .options(
+            selectinload(Run.outreach_context),
+            # Large JSON/text columns — not needed when run_outreach_context + small columns suffice.
+            defer(Run.context_json),
+            defer(Run.input_json),
+            defer(Run.master_prompt),
+            defer(Run.master_email),
+            defer(Run.master_email_body),
+            defer(Run.sender_signature_html),
         )
         .filter(Run.id == run_id)
         .first()
@@ -72,6 +92,9 @@ def list_runs_by_project(db: Session, project_id: int) -> list[Run]:
             selectinload(Run.run_setup),
             selectinload(Run.outreach_context),
             selectinload(Run.master_email_variants),
+            defer(Run.context_json),
+            defer(Run.input_json),
+            defer(Run.master_email),
         )
         .filter(Run.project_id == project_id)
         .order_by(Run.id.desc())
@@ -130,26 +153,12 @@ def update_run_master_email_variants(
 
 
 def get_run_master_email_parts(run: Run) -> tuple[str, str]:
-    """First variant (or legacy flat master_email / columns) for non-send utilities."""
+    """First relational variant, else scalar subject/body columns."""
     vs = getattr(run, "master_email_variants", None) or []
     if vs:
         first = sorted(vs, key=lambda x: x.position)[0]
         s = (first.subject or "").strip()
         b = (first.body or "").strip()
-        if s and b:
-            return s, b
-    me = getattr(run, "master_email", None) or {}
-    if isinstance(me, dict):
-        vlist = me.get("variants")
-        if isinstance(vlist, list) and vlist:
-            first = vlist[0]
-            if isinstance(first, dict):
-                s = (first.get("subject") or "").strip()
-                b = (first.get("body") or "").strip()
-                if s and b:
-                    return s, b
-        s = (me.get("subject") or "").strip()
-        b = (me.get("body") or "").strip()
         if s and b:
             return s, b
     s2 = (run.master_email_subject or "").strip()
@@ -186,32 +195,25 @@ def update_run_signature(db: Session, run_id: int, signature_html: str | None) -
     return run
 
 
-# Legacy key removed from context_json on save; canonical store is run_setups.prompt_setup_text.
-_PROMPT_SETUP_JSON_KEY = "prompt_setup_text"
-
-
 def update_run_human_ui_preferences(
     db: Session,
     run_id: int,
     *,
     event_chain_collapsed: dict[str, bool] | None = None,
 ) -> Run | None:
-    """Persist dashboard UI flags in ``run_event_chain_collapse`` (not context_json blobs)."""
+    """Persist dashboard UI flags in ``run_event_chain_collapse`` only — does not touch ``runs.context_json``."""
     run = get_run(db, run_id)
     if not run:
         return None
     if event_chain_collapsed is not None:
         merge_event_chain_collapsed(db, run_id, event_chain_collapsed=event_chain_collapsed)
-    ctx = delete_human_ui_from_context_json(dict(run.context_json or {}))
-    run.context_json = ctx
-    db.add(run)
     db.commit()
     db.refresh(run)
     return run
 
 
 def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: str) -> Run | None:
-    """Persist labeled outreach prompt text in run_setups; empty removes it. Legacy context_json key cleared."""
+    """Persist labeled outreach prompt text in ``run_setups`` only — does not touch ``runs.context_json``."""
     run = get_run(db, run_id)
     if not run:
         return None
@@ -225,9 +227,6 @@ def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: st
             row = RunSetup(run_id=run_id)
             db.add(row)
         row.prompt_setup_text = prompt_setup_text
-    ctx = dict(run.context_json or {})
-    ctx.pop(_PROMPT_SETUP_JSON_KEY, None)
-    run.context_json = ctx
     db.add(run)
     db.commit()
     db.refresh(run)
@@ -256,8 +255,14 @@ def update_run_outreach_fields(
     segment: str,
     inner: dict[str, str],
     master_prompt: str,
+    email_style_mode: str | None = None,
 ) -> Run | None:
-    """Refresh context.context, master_prompt, segment, notes; keep _human_ui (prompt lives in run_setups)."""
+    """Refresh outreach context row, master_prompt, segment, notes; optional email_style_mode in same commit.
+
+    Does not read ``runs.context_json`` (avoids lazy-loading huge legacy blobs on every save).
+    """
+    from app.services.email_style_service import normalize_email_style_mode
+
     run = get_run(db, run_id)
     if not run:
         return None
@@ -265,16 +270,21 @@ def update_run_outreach_fields(
         raise ValueError("Cannot update outreach fields on a closed run")
 
     upsert_run_outreach_context_row(db, run.id, inner)
-    run.context_json = {}
     run.notes = (notes or "").strip() or None
     run.segment = (segment or "").strip()
     run.master_prompt = master_prompt
 
-    ij = dict(run.input_json or {})
-    if inner.get("goal"):
-        ij["goal"] = inner["goal"]
-    persist_run_input_from_blob(db, run, ij)
+    legacy_ij = dict(run.input_json or {})
+    if legacy_ij:
+        persist_run_input_from_blob(db, run, legacy_ij)
+    # Goal from the labeled brief only — do not call persist_run_input_from_blob with {goal}
+    # alone: that replaces SCOPE_RUN_INPUT and deletes every other key.
+    g_raw = inner.get("goal")
+    run.input_goal = str(g_raw).strip() if g_raw is not None and str(g_raw).strip() else None
     run.input_json = {}
+
+    if email_style_mode is not None:
+        run.email_style_mode = normalize_email_style_mode(email_style_mode)
 
     db.add(run)
     db.commit()
@@ -283,13 +293,18 @@ def update_run_outreach_fields(
 
 
 def update_run_email_style_mode(db: Session, run_id: int, email_style_mode: str | None) -> Run | None:
+    from app.services.email_style_service import normalize_email_style_mode
+
     run = get_run(db, run_id)
     if not run:
         return None
     if run.closed_at is not None:
         raise ValueError("Cannot update email style on a closed run")
-    m = (email_style_mode or "").strip().lower()
-    run.email_style_mode = m if m else None
+    try:
+        norm = normalize_email_style_mode(email_style_mode)
+    except ValueError as e:
+        raise ValueError(str(e)) from e
+    run.email_style_mode = norm
     db.add(run)
     db.commit()
     db.refresh(run)

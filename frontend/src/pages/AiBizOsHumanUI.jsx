@@ -119,7 +119,11 @@ const SETUP_CDN_LABELS = {
 };
 
 const DEFAULT_OUTREACH_BRIEF =
-  "Offer:\nTarget:\nRoles:\nGoal:\nTone: Professional\nNotes:\n";
+  "Respondent's field of activity:\n\n" +
+  "Narrowly focused areas of activity:\n\n" +
+  "Reason for search (licensing, sales, partnership):\n\n" +
+  "How long has the respondent company been in the market:\n\n" +
+  "Additional information:\n\n";
 
 /** Stored in `email_drafts.review_notes` when reviewer uses the clock (defer send). */
 const OUTBOUND_REVIEW_SEND_LATER = "send_later";
@@ -304,6 +308,11 @@ function SwitchRunListRow({ run, selectedRun, onSelect }) {
 
 /** Longest first so e.g. "professional notes:" wins over embedded "notes:". */
 const BRIEF_LABEL_PREFIXES = [
+  ["how long has the respondent company been in the market:", "offer"],
+  ["reason for search (licensing, sales, partnership):", "goal"],
+  ["narrowly focused areas of activity:", "target_roles"],
+  ["respondent's field of activity:", "target_entities"],
+  ["additional information:", "notes"],
   ["target entities:", "target_entities"],
   ["professional notes:", "notes"],
   ["target roles:", "target_roles"],
@@ -331,7 +340,7 @@ function briefLineLabelAndRest(line) {
   return [null, s];
 }
 
-/** Mirrors backend brief parser: at least Offer or Goal must have text. */
+/** Mirrors backend outreach_brief_has_minimum_content (search + legacy Offer/Goal). */
 function outreachBriefHasOfferOrGoal(raw) {
   const text = (raw || "").trim();
   if (!text) return false;
@@ -364,7 +373,12 @@ function outreachBriefHasOfferOrGoal(raw) {
     }
   }
   flush();
-  return Boolean((acc.offer && acc.offer.length > 0) || (acc.goal && acc.goal.length > 0));
+  return Boolean(
+    (acc.goal && acc.goal.length > 0) ||
+      (acc.target_entities && acc.target_entities.length > 0) ||
+      (acc.offer && acc.offer.length > 0) ||
+      (acc.target_roles && acc.target_roles.length > 0),
+  );
 }
 
 /** Inner outreach fields from API run.context_json (nested `context` or legacy flat). */
@@ -389,13 +403,27 @@ function contextFromRun(run) {
 
 function contextToOutreachBriefText(ctx) {
   if (!ctx) return DEFAULT_OUTREACH_BRIEF;
+  const tone = String(ctx.tone ?? "").trim();
+  const extra = String(ctx.notes ?? "").trim();
+  let notes = extra;
+  if (tone && tone.toLowerCase() !== "professional") {
+    notes = notes ? `${notes}\n\n(Previous tone: ${tone})` : `(Previous tone: ${tone})`;
+  }
   return [
-    `Offer: ${ctx.offer}`,
-    `Target: ${ctx.target_entities}`,
-    `Roles: ${ctx.target_roles}`,
-    `Goal: ${ctx.goal}`,
-    `Tone: ${ctx.tone}`,
-    `Notes: ${ctx.notes}`,
+    "Respondent's field of activity:",
+    ctx.target_entities || "",
+    "",
+    "Narrowly focused areas of activity:",
+    ctx.target_roles || "",
+    "",
+    "Reason for search (licensing, sales, partnership):",
+    ctx.goal || "",
+    "",
+    "How long has the respondent company been in the market:",
+    ctx.offer || "",
+    "",
+    "Additional information:",
+    notes || "",
     "",
   ].join("\n");
 }
@@ -469,7 +497,7 @@ function seedNewRunFormFromRun(run) {
       notes: "",
       segment: "",
       outreach_brief: DEFAULT_OUTREACH_BRIEF,
-      email_style_mode: "",
+      email_style_mode: "auto",
     };
   }
   const ctx = contextFromRun(run);
@@ -487,7 +515,25 @@ function seedNewRunFormFromRun(run) {
     notes: String(run.notes ?? "").trim(),
     segment: seg,
     outreach_brief: brief,
-    email_style_mode: run?.email_style_mode != null ? String(run.email_style_mode) : "",
+    email_style_mode: normalizeProfessionalProfileFromApi(run?.email_style_mode),
+  };
+}
+
+/** Prefill from GET /runs/:id/edit-form — avoids full RunRead (large JSON). */
+function seedNewRunFormFromEditFormRead(payload) {
+  if (!payload || typeof payload !== "object") {
+    return seedNewRunFormFromRun(null);
+  }
+  const baseName = String(payload.name ?? "").trim();
+  const seg = String(payload.segment ?? "").trim();
+  const dateStr = new Date().toLocaleDateString();
+  const name = baseName ? baseName : seg ? seg : `Outreach wave · ${dateStr}`;
+  return {
+    name,
+    notes: String(payload.notes ?? "").trim(),
+    segment: seg,
+    outreach_brief: String(payload.outreach_brief ?? "").trim() || DEFAULT_OUTREACH_BRIEF,
+    email_style_mode: normalizeProfessionalProfileFromApi(payload.email_style_mode),
   };
 }
 
@@ -503,6 +549,8 @@ const RUN_SETUP_PATCH_TIMEOUT_MS = 45000;
 const RUN_REVIEW_SETUP_LITE_TIMEOUT_MS = 20000;
 /** Run-details bundle is many parallel GETs; allow the same headroom when refreshing after setup saves. */
 const LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS = 120000;
+/** Edit-form is light on the server; client timeout is generous so a slow/blocked worker does not fail before heavier GET /runs. */
+const EDIT_FORM_OPEN_TIMEOUT_MS = LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
 /** GET /runs/:id/companies — run_companies + statuses; allow long wait like other run bundles. */
 const COMPANIES_HTTP_TIMEOUT_MS = LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
 /** POST /sending/.../mock-send-preview — synchronous Gmail on server; allow long wait. */
@@ -964,14 +1012,28 @@ const PROJECT_VIEW_OPTS = [
   { value: "archived", label: "Archived projects" },
 ];
 
-/** Default outbound voice when role does not imply another style (backend email_style_service). */
-const EMAIL_STYLE_OPTIONS = [
-  { value: "", label: "Auto (infer from contact role)" },
-  { value: "direct", label: "Direct" },
-  { value: "warm", label: "Warm" },
-  { value: "sharp", label: "Sharp" },
-  { value: "executive", label: "Executive" },
+/** Stored as runs.email_style_mode slug; Auto uses contact-role heuristics (backend email_style_service). */
+const PROFESSIONAL_PROFILE_OPTIONS = [
+  { value: "any_top_management", label: "Any Top Management" },
+  { value: "founder_or_ceo", label: "Founder or CEO" },
+  { value: "cto_or_developer", label: "CTO or Developer" },
+  { value: "cmo_or_marketing", label: "CMO or Marketing Management" },
+  { value: "head_of_licensing", label: "Head of Licensing or Licensing Management" },
+  { value: "cfo_or_accountants", label: "CFO or Accountants" },
+  { value: "vp_or_other_dm", label: "VP or other DM" },
+  { value: "any_c_level", label: "Any C-level Management" },
+  { value: "any_mid_management", label: "Any Mid-management" },
+  { value: "auto", label: "Auto" },
 ];
+
+const LEGACY_EMAIL_VOICE_MODES = new Set(["direct", "warm", "sharp", "executive"]);
+
+function normalizeProfessionalProfileFromApi(raw) {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (!s) return "auto";
+  if (LEGACY_EMAIL_VOICE_MODES.has(s)) return "auto";
+  return s;
+}
 
 /** @param {unknown} score */
 function validationScoreToneClass(score) {
@@ -997,6 +1059,18 @@ const MAIN_NAV = [
   { value: "queue", label: "Re-search queue" },
   { value: "contact-analyzer", label: "Contact analyzer" },
 ];
+
+/** Nav values that show TrackingView — load minimal strip (signature + event_chain) only here. */
+const TRACKING_STRIP_NAV = new Set([
+  "events",
+  "threads",
+  "reply-drafts",
+  "reminders",
+  "assets",
+  "packets",
+  "dead",
+  "queue",
+]);
 
 function mainNavToTrackingTab(nav) {
   const map = {
@@ -1077,6 +1151,8 @@ export default function AiBizOsHumanUI() {
     return typeof lc?.mainNav === "string" ? lc.mainNav : "runs";
   });
   const [runsList, setRunsList] = useState([]);
+  /** GET /runs/:id/tracking-strip while on Tracking nav — never full Run row. */
+  const [trackingStrip, setTrackingStrip] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   /** When === selectedRun.id, Review contacts / Drafts sub-tab counts use live data; else localStorage snapshot. */
   const [runDetailsHydratedId, setRunDetailsHydratedId] = useState(null);
@@ -1099,6 +1175,8 @@ export default function AiBizOsHumanUI() {
   const [newRunBaseline, setNewRunBaseline] = useState(null);
   const [newRunCreateInFlight, setNewRunCreateInFlight] = useState(false);
   const [newRunUpdateInFlight, setNewRunUpdateInFlight] = useState(false);
+  /** Invalidates in-flight GET /edit-form when dialog closes or mode switches — never blocks UI. */
+  const editFormFetchSeqRef = useRef(0);
   const newRunDialogBusy = newRunCreateInFlight || newRunUpdateInFlight;
   const [switchRunOpen, setSwitchRunOpen] = useState(false);
   /** PATCH /runs/:id/project — attach run to current project when project_id drifted. */
@@ -1113,9 +1191,8 @@ export default function AiBizOsHumanUI() {
     notes: "",
     segment: "",
     outreach_brief: DEFAULT_OUTREACH_BRIEF,
-    email_style_mode: "",
+    email_style_mode: "auto",
   });
-  const [openRunEditLoading, setOpenRunEditLoading] = useState(false);
 
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
@@ -1654,8 +1731,8 @@ export default function AiBizOsHumanUI() {
   };
 
   /**
-   * Loads run + workspace-lite (+ optional global performance). Full GET /workspace is not used here
-   * (heavy); Companies tab uses GET /runs/:id/companies; section lists only when requested.
+   * Workspace-lite + optional section lists + global performance. Never GET /runs/:id here — use
+   * GET /runs/:id/edit-form or GET /runs/:id/tracking-strip when a dialog/tab needs more.
    * @param {object} [options]
    * @param {boolean} [options.includeLists] — legacy: both contacts + drafts lists.
    * @param {boolean} [options.includeContacts] — GET /contacts/run (Review contacts / analyzer).
@@ -1677,8 +1754,8 @@ export default function AiBizOsHumanUI() {
     if (includeDrafts) listParts.push(`/email-drafts/run/${rid} (list, compact)`);
     appendActivityLog(
       listParts.length
-        ? `Run run_id=${rid}: GET /runs/${rid}, /runs/${rid}/workspace-lite, ${listParts.join(", ")}`
-        : `Run run_id=${rid}: GET /runs/${rid}, /runs/${rid}/workspace-lite (no section lists in this request)`,
+        ? `Run run_id=${rid}: GET /runs/${rid}/workspace-lite, ${listParts.join(", ")}`
+        : `Run run_id=${rid}: GET /runs/${rid}/workspace-lite (no section lists; no GET /runs/:id)`,
     );
     const prevTarget = runLoadTargetRef.current;
     runLoadTargetRef.current = rid;
@@ -1726,8 +1803,6 @@ export default function AiBizOsHumanUI() {
     }
     try {
       const wsLitePath = `/runs/${rid}/workspace-lite`;
-      /** Run + workspace-lite in parallel (not full /workspace — avoids serializing full Run row). Full run fields come from GET /runs/:id above. */
-      const pRun = api(`/runs/${rid}`, { timeoutMs: requestTimeoutMs });
       const pWsLite = api(wsLitePath, { timeoutMs: requestTimeoutMs });
       const pContacts = includeContacts
         ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), `/contacts/run/${rid}`)
@@ -1736,23 +1811,24 @@ export default function AiBizOsHumanUI() {
         ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), emailDraftsRunListPath(rid))
         : null;
 
-      let run;
       let wsLiteData;
       let contactsData = null;
       let draftsData = null;
       if (includeContacts && includeDrafts) {
-        [run, wsLiteData, contactsData, draftsData] = await Promise.all([pRun, pWsLite, pContacts, pDrafts]);
+        [wsLiteData, contactsData, draftsData] = await Promise.all([pWsLite, pContacts, pDrafts]);
       } else if (includeContacts) {
-        [run, wsLiteData, contactsData] = await Promise.all([pRun, pWsLite, pContacts]);
+        [wsLiteData, contactsData] = await Promise.all([pWsLite, pContacts]);
       } else if (includeDrafts) {
-        [run, wsLiteData, draftsData] = await Promise.all([pRun, pWsLite, pDrafts]);
+        [wsLiteData, draftsData] = await Promise.all([pWsLite, pDrafts]);
       } else {
-        [run, wsLiteData] = await Promise.all([pRun, pWsLite]);
+        [wsLiteData] = await Promise.all([pWsLite]);
       }
       if (runLoadTargetRef.current !== rid) return null;
-      appendActivityLog("→ Run and workspace-lite received.");
-      setSelectedRun(run);
-      snapshotMergeRunSetupBodiesFromRun(rid, run);
+      appendActivityLog("→ Workspace-lite received (sidebar row + metrics; no GET /runs/:id).");
+      setSelectedRun((prev) => {
+        const base = rowGuess || prev || { id: rid };
+        return { ...base, display_phase: wsLiteData.display_phase ?? base.display_phase };
+      });
 
       if (includeContacts) {
         const cArr = Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData);
@@ -1848,6 +1924,30 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  useEffect(() => {
+    const rid = Number(selectedRun?.id);
+    if (!Number.isFinite(rid) || rid <= 0) {
+      setTrackingStrip(null);
+      return;
+    }
+    if (!TRACKING_STRIP_NAV.has(mainNav)) {
+      setTrackingStrip(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const d = await api(`/runs/${rid}/tracking-strip`, { timeoutMs: POLL_METRICS_TIMEOUT_MS });
+        if (!cancelled) setTrackingStrip(d);
+      } catch {
+        if (!cancelled) setTrackingStrip(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRun?.id, mainNav]);
+
   const moveRunToCurrentProject = async () => {
     if (!selectedRun?.id || !selectedProject || runProjectMoveInFlight) return;
     const pid = projectPk(selectedProject);
@@ -1907,6 +2007,7 @@ export default function AiBizOsHumanUI() {
         ]);
         metricsSilentFailureLastLogAtRef.current = 0;
         setWorkspace((prev) => {
+          if (!prev || Number(prev.id) !== Number(runId)) return prev;
           const merged = mergeWorkspaceLiteInto(prev, wsLite);
           if (merged) snapshotWriteRunCards(runId, merged);
           return merged;
@@ -2487,6 +2588,7 @@ export default function AiBizOsHumanUI() {
   useEffect(() => {
     if (!selectedRun?.id || mainNav !== "companies") {
       setCompaniesPanel(null);
+      setCompaniesLoading(false);
       if (!selectedRun?.id) companiesFetchRunIdRef.current = null;
       return;
     }
@@ -2499,7 +2601,10 @@ export default function AiBizOsHumanUI() {
 
     const seq = ++companiesListFetchSeqRef.current;
     setCompaniesListFailedRunId(null);
-    setCompaniesLoading(true);
+    /** Only block the table on first paint or run switch. Metrics-driven refresh (companiesRefreshNonce) keeps showing rows. */
+    if (runJustChanged || companiesPanel === null) {
+      setCompaniesLoading(true);
+    }
     appendActivityLog(
       `Companies: GET /runs/${rid}/companies?limit=${COMPANIES_FETCH_MAX}&offset=0 (client-side pages of ${WORKSPACE_TABLE_PAGE_SIZE})`,
     );
@@ -2520,6 +2625,7 @@ export default function AiBizOsHumanUI() {
         const normalized = normalizeCompaniesPanelResponse(data, 0);
         const { companies, companies_total } = normalized;
         setCompaniesPanel(normalized);
+        setCompaniesLoading(false);
         const clientMs =
           typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
         appendActivityLog(
@@ -2625,7 +2731,9 @@ export default function AiBizOsHumanUI() {
           const cardSnap = snapshotReadRunCards(targetId);
           setSelectedRun(runRow);
           setWorkspace(snapshotMergeWorkspaceFromRunCards(cardSnap, runRow));
-          await loadRunDetails(targetId, runRow, { ...listInclusionsForMainNav(mainNav) });
+          await loadRunDetails(targetId, runRow, {
+            ...listInclusionsForMainNav(mainNavRef.current),
+          });
         } else {
           const sr = selectedRunRef.current;
           const orphan = sr && Number(sr.project_id) !== Number(pid);
@@ -2653,7 +2761,11 @@ export default function AiBizOsHumanUI() {
       }
     })();
     return () => ac.abort();
-  }, [selectedProject, appendActivityLog, mainNav]);
+    /**
+     * `mainNav` intentionally omitted: including it aborted GET /runs/project on every tab switch
+     * (“Timed out or cancelled” spam). Section lists use `mainNav` via effects + refreshRun*Only.
+     */
+  }, [selectedProject, appendActivityLog]);
 
   useEffect(() => {
     const pid = selectedProject ? projectPk(selectedProject) : null;
@@ -2834,8 +2946,8 @@ export default function AiBizOsHumanUI() {
   const newRunOtherDirty = useMemo(() => {
     if (!newRunBaseline) return false;
     const b = newRunBaseline;
-    const styleA = String(newRunForm.email_style_mode ?? "").trim();
-    const styleB = String(b.email_style_mode ?? "").trim();
+    const styleA = normalizeProfessionalProfileFromApi(newRunForm.email_style_mode);
+    const styleB = normalizeProfessionalProfileFromApi(b.email_style_mode);
     return (
       newRunForm.notes.trim() !== b.notes ||
       newRunForm.segment.trim() !== b.segment ||
@@ -2868,6 +2980,7 @@ export default function AiBizOsHumanUI() {
 
   useEffect(() => {
     if (!newRunOpen) {
+      editFormFetchSeqRef.current += 1;
       setNewRunBaseline(null);
       setNewRunCreateInFlight(false);
       setNewRunUpdateInFlight(false);
@@ -2881,17 +2994,17 @@ export default function AiBizOsHumanUI() {
       return;
     }
     if (!newRunForm.name.trim() || !newRunForm.segment.trim()) {
-      setError("Run name and segment are required.");
+      setError("Run name and Region / Country / State are required.");
       return;
     }
     if (!newRunForm.outreach_brief.trim()) {
-      setError("Outreach brief is required.");
+      setError("Outreach brief (search description) is required.");
       return;
     }
     if (!outreachBriefHasOfferOrGoal(newRunForm.outreach_brief)) {
       setError(
-        "Outreach brief must include lines starting with Offer: and/or Goal: (see placeholder). " +
-          "Labels can use markdown (e.g. **Goal:**). Professional Notes: counts as Notes, not Goal.",
+        "Fill at least one search section (e.g. reason for search or field of activity). " +
+          "Legacy Offer:/Goal: lines still count.",
       );
       return;
     }
@@ -2899,7 +3012,7 @@ export default function AiBizOsHumanUI() {
       setNewRunCreateInFlight(true);
       setError("");
       const pid = projectPk(selectedProject);
-      const styleToSave = String(newRunForm.email_style_mode ?? "").trim();
+      const styleToSave = normalizeProfessionalProfileFromApi(newRunForm.email_style_mode);
       const run = await api("/runs/start", {
         method: "POST",
         timeoutMs: START_RUN_TIMEOUT_MS,
@@ -2916,27 +3029,23 @@ export default function AiBizOsHumanUI() {
       setNewRunOpen(false);
       const runs = await api(`/runs/project/${pid}`);
       setRunsList(orderRunsOpenFirst(runs));
-      if (styleToSave) {
-        try {
-          await api(`/runs/${run.id}/email-style`, {
-            method: "PATCH",
-            timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
-            body: { email_style_mode: styleToSave },
-          });
-        } catch (e) {
-          setUiError(setError, e);
-        }
+      try {
+        await api(`/runs/${run.id}/email-style`, {
+          method: "PATCH",
+          timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
+          body: { email_style_mode: styleToSave },
+        });
+      } catch (e) {
+        setUiError(setError, e);
       }
       await loadRunDetails(run.id, undefined, { ...listInclusionsForMainNav(mainNav) });
-      if (styleToSave) {
-        void refreshRunContactsAndDrafts(run.id);
-      }
+      void refreshRunContactsAndDrafts(run.id);
       setNewRunForm({
         name: "",
         notes: "",
         segment: "",
         outreach_brief: DEFAULT_OUTREACH_BRIEF,
-        email_style_mode: "",
+        email_style_mode: "auto",
       });
     } catch (e) {
       const raw = String(e?.message ?? e ?? "");
@@ -2962,35 +3071,39 @@ export default function AiBizOsHumanUI() {
       setNewRunUpdateInFlight(true);
       setError("");
       const rid = newRunBaseline.runId;
-      const updatedRun = await api(`/runs/${rid}/outreach`, {
+      const merged = await api(`/runs/${rid}/outreach`, {
         method: "PATCH",
+        timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
         body: {
           notes: newRunForm.notes.trim() || undefined,
           segment: newRunForm.segment.trim(),
           outreach_brief: newRunForm.outreach_brief.trim(),
+          email_style_mode: normalizeProfessionalProfileFromApi(newRunForm.email_style_mode),
         },
       });
-      const styleBody = String(newRunForm.email_style_mode ?? "").trim() || null;
-      const styleRun = await api(`/runs/${rid}/email-style`, {
-        method: "PATCH",
-        timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
-        body: { email_style_mode: styleBody },
-      });
-      const merged = { ...updatedRun, ...styleRun };
       setNewRunOpen(false);
-      const pid = projectPk(selectedProject);
-      setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
+      setRunsList((prev) => {
+        if (!Array.isArray(prev)) return prev;
+        return prev.map((r) =>
+          r.id === rid
+            ? {
+                ...r,
+                name: merged.name != null && merged.name !== "" ? String(merged.name) : r.name,
+                notes: merged.notes,
+                segment: merged.segment,
+              }
+            : r,
+        );
+      });
       setSelectedRun((prev) =>
-        prev && prev.id === merged.id ? { ...prev, ...merged } : prev,
+        prev && prev.id === rid ? { ...prev, ...merged } : prev,
       );
-      refreshRunMetricsOnly(rid);
-      void refreshRunContactsAndDrafts(rid);
       setNewRunForm({
         name: "",
         notes: "",
         segment: "",
         outreach_brief: DEFAULT_OUTREACH_BRIEF,
-        email_style_mode: "",
+        email_style_mode: "auto",
       });
     } catch (e) {
       setUiError(setError, e);
@@ -2999,36 +3112,52 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const openRunEditDialog = async (runRow) => {
+  const openRunEditDialog = (runRow) => {
     if (!runRow?.id || !selectedProject) return;
-    try {
-      setOpenRunEditLoading(true);
-      setError("");
-      appendActivityLog(`Edit run: GET /runs/${runRow.id}`);
-      const run = await api(`/runs/${runRow.id}`);
-      const seeded = seedNewRunFormFromRun(run);
-      setNewRunForm(seeded);
-      setNewRunBaseline({
-        runId: run.id,
-        name: seeded.name.trim(),
-        notes: seeded.notes.trim(),
-        segment: seeded.segment.trim(),
-        outreach_brief: seeded.outreach_brief.trim(),
-        email_style_mode: String(seeded.email_style_mode ?? "").trim(),
-      });
-      refreshRunMetricsOnly(run.id);
-      setNewRunOpen(true);
-      appendActivityLog("Run form opened.");
-    } catch (e) {
-      appendActivityLog(`Run open error: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
-      setUiError(setError, e);
-    } finally {
-      setOpenRunEditLoading(false);
-    }
+    setError("");
+    const rid = Number(runRow.id);
+    const seeded = seedNewRunFormFromRun(runRow);
+    setNewRunForm(seeded);
+    setNewRunBaseline({
+      runId: rid,
+      name: seeded.name.trim(),
+      notes: seeded.notes.trim(),
+      segment: seeded.segment.trim(),
+      outreach_brief: seeded.outreach_brief.trim(),
+      email_style_mode: normalizeProfessionalProfileFromApi(seeded.email_style_mode),
+    });
+    setNewRunOpen(true);
+    const seq = ++editFormFetchSeqRef.current;
+    appendActivityLog(`Edit run: opened — GET /runs/${rid}/edit-form (background)`);
+    void (async () => {
+      try {
+        const run = await api(`/runs/${runRow.id}/edit-form`, { timeoutMs: EDIT_FORM_OPEN_TIMEOUT_MS });
+        if (seq !== editFormFetchSeqRef.current) return;
+        const next = seedNewRunFormFromEditFormRead(run);
+        setNewRunForm(next);
+        setNewRunBaseline({
+          runId: run.id,
+          name: next.name.trim(),
+          notes: next.notes.trim(),
+          segment: next.segment.trim(),
+          outreach_brief: next.outreach_brief.trim(),
+          email_style_mode: normalizeProfessionalProfileFromApi(next.email_style_mode),
+        });
+        appendActivityLog("Edit run: fields loaded from server.");
+        queueMicrotask(() => {
+          refreshRunMetricsOnly(run.id);
+        });
+      } catch (e) {
+        if (seq !== editFormFetchSeqRef.current) return;
+        appendActivityLog(`Edit run: load failed — ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
+        setUiError(setError, e);
+      }
+    })();
   };
 
   /** @param {{ prefilledFromSelected?: boolean }} [options] — prefill from current run (e.g. Runs tab “Continue outreach”); bare “New run” opens an empty form. */
   const openNewRunDialog = useCallback((options = {}) => {
+    editFormFetchSeqRef.current += 1;
     const prefilled = Boolean(options.prefilledFromSelected) && Boolean(selectedRun?.id);
     if (prefilled) {
       const seeded = seedNewRunFormFromRun(selectedRun);
@@ -3039,7 +3168,7 @@ export default function AiBizOsHumanUI() {
         notes: seeded.notes.trim(),
         segment: seeded.segment.trim(),
         outreach_brief: seeded.outreach_brief.trim(),
-        email_style_mode: String(seeded.email_style_mode ?? "").trim(),
+        email_style_mode: normalizeProfessionalProfileFromApi(seeded.email_style_mode),
       });
     } else {
       setNewRunForm(seedNewRunFormFromRun(null));
@@ -3069,14 +3198,6 @@ export default function AiBizOsHumanUI() {
   const openRunById = async (runId, runRowHint) => {
     setSwitchRunOpen(false);
     await loadRunDetails(runId, runRowHint, { ...listInclusionsForMainNav(mainNav) });
-    if (selectedProject) {
-      try {
-        const pid = projectPk(selectedProject);
-        setRunsList(orderRunsOpenFirst(await api(`/runs/project/${pid}`)));
-      } catch {
-        /* ignore */
-      }
-    }
   };
 
   const openRestartDialog = (run) => {
@@ -5152,8 +5273,6 @@ export default function AiBizOsHumanUI() {
   /** Do not tie Activity spinner to routine GETs (run/contacts/drafts) — it only distracts; use inline placeholders. */
   const activityLogBusy =
     loading ||
-    openRunEditLoading ||
-    companiesLoading ||
     analyzerLoading ||
     continueCompanyFindLoading ||
     Object.keys(restartsInFlight).length > 0;
@@ -5770,8 +5889,7 @@ export default function AiBizOsHumanUI() {
                               size="sm"
                               variant="outline"
                               className="shrink-0 whitespace-nowrap"
-                              disabled={openRunEditLoading}
-                              onClick={() => void openRunEditDialog(r)}
+                              onClick={() => openRunEditDialog(r)}
                             >
                               Open
                             </Button>
@@ -5792,7 +5910,7 @@ export default function AiBizOsHumanUI() {
                               className="shrink-0 whitespace-nowrap"
                               title="Switch to this run"
                               disabled={
-                                selectedRun?.id === r.id || openRunEditLoading
+                                selectedRun?.id === r.id
                               }
                               onClick={() => void openRunById(r.id, r)}
                             >
@@ -5919,29 +6037,7 @@ export default function AiBizOsHumanUI() {
                         Retry
                       </Button>
                     </div>
-                  ) : companiesLoading && !companiesPanel ? (
-                    <p className="text-sm text-muted-foreground">Loading companies...</p>
-                  ) : companiesPanel &&
-                    !companiesPanel.companies?.length &&
-                    Number(companiesPanel.companies_total) === 0 &&
-                    Number(workspace?.setup_summary?.companies_collected) > 0 ? (
-                    <div className="space-y-2 text-sm text-muted-foreground">
-                      <p>
-                        Run setup reports{" "}
-                        <span className="font-medium text-foreground">
-                          {workspace.setup_summary.companies_collected}
-                        </span>{" "}
-                        companies in setup metrics, but the{" "}
-                        <span className="font-medium text-foreground">run_companies</span> table is empty for this run.
-                        Try Refresh metrics, reopen this run, or run the one-off legacy migration script if you upgraded
-                        from an older DB.
-                      </p>
-                    </div>
-                  ) : !companiesPanel?.companies?.length ? (
-                    <p className="text-sm text-muted-foreground">
-                      No companies stored for this run yet. They appear after search adds them (or restart the run).
-                    </p>
-                  ) : (
+                  ) : (companiesPanel?.companies?.length ?? 0) > 0 ? (
                     <div className="space-y-4">
                       <details className="rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground">
                         <summary className="cursor-pointer select-none font-medium text-muted-foreground outline-none hover:text-foreground">
@@ -6146,7 +6242,29 @@ export default function AiBizOsHumanUI() {
                         </p>
                       ) : null}
                     </div>
-                  )}
+                  ) : companiesLoading && !companiesPanel ? (
+                    <p className="text-sm text-muted-foreground">Loading companies...</p>
+                  ) : companiesPanel &&
+                    !companiesPanel.companies?.length &&
+                    Number(companiesPanel.companies_total) === 0 &&
+                    Number(workspace?.setup_summary?.companies_collected) > 0 ? (
+                    <div className="space-y-2 text-sm text-muted-foreground">
+                      <p>
+                        Run setup reports{" "}
+                        <span className="font-medium text-foreground">
+                          {workspace.setup_summary.companies_collected}
+                        </span>{" "}
+                        companies in setup metrics, but the{" "}
+                        <span className="font-medium text-foreground">run_companies</span> table is empty for this run.
+                        Try Refresh metrics, reopen this run, or run the one-off legacy migration script if you upgraded
+                        from an older DB.
+                      </p>
+                    </div>
+                  ) : !companiesPanel?.companies?.length ? (
+                    <p className="text-sm text-muted-foreground">
+                      No companies stored for this run yet. They appear after search adds them (or restart the run).
+                    </p>
+                  ) : null}
                 </CardContent>
               </Card>
             ) : null}
@@ -6982,8 +7100,8 @@ export default function AiBizOsHumanUI() {
             selectedRun?.id ? (
               <TrackingView
                 runId={selectedRun.id}
-                runSignatureHtml={selectedRun.sender_signature_html ?? ""}
-                contextJson={selectedRun.context_json ?? {}}
+                runSignatureHtml={trackingStrip?.sender_signature_html ?? ""}
+                contextJson={trackingStrip?.context_json ?? {}}
                 activeTab={mainNavToTrackingTab(mainNav)}
                 singleTabMode
                 onActiveTabChange={(tab) => setMainNav(trackingTabToMainNav(tab))}
@@ -7013,9 +7131,10 @@ export default function AiBizOsHumanUI() {
           </DialogHeader>
           <div className="space-y-3 py-2">
             <p className="text-xs text-muted-foreground">
-              This brief drives company search, contact roles, and the master email for the whole run.
+              Search description and geography drive company discovery; the same context feeds the master email for this
+              run.
               {newRunBaseline
-                ? " Keep the same run name and use Update run for notes, segment, or brief. Change the run name to use Create run (new wave)."
+                ? " Keep the same run name and use Update run for notes, region, or brief. Change the run name to use Create run (new wave)."
                 : null}
             </p>
             <div>
@@ -7040,46 +7159,50 @@ export default function AiBizOsHumanUI() {
             </div>
             <div>
               <div className="mb-1 text-xs text-muted-foreground">
-                Segment <span className="text-destructive">*</span>
+                Region / Country / State <span className="text-destructive">*</span>
               </div>
               <Input
                 value={newRunForm.segment}
                 onChange={(e) => setNewRunForm((f) => ({ ...f, segment: e.target.value }))}
-                placeholder="List label: market, region, or audience"
+                placeholder="Geography for this search (e.g. United States — California)"
                 aria-required
               />
             </div>
             <div>
-              <div className="mb-1 text-xs text-muted-foreground">Default email voice (this run)</div>
+              <div className="mb-1 text-xs text-muted-foreground">Professional profile</div>
               <NativeFilterSelect
                 className="w-full"
-                value={newRunForm.email_style_mode ?? ""}
+                value={newRunForm.email_style_mode ?? "auto"}
                 onValueChange={(v) => setNewRunForm((f) => ({ ...f, email_style_mode: v }))}
-                options={EMAIL_STYLE_OPTIONS}
+                options={PROFESSIONAL_PROFILE_OPTIONS}
               />
               <p className="mt-1 text-xs text-muted-foreground">
-                Used when a contact role does not imply a style. Role hints (e.g. marketing → warm) still take
-                precedence.
+                Target decision-maker profile for outbound tone. <strong>Auto</strong> infers style from each
+                contact&apos;s role when possible.
               </p>
             </div>
             <div>
               <div className="mb-1 text-xs text-muted-foreground">
-                Outreach brief <span className="text-destructive">*</span>
+                Outreach brief (search description) <span className="text-destructive">*</span>
               </div>
               <Textarea
                 value={newRunForm.outreach_brief}
                 onChange={(e) => setNewRunForm((f) => ({ ...f, outreach_brief: e.target.value }))}
                 placeholder={
-                  "Offer:\nTarget:\nRoles:\nGoal:\nTone:\nNotes:"
+                  "Respondent's field of activity:\n\n" +
+                  "Narrowly focused areas of activity:\n\n" +
+                  "Reason for search (licensing, sales, partnership):\n\n" +
+                  "How long has the respondent company been in the market:\n\n" +
+                  "Additional information:\n"
                 }
                 rows={14}
                 className="font-mono text-sm"
                 aria-required
               />
               <p className="mt-1 text-xs text-muted-foreground">
-                Use the labels <strong>Offer</strong>, <strong>Target</strong>, <strong>Roles</strong>,{" "}
-                <strong>Goal</strong>, <strong>Tone</strong>, <strong>Notes</strong> (each line may continue on
-                the next line until the next label). At least Offer or Goal must be filled in.
+                Use the section labels shown in the placeholder (each block may continue on the following lines until
+                the next label). Fill at least one substantive section — typically reason for search and/or field of
+                activity.
               </p>
             </div>
           </div>

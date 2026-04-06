@@ -27,7 +27,13 @@ def _line_label_and_rest(line: str) -> tuple[str | None, str]:
     if not s:
         return None, ""
     lower = s.lower()
+    # Longest prefixes first (search-brief form + legacy Offer/Target/… labels).
     pairs: list[tuple[str, str]] = [
+        ("how long has the respondent company been in the market:", "offer"),
+        ("reason for search (licensing, sales, partnership):", "goal"),
+        ("narrowly focused areas of activity:", "target_roles"),
+        ("respondent's field of activity:", "target_entities"),
+        ("additional information:", "notes"),
         ("target entities:", "target_entities"),
         ("professional notes:", "notes"),
         ("target roles:", "target_roles"),
@@ -90,6 +96,36 @@ def parse_outreach_brief_text(raw: str) -> dict[str, str]:
     return result
 
 
+def format_search_brief_from_inner(inner: dict[str, str]) -> str:
+    """Canonical multi-line outreach brief for company search (maps onto inner context keys)."""
+    tone = coalesce_str(inner.get("tone"))
+    extra = coalesce_str(inner.get("notes"))
+    if tone and tone.lower() != "professional":
+        extra = f"{extra}\n\n(Previous tone: {tone})".strip() if extra else f"(Previous tone: {tone})"
+    return (
+        "Respondent's field of activity:\n"
+        f"{coalesce_str(inner.get('target_entities'))}\n\n"
+        "Narrowly focused areas of activity:\n"
+        f"{coalesce_str(inner.get('target_roles'))}\n\n"
+        "Reason for search (licensing, sales, partnership):\n"
+        f"{coalesce_str(inner.get('goal'))}\n\n"
+        "How long has the respondent company been in the market:\n"
+        f"{coalesce_str(inner.get('offer'))}\n\n"
+        "Additional information:\n"
+        f"{extra}\n"
+    ).strip() + "\n"
+
+
+def outreach_brief_has_minimum_content(inner: dict[str, str]) -> bool:
+    """True if at least one primary search field is filled (legacy Offer/Goal counts)."""
+    return bool(
+        coalesce_str(inner.get("goal"))
+        or coalesce_str(inner.get("target_entities"))
+        or coalesce_str(inner.get("offer"))
+        or coalesce_str(inner.get("target_roles"))
+    )
+
+
 def wrap_context(inner: dict[str, str]) -> dict:
     """DB shape: {\"context\": {...}}."""
     return {"context": {k: coalesce_str(inner.get(k, "")) for k in _CONTEXT_KEYS}}
@@ -123,11 +159,14 @@ def merge_inner_from_legacy_fields(
     return out
 
 
-def get_effective_context(run) -> dict[str, str]:
-    """Normalized inner context (offer, target_entities, …), including legacy rows."""
+def get_outreach_inner_relational_only(run) -> dict[str, str]:
+    """
+    Normalized inner outreach dict from ``run_outreach_context`` + scalar ``runs.input_goal`` only.
+    Never reads ``runs.context_json`` or ``runs.input_json``.
+    """
     oc = getattr(run, "outreach_context", None)
     if oc is not None:
-        inner_oc = {
+        inner = {
             "offer": coalesce_str(oc.offer),
             "target_entities": coalesce_str(oc.target_entities),
             "target_roles": coalesce_str(oc.target_roles),
@@ -135,38 +174,23 @@ def get_effective_context(run) -> dict[str, str]:
             "tone": coalesce_str(oc.tone) or "Professional",
             "notes": coalesce_str(oc.notes),
         }
-        if any(coalesce_str(inner_oc.get(k)) for k in _CONTEXT_KEYS):
-            inner = inner_oc
-        else:
-            inner = {}
     else:
-        inner = {}
-
-    raw_outer = dict(run.context_json or {})
-    if not inner or not any(coalesce_str(inner.get(k)) for k in _CONTEXT_KEYS):
-        ctx_nested = raw_outer.get("context")
-        if isinstance(ctx_nested, dict):
-            inner = {k: coalesce_str(ctx_nested.get(k, "")) for k in _CONTEXT_KEYS}
-
-    if not inner or not any(coalesce_str(inner.get(k)) for k in _CONTEXT_KEYS):
         inner = {
-            "offer": coalesce_str(raw_outer.get("offer") or raw_outer.get("product")),
-            "target_entities": coalesce_str(raw_outer.get("target_entities")),
-            "target_roles": coalesce_str(raw_outer.get("target_roles")),
-            "goal": coalesce_str(raw_outer.get("goal") or raw_outer.get("outreach_goal")),
-            "tone": coalesce_str(raw_outer.get("tone")) or "Professional",
-            "notes": coalesce_str(raw_outer.get("notes") or raw_outer.get("extra_context")),
+            "offer": "",
+            "target_entities": "",
+            "target_roles": "",
+            "goal": coalesce_str(getattr(run, "input_goal", None)),
+            "tone": "Professional",
+            "notes": "",
         }
 
     if not inner.get("goal") and not inner.get("offer"):
-        legacy_goal = coalesce_str(getattr(run, "input_goal", None))
-        if not legacy_goal:
-            legacy_goal = coalesce_str((run.input_json or {}).get("goal"))
-        if legacy_goal:
-            inner["goal"] = legacy_goal
+        g = coalesce_str(getattr(run, "input_goal", None))
+        if g:
+            inner = {**inner, "goal": g}
 
-    if not inner.get("notes"):
-        inner["notes"] = coalesce_str(run.notes)
+    if not coalesce_str(inner.get("notes")):
+        inner = {**inner, "notes": coalesce_str(run.notes)}
 
     return {
         "offer": coalesce_str(inner.get("offer")),
@@ -178,17 +202,26 @@ def get_effective_context(run) -> dict[str, str]:
     }
 
 
+# Backward-compatible name for GET /edit-form route imports.
+get_inner_for_edit_form_relational_only = get_outreach_inner_relational_only
+
+
+def get_effective_context(run) -> dict[str, str]:
+    """Same as :func:`get_outreach_inner_relational_only` — legacy name kept for callers."""
+    return get_outreach_inner_relational_only(run)
+
+
 def build_master_prompt_text(ctx: dict[str, str]) -> str:
     """Single universal master prompt for search + email steps."""
     return (
         "You are an expert in B2B outreach.\n\n"
-        "Context:\n"
-        f"Offer: {ctx['offer'] or '—'}\n"
-        f"Goal: {ctx['goal'] or '—'}\n"
-        f"Target entities: {ctx['target_entities'] or '—'}\n"
-        f"Target roles: {ctx['target_roles'] or '—'}\n"
-        f"Tone: {ctx['tone']}\n"
-        f"Additional context: {ctx['notes'] or '—'}\n\n"
+        "Search / targeting context:\n"
+        f"Respondent's field of activity: {ctx['target_entities'] or '—'}\n"
+        f"Narrowly focused areas of activity: {ctx['target_roles'] or '—'}\n"
+        f"Reason for search (licensing, sales, partnership): {ctx['goal'] or '—'}\n"
+        f"How long has the respondent company been in the market: {ctx['offer'] or '—'}\n"
+        f"Additional information: {ctx['notes'] or '—'}\n"
+        f"(Writing tone hint: {ctx['tone'] or 'Professional'})\n\n"
         "Your tasks will be based ONLY on this context.\n"
         "Do not assume industry (like VOD) unless explicitly stated."
     ).strip()

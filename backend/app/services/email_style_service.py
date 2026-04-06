@@ -1,4 +1,4 @@
-"""Resolve outbound email voice: run.email_style_mode + role heuristics."""
+"""Resolve outbound email voice: run.email_style_mode (professional profile) + role heuristics when Auto."""
 
 from __future__ import annotations
 
@@ -9,6 +9,26 @@ from sqlalchemy.orm import Session
 
 from app.utils.contact_source_payload import effective_contact_source_json
 
+# Stored on runs.email_style_mode (slug). "auto" = infer from contact role.
+VALID_PROFESSIONAL_PROFILES = frozenset(
+    {
+        "auto",
+        "any_top_management",
+        "founder_or_ceo",
+        "cto_or_developer",
+        "cmo_or_marketing",
+        "head_of_licensing",
+        "cfo_or_accountants",
+        "vp_or_other_dm",
+        "any_c_level",
+        "any_mid_management",
+    },
+)
+
+# Legacy UI stored direct/warm/sharp/executive — treat as Auto.
+LEGACY_EMAIL_VOICE_MODES = frozenset({"direct", "warm", "sharp", "executive"})
+
+# LLM style buckets used in prompts (STYLE_INSTRUCTIONS).
 VALID_EMAIL_STYLE_MODES = frozenset({"direct", "warm", "sharp", "executive"})
 
 STYLE_INSTRUCTIONS: dict[str, str] = {
@@ -17,6 +37,35 @@ STYLE_INSTRUCTIONS: dict[str, str] = {
     "sharp": "Voice: crisp, confident, specific; avoid hedging and filler.",
     "executive": "Voice: concise, outcome-oriented, respectful of the reader’s time.",
 }
+
+_PROFILE_TO_STYLE: dict[str, str] = {
+    "auto": "direct",
+    "any_top_management": "executive",
+    "founder_or_ceo": "direct",
+    "cto_or_developer": "direct",
+    "cmo_or_marketing": "warm",
+    "head_of_licensing": "executive",
+    "cfo_or_accountants": "executive",
+    "vp_or_other_dm": "executive",
+    "any_c_level": "executive",
+    "any_mid_management": "warm",
+}
+
+
+def normalize_email_style_mode(raw: str | None) -> str | None:
+    """Return canonical slug for DB, or None. Maps legacy voice modes to auto."""
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    if s in LEGACY_EMAIL_VOICE_MODES:
+        return "auto"
+    if s in VALID_PROFESSIONAL_PROFILES:
+        return s
+    raise ValueError(
+        "Invalid email_style_mode; use a profile slug such as founder_or_ceo, any_top_management, or auto.",
+    )
 
 
 def _role_lower(db: Session, contact: Any) -> str:
@@ -50,14 +99,21 @@ def _infer_style_from_role(role_lower: str) -> str | None:
 
 def resolve_effective_email_style(db: Session, run: Any, contact: Any) -> str:
     """
-    Priority: role heuristic → run.email_style_mode → 'direct'.
+    Priority when run.email_style_mode is a specific profile: profile → style.
+    When auto / legacy / empty: role heuristic → direct.
     """
+    raw = getattr(run, "email_style_mode", None)
+    if isinstance(raw, str) and raw.strip():
+        m = raw.strip().lower()
+        if m in LEGACY_EMAIL_VOICE_MODES:
+            m = "auto"
+        if m in VALID_PROFESSIONAL_PROFILES and m != "auto":
+            st = _PROFILE_TO_STYLE.get(m, "direct")
+            if st in VALID_EMAIL_STYLE_MODES:
+                return st
     inferred = _infer_style_from_role(_role_lower(db, contact))
     if inferred:
         return inferred
-    raw = getattr(run, "email_style_mode", None)
-    if isinstance(raw, str) and raw.strip().lower() in VALID_EMAIL_STYLE_MODES:
-        return raw.strip().lower()
     return "direct"
 
 

@@ -404,7 +404,7 @@ def continue_workflow_after_review(db: Session, run_id: int):
 
     try:
         run = get_run(db, run_id)
-        if not (run.master_email if run else None):
+        if not (list(getattr(run, "master_email_variants", None) or []) if run else []):
             execute_step(db, run_id, "generate_master_email_draft")
         execute_step(db, run_id, "generate_emails")
         run = get_run(db, run_id)

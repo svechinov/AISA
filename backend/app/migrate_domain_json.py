@@ -36,7 +36,7 @@ from app.utils.follow_up_task_payload import persist_follow_up_output, persist_f
 from app.utils.research_task_payload import persist_research_input, persist_research_output
 from app.utils.run_relational_payload import (
     inner_from_context_json_blob,
-    persist_run_context_extras_from_blob,
+    merge_run_context_json_blob_into_kv,
     persist_run_input_from_blob,
     replace_master_email_variants,
     upsert_run_outreach_context_row,
@@ -57,7 +57,7 @@ def migrate_domain_json_to_relational(db: Session) -> None:
         if ctx:
             inner = inner_from_context_json_blob(ctx)
             upsert_run_outreach_context_row(db, run.id, inner)
-            persist_run_context_extras_from_blob(db, run.id, ctx)
+            merge_run_context_json_blob_into_kv(db, run.id, ctx)
             run.context_json = {}
             changed = True
         ij = dict(run.input_json or {})
