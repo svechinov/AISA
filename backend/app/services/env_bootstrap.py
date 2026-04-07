@@ -51,6 +51,19 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE_PATH = BACKEND_ROOT / ".env"
 
 
+def safe_str_path(p: Path) -> str:
+    """Avoid rare OSError from Path.resolve() (symlink loops, permission); never raises."""
+    try:
+        return str(p.resolve(strict=False))
+    except TypeError:
+        try:
+            return str(p.resolve())
+        except OSError:
+            return str(p)
+    except OSError:
+        return str(p)
+
+
 def _repo_dotenv_path() -> Path | None:
     """
     Monorepo-style: ai-biz-os/.env next to ai-biz-os/backend/.
@@ -104,6 +117,30 @@ def cdn_provider_id_from_environ() -> str:
     """CDN_PROVIDER from env, lowercased (may be set without a valid key)."""
     load_env_from_file()
     return os.environ.get("CDN_PROVIDER", "").strip().lower()
+
+
+def r2_upload_ready_from_environ() -> bool:
+    """
+    Cloudflare R2 upload readiness from env only (same rules as ``cdn_upload_service.r2_upload_ready``).
+
+    Used by GET /setup/status so that endpoint never imports ``boto3`` or ``cdn_upload_service`` —
+    a broken boto3 install or heavy import side effects must not block the configuration gate.
+    """
+    load_env_from_file()
+
+    def _e(key: str, default: str = "") -> str:
+        return (os.environ.get(key) or default).strip()
+
+    prov = _e("CDN_PROVIDER").lower()
+    secret = _e("CDN_R2_SECRET_ACCESS_KEY") or _e("CDN_API_KEY")
+    return bool(
+        prov == "cloudflare"
+        and _e("CDN_ACCOUNT_ID")
+        and _e("CDN_R2_BUCKET")
+        and _e("CDN_R2_ACCESS_KEY_ID")
+        and secret
+        and _e("CDN_R2_PUBLIC_BASE_URL")
+    )
 
 
 def ordered_env_candidates() -> list[Path]:
@@ -239,7 +276,7 @@ def build_setup_hints(
 
     if not paths:
         hints.append(
-            f"No .env file on disk inside this process. Expected at: {ENV_FILE_PATH.resolve()} "
+            f"No .env file on disk inside this process. Expected at: {safe_str_path(ENV_FILE_PATH)} "
             f"(that is your backend/.env on the host when using Docker build context ../backend).",
         )
         if _likely_docker_single_dir_layout():
@@ -251,7 +288,7 @@ def build_setup_hints(
         else:
             rp = _repo_dotenv_path()
             if rp is not None:
-                hints.append(f"Or use a repo-root file: {rp.resolve()} (loaded before backend/.env if present).")
+                hints.append(f"Or use a repo-root file: {safe_str_path(rp)} (loaded before backend/.env if present).")
             hints.append(
                 "Optional: set AI_BIZ_OS_DOTENV to an absolute path of a .env file to load first.",
             )
@@ -260,7 +297,7 @@ def build_setup_hints(
         )
     else:
         hints.append(
-            "Loaded: " + " → ".join(str(p.resolve()) for p in paths)
+            "Loaded: " + " → ".join(safe_str_path(p) for p in paths)
             + " (later path wins for duplicate variable names).",
         )
 

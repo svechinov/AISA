@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_, select, union_all
+from sqlalchemy import case, func, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
@@ -13,13 +13,8 @@ from app.models.email_draft import EmailDraft
 from app.models.email_event import EmailEvent
 from app.models.reply_draft import ReplyDraft
 from app.models.email_thread import EmailThread
-from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.repositories.reminder_repo import list_reminders_by_run
 from app.repositories.step_repo import get_step_by_run_and_name
-from app.repositories.email_thread_repo import (
-    bulk_resolve_thread_outbound_draft_ids,
-    list_email_threads_by_run,
-)
 from app.repositories.run_repo import get_run
 from app.services.run_context_service import get_prompt_setup_text, get_sender_signature_html
 from app.setup_milestones import (
@@ -249,51 +244,43 @@ def _live_valid_contact_count(db: Session, run_id: int) -> int:
     return int(n or 0)
 
 
-def _thread_is_bounced_or_dead_mailbox_row(
-    thread: EmailThread,
-    contacts: dict[int, Contact],
-    drafts: dict[int, EmailDraft],
-    eff: int | None,
-) -> bool:
-    """Matches Human UI Threads tab: bounced / dead mailbox from draft + contact.email_health."""
-    contact = contacts.get(thread.contact_id)
-    linked = drafts.get(int(eff)) if eff is not None else None
-
-    if linked is not None:
-        ts = (linked.tracking_status or "").strip().lower()
-        st = (linked.status or "").strip().lower()
-        draft_lifecycle = ts if ts else st
-        if draft_lifecycle == "dead_mailbox":
-            return True
-        if ts == "bounced":
-            return True
-
-    if contact is not None:
-        eh = (contact.email_health or "").strip().lower()
-        if eh == "dead_mailbox":
-            return True
-        if eh == "bounced":
-            return True
-    return False
-
-
 def _active_threads_count_for_performance(db: Session, run_id: int) -> int:
-    """Threads not in Bounced / Dead mailbox buckets (same as TrackingView threadBucketCounts.active)."""
-    threads = list_email_threads_by_run(db, run_id)
-    if not threads:
-        return 0
-    contact_ids = {t.contact_id for t in threads if t.contact_id}
-    contacts: dict[int, Contact] = {}
-    if contact_ids:
-        contacts = {c.id: c for c in db.query(Contact).filter(Contact.id.in_(contact_ids)).all()}
-    drafts_list = list_email_drafts_by_run(db, run_id)
-    drafts = {d.id: d for d in drafts_list}
-    eff_by_tid = bulk_resolve_thread_outbound_draft_ids(db, run_id, threads, contacts, drafts_list)
-    return sum(
-        1
-        for t in threads
-        if not _thread_is_bounced_or_dead_mailbox_row(t, contacts, drafts, eff_by_tid.get(t.id))
+    """Threads excluding bounced/dead — SQL-fast for metrics (no full thread/draft/message scan).
+
+    Approximates TrackingView \"active\": contact ``email_health`` + linked ``draft_id`` draft rows.
+    Threads whose outbound draft is only inferred (null ``draft_id``) may differ from the full UI resolver.
+    """
+    total = int(
+        db.query(func.count()).select_from(EmailThread).filter(EmailThread.run_id == run_id).scalar() or 0
     )
+    if total == 0:
+        return 0
+
+    bad_from_contact = (
+        db.query(EmailThread.id)
+        .join(Contact, Contact.id == EmailThread.contact_id)
+        .filter(EmailThread.run_id == run_id)
+        .filter(Contact.email_health.in_(["bounced", "dead_mailbox"]))
+    )
+    ts_tr = func.trim(EmailDraft.tracking_status)
+    lifecycle = case(
+        (func.length(ts_tr) > 0, func.lower(ts_tr)),
+        else_=func.lower(func.trim(EmailDraft.status)),
+    )
+    bad_from_draft = (
+        db.query(EmailThread.id)
+        .join(EmailDraft, EmailDraft.id == EmailThread.draft_id)
+        .filter(EmailThread.run_id == run_id)
+        .filter(
+            or_(
+                func.lower(ts_tr) == "bounced",
+                lifecycle == "dead_mailbox",
+            )
+        )
+    )
+    bad_subq = bad_from_contact.union(bad_from_draft).subquery()
+    n_bad = int(db.query(func.count()).select_from(bad_subq).scalar() or 0)
+    return max(0, total - n_bad)
 
 
 def _reminder_due_and_active_counts(reminders: list, now: datetime) -> tuple[int, int]:
@@ -489,6 +476,32 @@ def build_run_workspace_lite(db: Session, run) -> dict:
             db, rid, active_threads=active_threads, replies_received=replies_received
         ),
         "hourly_sends_24h": hourly_send_counts_24h_utc(db, rid),
+    }
+
+
+def build_run_workspace_tick(db: Session, run) -> dict:
+    """Minimal poll payload: phase + setup_summary + performance counts only.
+
+    Skips hourly bucket scan, reminder list load, and conversation reminder rollups — use
+    :func:`build_run_workspace_lite` for full dashboard (chart + sidebar conversation counts).
+    """
+    phase = get_run_display_phase_lite(db, run)
+    rid = run.id
+    active_threads = _active_threads_count_for_performance(db, rid)
+    replies_received = int(
+        db.query(func.count())
+        .select_from(EmailEvent)
+        .filter(EmailEvent.run_id == rid, EmailEvent.event_type == "replied")
+        .scalar()
+        or 0
+    )
+    return {
+        "display_phase": phase,
+        "setup_state_message": setup_state_message_from_phase(phase),
+        "setup_summary": get_run_setup_summary(db, rid),
+        "performance": get_run_performance_lite(
+            db, rid, active_threads=active_threads, replies_received=replies_received
+        ),
     }
 
 

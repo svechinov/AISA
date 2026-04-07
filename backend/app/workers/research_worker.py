@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run
 from app.repositories.run_company_repo import list_run_companies_sparse
+from app.services.apollo_service import try_collect_companies_via_apollo
 from app.services.company_website_check import collect_companies_annotate_llm_flags
 from app.services.llm_gateway import generate_json
 from app.services.prompt_builder import build_prompt
@@ -21,6 +22,12 @@ def collect_companies(db: Session, run_id: int, workflow_name: str, step_input: 
     rules = get_effective_rules_from_run(db, run_id, "collect_companies")
     continuation = bool(step_input.get("continuation"))
     task = build_collect_companies_task(run, continuation=continuation)
+
+    apollo_raw = try_collect_companies_via_apollo(
+        db, run_id, run, continuation=continuation
+    )
+    if apollo_raw is not None:
+        return collect_companies_annotate_llm_flags(apollo_raw, run_id=run_id)
 
     data = dict(step_input) if isinstance(step_input, dict) else {}
     raw = list_run_companies_sparse(db, run_id)

@@ -3,7 +3,7 @@
 import os
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
@@ -12,18 +12,10 @@ from app.services.env_bootstrap import (
     LLM_KEY_BY_PROVIDER,
     VALID_LLM,
     bootstrap_env_write_allowed,
-    build_setup_hints,
-    env_write_blocked_reason,
-    cdn_configured_from_environ,
-    cdn_provider_id_from_environ,
-    discover_env_files,
-    llm_configured_from_environ,
-    llm_providers_ready_from_environ,
     load_env_from_file,
     upsert_env_file,
     upsert_env_files_everywhere,
 )
-from app.services.cdn_upload_service import r2_upload_ready
 from app.services.gmail_oauth import (
     GmailOAuthError,
     google_client_configured,
@@ -35,54 +27,6 @@ from app.services.gmail_oauth import (
 )
 
 router = APIRouter(prefix="/setup", tags=["setup"])
-
-
-class SetupStatus(BaseModel):
-    llm_configured: bool
-    cdn_configured: bool
-    allow_env_write: bool
-    env_paths_found: list[str] = []
-    hints: list[str] = []
-    llm_providers_ready: list[str] = Field(
-        default_factory=list,
-        description="LLM provider ids with keys (priority order), e.g. claude, openai.",
-    )
-    cdn_provider: str = Field(
-        "",
-        description="CDN_PROVIDER id when set, e.g. cloudflare (empty if unset).",
-    )
-    cdn_r2_upload_ready: bool = Field(
-        False,
-        description="True when Cloudflare R2 env is complete for POST /assets/upload (PDF etc.).",
-    )
-    gmail_client_configured: bool = Field(
-        False,
-        description="GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET present.",
-    )
-    gmail_refresh_token_set: bool = Field(
-        False,
-        description="GOOGLE_REFRESH_TOKEN present after successful Connect Gmail.",
-    )
-    gmail_send_ready: bool = Field(
-        False,
-        description="True when Gmail client + refresh token are set (sending uses Gmail API).",
-    )
-    gmail_send_as_email: str = Field(
-        "",
-        description="If set in .env (GMAIL_SEND_AS_EMAIL), API uses this From when Gmail allows it.",
-    )
-    email_allow_mock: bool = Field(
-        False,
-        description="When false, outbound send fails if Gmail is not configured (no silent mock).",
-    )
-    gmail_preview_recipient_email: str = Field(
-        "",
-        description="GMAIL_PREVIEW_RECIPIENT_EMAIL if set (legacy/display only; Drafts → Test uses self-send: To = From).",
-    )
-    env_write_blocked_reason: str = Field(
-        "",
-        description="Non-empty when the API will refuse to save GOOGLE_REFRESH_TOKEN / setup keys; empty when writes are allowed.",
-    )
 
 
 @router.get("/gmail-send-as-list")
@@ -120,69 +64,6 @@ def setup_gmail_mailbox() -> dict:
         return {"emailAddress": gmail_profile_email(access)}
     except GmailOAuthError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.get("/status", response_model=SetupStatus)
-def setup_status(response: Response) -> SetupStatus:
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    load_env_from_file()
-    write_block = env_write_blocked_reason()
-    allow = write_block == ""
-    llm_ok = llm_configured_from_environ()
-    cdn_ok = cdn_configured_from_environ()
-    paths = [str(p.resolve()) for p in discover_env_files()]
-    hints = build_setup_hints(llm_ok=llm_ok, cdn_ok=cdn_ok, allow_write=allow)
-    gc = google_client_configured()
-    gr = bool(google_refresh_token_value())
-    if not settings.EMAIL_ALLOW_MOCK and not (gc and gr):
-        hints.append(
-            "Outbound email: EMAIL_ALLOW_MOCK is false — the API will not fake-deliver mail. "
-            "Configure Gmail (gmail_send_ready) or set EMAIL_ALLOW_MOCK=true only for offline dev.",
-        )
-    if gc and not gr:
-        hints.append(
-            "Gmail setup: Client ID/secret are visible to the API, but GOOGLE_REFRESH_TOKEN is missing or empty. "
-            "Confirm the exact name GOOGLE_REFRESH_TOKEN (see backend/.env.example). "
-            "If the token is in ai-biz-os/.env and backend/.env, the later path in “Loaded:” wins for duplicates.",
-        )
-        if not paths:
-            hints.append(
-                "Gmail setup: No .env file paths were found on disk inside this API process (typical in Docker). "
-                "Variables still come from docker-compose env_file / environment at container start only — "
-                "editing backend/.env on the host does not update a running container. Recreate the backend service "
-                "after you change that file, or bind-mount backend/.env to /app/.env (see infra/docker-compose.bind-env.yml).",
-            )
-        else:
-            hints.append(
-                "Gmail setup: If you just pasted GOOGLE_REFRESH_TOKEN into backend/.env and use Docker Compose env_file, "
-                "recreate the backend container so the new variable is injected: "
-                "`docker compose -f infra/docker-compose.yml up -d --force-recreate backend`.",
-            )
-        hints.append(
-            "Gmail setup: Alternative without browser OAuth: from ai-biz-os/backend run "
-            "`python3 scripts/fetch_google_refresh_token.py` (add both redirect URIs in Google Cloud as documented there).",
-        )
-    return SetupStatus(
-        llm_configured=llm_ok,
-        cdn_configured=cdn_ok,
-        allow_env_write=allow,
-        env_write_blocked_reason=write_block,
-        env_paths_found=paths,
-        hints=hints,
-        llm_providers_ready=llm_providers_ready_from_environ(),
-        cdn_provider=cdn_provider_id_from_environ(),
-        cdn_r2_upload_ready=r2_upload_ready(),
-        gmail_client_configured=gc,
-        gmail_refresh_token_set=gr,
-        gmail_send_ready=gc and gr,
-        gmail_send_as_email=(os.environ.get("GMAIL_SEND_AS_EMAIL") or "").strip().strip('"').strip("'"),
-        email_allow_mock=settings.EMAIL_ALLOW_MOCK,
-        gmail_preview_recipient_email=(os.environ.get("GMAIL_PREVIEW_RECIPIENT_EMAIL") or "")
-        .strip()
-        .strip('"')
-        .strip("'"),
-    )
 
 
 class LLMRowIn(BaseModel):

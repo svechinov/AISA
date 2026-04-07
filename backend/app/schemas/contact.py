@@ -74,6 +74,18 @@ def contact_matches_list_search(contact: Contact, q: str | None) -> bool:
     return False
 
 
+def contact_matches_minimal_search(m: object, q: str | None) -> bool:
+    """Same as :func:`contact_matches_list_search` for scalar row objects (e.g. ``ContactMinimal``)."""
+    if not q or not str(q).strip():
+        return True
+    needle = str(q).strip().lower()
+    for attr in ("company", "name", "role", "email", "linkedin"):
+        v = getattr(m, attr, None) or ""
+        if needle in str(v).lower():
+            return True
+    return False
+
+
 def contact_read_for_run_list(contact: Contact) -> ContactRead:
     """
     GET /contacts/run list rows: same shape as ContactRead but **does not** read ``source_json`` /

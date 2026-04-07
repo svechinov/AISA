@@ -15,7 +15,11 @@ from app.services.contact_persistence_service import (
     persist_validated_contacts,
 )
 from app.services.orchestrator import _merge_contacts
-from app.services.run_companies_status_service import _contact_matches_company, _entity_keys
+from app.services.run_companies_status_service import (
+    _contact_matches_company,
+    _entity_keys,
+    recompute_and_persist_contact_statuses_for_run,
+)
 from app.workers.contacts_worker import find_contacts, validate_contacts
 
 _RETRY_LOCK_GUARD = threading.Lock()
@@ -106,6 +110,7 @@ def continue_find_for_pending_companies(db: Session, run_id: int) -> dict:
             commit=True,
         )
         persist_validated_contacts(db, run_id, last_validate, commit=True)
+        recompute_and_persist_contact_statuses_for_run(db, run_id)
         return {
             "contacts_before": len(raw_contacts),
             "contacts_after": len(raw_contacts),
@@ -258,6 +263,7 @@ def _merge_validate_persist_locked(
         except Exception:
             db.rollback()
             raise
+        recompute_and_persist_contact_statuses_for_run(db, run_id)
         return {
             "contacts_before": before,
             "contacts_after": after,
@@ -299,6 +305,7 @@ def _merge_validate_persist_locked(
     )
     persist_validated_contacts(db, run_id, last_validate, commit=True)
 
+    recompute_and_persist_contact_statuses_for_run(db, run_id)
     return {
         "contacts_before": before,
         "contacts_after": after,

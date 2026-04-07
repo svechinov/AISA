@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from app.repositories.contact_repo import ContactMinimal
+
 if TYPE_CHECKING:
     from app.models.contact import Contact
 
@@ -17,6 +19,26 @@ ALL_REVIEW_BUCKETS: tuple[str, ...] = (
     "dead_mailbox",
     "no_email",
 )
+
+
+def review_bucket_for_contact_minimal(m: ContactMinimal) -> str:
+    """Same rules as :func:`review_bucket_for_contact_row` — for scalar-only rows (no JSON)."""
+    em = (m.email or "").strip().lower()
+    has_usable = "@" in em
+    if m.email_health == "dead_mailbox":
+        return "dead_mailbox"
+    if m.email_health == "bounced":
+        return "bounced"
+    if not has_usable:
+        return "no_email"
+    rs = m.review_status or "pending"
+    if rs == "pending":
+        return "pending"
+    if rs == "rejected":
+        return "rejected"
+    if rs in ("approved", "edited"):
+        return "approved"
+    return "no_email"
 
 
 def review_bucket_for_contact_row(c: Contact) -> str:
@@ -43,6 +65,15 @@ def review_counts_from_contacts(contacts: list[Contact]) -> dict[str, int]:
     out = {k: 0 for k in ALL_REVIEW_BUCKETS}
     for c in contacts:
         b = review_bucket_for_contact_row(c)
+        if b in out:
+            out[b] += 1
+    return out
+
+
+def review_counts_from_minimals(minimals: list[ContactMinimal]) -> dict[str, int]:
+    out = {k: 0 for k in ALL_REVIEW_BUCKETS}
+    for m in minimals:
+        b = review_bucket_for_contact_minimal(m)
         if b in out:
             out[b] += 1
     return out

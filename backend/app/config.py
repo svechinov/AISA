@@ -1,3 +1,4 @@
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.services.env_bootstrap import env_files_for_pydantic
@@ -66,6 +67,24 @@ class Settings(BaseSettings):
     COLLECT_COMPANIES_HTTP_CHECK_ENABLED: bool = True
     COLLECT_COMPANIES_HTTP_TIMEOUT_SEC: float = 8.0
     COLLECT_COMPANIES_HTTP_MAX_WORKERS: int = 8
+
+    # Apollo.io — company + people search (optional). Use APOLLO_API_KEY or APOLLO_KEY in .env (merged below).
+    APOLLO_API_KEY: str = ""
+    APOLLO_KEY: str = Field(default="", description="Legacy alias; merged into APOLLO_API_KEY when that is empty.")
+
+    @model_validator(mode="after")
+    def _merge_apollo_key_into_api_key(self) -> "Settings":
+        primary = (self.APOLLO_API_KEY or "").strip()
+        if primary:
+            return self
+        alt = (self.APOLLO_KEY or "").strip()
+        if not alt:
+            return self
+        return self.model_copy(update={"APOLLO_API_KEY": alt})
+    APOLLO_HTTP_TIMEOUT_SEC: float = 45.0
+    APOLLO_MAX_ORG_PAGE_SIZE: int = 50
+    APOLLO_MAX_PEOPLE_PER_COMPANY: int = 8
+    APOLLO_MAX_PEOPLE_TOTAL: int = 120
 
     model_config = SettingsConfigDict(**_model_cfg)
 

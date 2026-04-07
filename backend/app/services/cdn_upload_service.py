@@ -13,7 +13,7 @@ import boto3
 import httpx
 from botocore.config import Config as BotoConfig
 
-from app.services.env_bootstrap import load_env_from_file
+from app.services.env_bootstrap import load_env_from_file, r2_upload_ready_from_environ
 
 
 def _e(key: str, default: str = "") -> str:
@@ -32,16 +32,11 @@ def r2_upload_ready() -> bool:
     """
     Read live env from disk via load_env_from_file — not the process Settings snapshot,
     so edits to backend/.env apply without restarting uvicorn.
+
+    Delegates to ``env_bootstrap.r2_upload_ready_from_environ`` so this module's import
+    of boto3 does not affect GET /setup/status.
     """
-    load_env_from_file()
-    return bool(
-        _prov() == "cloudflare"
-        and _e("CDN_ACCOUNT_ID")
-        and _e("CDN_R2_BUCKET")
-        and _e("CDN_R2_ACCESS_KEY_ID")
-        and _r2_secret()
-        and _e("CDN_R2_PUBLIC_BASE_URL")
-    )
+    return r2_upload_ready_from_environ()
 
 
 def cf_images_upload_ready() -> bool:

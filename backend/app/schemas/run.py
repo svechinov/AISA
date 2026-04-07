@@ -8,7 +8,14 @@ class RunCompanyRow(BaseModel):
     collect_index: int
     name: str
     website: str
-    contact_status: Literal["found", "none", "pending", "no_email", "llm_error"]
+    contact_status: Literal[
+        "found",
+        "none",
+        "pending",
+        "no_email",
+        "llm_error",
+        "unknown",
+    ]
 
 
 class RunCompaniesRead(BaseModel):
@@ -270,3 +277,12 @@ class RunWorkspaceLiteRead(BaseModel):
     performance: dict[str, Any]
     conversations: dict[str, Any]
     hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)
+
+
+class RunWorkspaceTickRead(BaseModel):
+    """Background metrics poll only: phase, setup_summary, performance — no hourly buckets or conversation/reminder rollups."""
+
+    display_phase: str
+    setup_state_message: str
+    setup_summary: dict[str, Any]
+    performance: dict[str, Any]

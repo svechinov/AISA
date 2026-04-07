@@ -973,16 +973,64 @@ def _strip_asset_metadata_json_blob_if_kv() -> None:
     )
 
 
-def _strip_run_company_extra_json_if_kv() -> None:
-    """Clear run_companies.extra_json when entity_json_kv scope run_company_extra is populated."""
-    from app.constants.entity_kv_scope import SCOPE_RUN_COMPANY_EXTRA
+def _ensure_run_company_contact_status_column() -> None:
+    """Add relational ``run_companies.contact_status`` if missing (must run before domain JSON migration)."""
+    insp = inspect(engine)
+    if "run_companies" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_companies")}
+    if "contact_status" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE run_companies ADD COLUMN contact_status VARCHAR(32)"))
 
-    _strip_json_blob_when_kv_populated(
-        SCOPE_RUN_COMPANY_EXTRA,
-        RunCompany,
-        "extra_json",
-        "run_companies: cleared legacy extra_json rows=%s (KV canonical)",
-    )
+
+def _backfill_run_company_contact_status_from_legacy_storage() -> None:
+    """Fill NULL ``contact_status`` from extra_json or entity_kv — never clears other fields."""
+    from app.constants.entity_kv_scope import SCOPE_RUN_COMPANY_EXTRA
+    from app.constants.run_company_contact_status import PERSISTED_CONTACT_STATUSES
+    from app.utils.entity_kv_storage import get_kv_maps_for_entities
+
+    insp = inspect(engine)
+    if "run_companies" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_companies")}
+    if "contact_status" not in columns:
+        return
+    db = SessionLocal()
+    try:
+        pending = (
+            db.query(RunCompany)
+            .filter(RunCompany.contact_status.is_(None))
+            .order_by(RunCompany.id.asc())
+            .all()
+        )
+        if not pending:
+            return
+        ids = [r.id for r in pending]
+        kv_by_id = get_kv_maps_for_entities(db, SCOPE_RUN_COMPANY_EXTRA, ids)
+        touched = 0
+        for r in pending:
+            cs = None
+            ej = dict(r.extra_json or {})
+            v = ej.get("contact_status")
+            if isinstance(v, str) and v in PERSISTED_CONTACT_STATUSES:
+                cs = v
+            if cs is None:
+                kv = kv_by_id.get(r.id) or {}
+                v2 = kv.get("contact_status")
+                if isinstance(v2, str) and v2 in PERSISTED_CONTACT_STATUSES:
+                    cs = v2
+            if cs is not None:
+                r.contact_status = cs
+                db.add(r)
+                touched += 1
+        if touched:
+            db.commit()
+    except Exception:
+        _logger.exception("ensure_schema: run_companies.contact_status backfill failed")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def ensure_schema() -> None:
@@ -1012,14 +1060,15 @@ def ensure_schema() -> None:
     _normalize_reminders_typed_columns()
     # Before clearing runs.context_json into KV: move event_chain into relational tables.
     _backfill_run_event_chain_from_context_json()
+    _ensure_run_company_contact_status_column()
     _run_domain_json_migration()
+    _backfill_run_company_contact_status_from_legacy_storage()
     _strip_template_variables_json_blob_columns()
     _strip_email_drafts_generation_meta_json_blob()
     _backfill_asset_packet_assets_from_json()
     _strip_assets_key_from_asset_packet_json()
     _strip_asset_packet_packet_json_after_kv()
     _strip_asset_metadata_json_blob_if_kv()
-    _strip_run_company_extra_json_if_kv()
     _backfill_draft_attached_assets_from_json()
     _backfill_personalization_json()
     _migrate_steps_trim_contacts_json_blob()

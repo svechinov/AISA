@@ -10,14 +10,24 @@ from typing import Literal, TypedDict
 
 from sqlalchemy.orm import Session
 
-from app.repositories.run_company_repo import list_run_companies_sparse
+from app.models.run_company import RunCompany
+from app.repositories.run_company_repo import (
+    fetch_run_companies_page_for_ui,
+    iter_run_company_table_rows,
+    run_company_has_table_rows,
+    run_company_table_dict_from_row,
+)
 from app.repositories.step_repo import (
+    get_collect_and_find_steps_meta,
     get_find_contacts_for_matching,
-    get_step_id_by_run_and_name,
     get_step_status_by_run_and_name,
 )
+from app.constants.run_company_contact_status import PERSISTED_CONTACT_STATUSES
 
 _log = logging.getLogger(__name__)
+
+# Cap rows read from ``contacts`` when recomputing status (workers / retry — not GET /companies).
+_MAX_CONTACTS_FOR_STATUS_MATCH = 50_000
 
 
 def _norm(s: str) -> str:
@@ -90,10 +100,17 @@ class CompanyStatusRow(TypedDict):
     collect_index: int
     name: str
     website: str
-    contact_status: Literal["found", "none", "pending", "no_email", "llm_error"]
+    contact_status: Literal[
+        "found",
+        "none",
+        "pending",
+        "no_email",
+        "llm_error",
+        "unknown",
+    ]
 
 
-def _one_company_row(
+def _one_company_row_with_contacts(
     i: int,
     co: dict,
     *,
@@ -115,7 +132,7 @@ def _one_company_row(
     has_match = bool(matching)
     has_email = any(_contact_has_usable_email(ct) for ct in matching)
     if has_email:
-        status: Literal["found", "none", "pending", "no_email"] = "found"
+        status: Literal["found", "none", "pending", "no_email", "llm_error", "unknown"] = "found"
     elif has_match and find_completed:
         status = "no_email"
     elif find_completed:
@@ -130,6 +147,91 @@ def _one_company_row(
     }
 
 
+def _one_company_row_lite(
+    i: int,
+    co: dict,
+    *,
+    find_completed: bool,
+) -> CompanyStatusRow:
+    """GET /companies: no contacts query — use persisted ``run_companies.contact_status`` when present."""
+    name = str(co.get("name") or "").strip() or f"Company {i + 1}"
+    website = str(co.get("website") or "").strip()
+    if co.get("llm_hallucination") is True:
+        return {
+            "collect_index": i,
+            "name": name,
+            "website": website,
+            "contact_status": "llm_error",
+        }
+    persisted = co.get("contact_status")
+    if isinstance(persisted, str) and persisted in PERSISTED_CONTACT_STATUSES:
+        return {
+            "collect_index": i,
+            "name": name,
+            "website": website,
+            "contact_status": persisted,  # type: ignore[typeddict-item]
+        }
+    if not find_completed:
+        return {
+            "collect_index": i,
+            "name": name,
+            "website": website,
+            "contact_status": "pending",
+        }
+    return {
+        "collect_index": i,
+        "name": name,
+        "website": website,
+        "contact_status": "unknown",
+    }
+
+
+def _persist_run_company_contact_status(
+    db: Session,
+    run_id: int,
+    collect_index: int,
+    status: str,
+) -> None:
+    if status not in PERSISTED_CONTACT_STATUSES:
+        return
+    r = (
+        db.query(RunCompany)
+        .filter(RunCompany.run_id == run_id, RunCompany.collect_index == collect_index)
+        .first()
+    )
+    if not r:
+        return
+    r.contact_status = status
+    db.add(r)
+
+
+def recompute_and_persist_contact_statuses_for_run(db: Session, run_id: int) -> None:
+    """
+    Loads contacts once, computes per-row status, persists into ``run_companies.contact_status``.
+
+    Call after find/retry/continue paths have written the ``contacts`` table — never from GET /companies.
+    """
+    find_status = get_step_status_by_run_and_name(db, run_id, "find_contacts")
+    find_completed = find_status == "completed"
+    raw_contacts, _tag = get_find_contacts_for_matching(
+        db,
+        run_id,
+        limit=_MAX_CONTACTS_FOR_STATUS_MATCH,
+    )
+    key_index = _contact_key_index(raw_contacts)
+    for collect_index, co in iter_run_company_table_rows(db, run_id):
+        co_clean = {k: v for k, v in co.items() if k != "contact_status"}
+        row = _one_company_row_with_contacts(
+            collect_index,
+            co_clean,
+            raw_contacts=raw_contacts,
+            key_index=key_index,
+            find_completed=find_completed,
+        )
+        _persist_run_company_contact_status(db, run_id, collect_index, row["contact_status"])
+    db.commit()
+
+
 def get_run_companies_with_status(
     db: Session,
     run_id: int,
@@ -139,39 +241,81 @@ def get_run_companies_with_status(
     q: str | None = None,
 ) -> dict:
     """
-    contact_status:
-    - llm_error: collect row marked llm_hallucination (invalid/unreachable website) — no contact search
-    - found: at least one matching contact has a usable email
-    - no_email: find completed; matching contacts exist but none have an email (UI: «Not available»)
-    - none: find_contacts step completed and no matching contact
-    - pending: find not finished yet (or not started), so we may still search
+    Human UI companies table.
+
+    Does **not** query the ``contacts`` table. Row-level ``contact_status`` comes from the
+    ``run_companies.contact_status`` column when set by ``recompute_and_persist_contact_statuses_for_run``
+    (after find/retry). Otherwise: ``llm_error``, ``pending`` (find not completed), or ``unknown`` (find
+    completed but status not synced yet).
     """
     t_all0 = time.perf_counter()
     t_db0 = time.perf_counter()
-    collect_step_id = get_step_id_by_run_and_name(db, run_id, "collect_companies")
-    find_step_id = get_step_id_by_run_and_name(db, run_id, "find_contacts")
-    collect_status = get_step_status_by_run_and_name(db, run_id, "collect_companies")
-    find_status = get_step_status_by_run_and_name(db, run_id, "find_contacts")
-    raw_contacts, contacts_load_tag = get_find_contacts_for_matching(db, run_id)
+    meta = get_collect_and_find_steps_meta(db, run_id)
+    collect_step_id = meta.get("collect_step_id")
+    find_step_id = meta.get("find_step_id")
+    collect_status = meta.get("collect_status")
+    find_status = meta.get("find_status")
     db_steps_ms = (time.perf_counter() - t_db0) * 1000
 
-    raw_companies = list_run_companies_sparse(db, run_id)
-    if not isinstance(raw_companies, list):
-        raw_companies = []
-
     find_completed = find_status == "completed"
+    start = max(0, offset)
+
+    # Table-backed runs: LIMIT/OFFSET in SQL — do not load every company row then slice in Python.
+    if run_company_has_table_rows(db, run_id):
+        t_build0 = time.perf_counter()
+        rows_orm, total = fetch_run_companies_page_for_ui(
+            db, run_id, limit=limit, offset=offset, q=q
+        )
+        page = [
+            _one_company_row_lite(
+                r.collect_index,
+                run_company_table_dict_from_row(r),
+                find_completed=find_completed,
+            )
+            for r in rows_orm
+        ]
+        build_rows_ms = (time.perf_counter() - t_build0) * 1000
+        filter_and_page_ms = 0.0
+        total_ms = (time.perf_counter() - t_all0) * 1000
+        _log_method = _log.info if total_ms >= 500.0 else _log.debug
+        _log_method(
+            "run_companies rid=%s limit=%s offset=%s q=%r fast_path=table "
+            "db_steps_ms=%.2f contacts_load=none collect_step_id=%s find_step_id=%s collect_status=%s find_status=%s "
+            "table_total=%s page_len=%s build_rows_ms=%.2f filter_page_ms=%.2f total_ms=%.2f",
+            run_id,
+            limit,
+            offset,
+            q,
+            db_steps_ms,
+            collect_step_id,
+            find_step_id,
+            collect_status,
+            find_status,
+            total,
+            len(page),
+            build_rows_ms,
+            filter_and_page_ms,
+            total_ms,
+        )
+        return {
+            "companies": page,
+            "companies_total": total,
+            "limit": limit,
+            "offset": start,
+            "collect_step_status": collect_status,
+            "find_step_status": find_status,
+        }
+
+    pairs = list(iter_run_company_table_rows(db, run_id))
 
     t_build0 = time.perf_counter()
-    key_index = _contact_key_index(raw_contacts)
     rows: list[CompanyStatusRow] = []
     page: list[CompanyStatusRow] = []
 
     if q and q.strip():
         nq = q.strip().lower()
-        for i, co in enumerate(raw_companies):
-            if not isinstance(co, dict):
-                continue
-            rows.append(_one_company_row(i, co, raw_contacts=raw_contacts, key_index=key_index, find_completed=find_completed))
+        for collect_index, co in pairs:
+            rows.append(_one_company_row_lite(collect_index, co, find_completed=find_completed))
         filtered = [
             r
             for r in rows
@@ -184,20 +328,15 @@ def get_run_companies_with_status(
         else:
             page = filtered[start:]
     else:
-        dict_indices = [i for i, co in enumerate(raw_companies) if isinstance(co, dict)]
-        total = len(dict_indices)
+        total = len(pairs)
         start = max(0, offset)
         if limit is None:
             for pos in range(start, total):
-                i = dict_indices[pos]
-                co = raw_companies[i]
-                assert isinstance(co, dict)
+                collect_index, co = pairs[pos]
                 rows.append(
-                    _one_company_row(
-                        i,
+                    _one_company_row_lite(
+                        collect_index,
                         co,
-                        raw_contacts=raw_contacts,
-                        key_index=key_index,
                         find_completed=find_completed,
                     ),
                 )
@@ -205,15 +344,11 @@ def get_run_companies_with_status(
         else:
             lim = max(1, limit)
             for pos in range(start, min(start + lim, total)):
-                i = dict_indices[pos]
-                co = raw_companies[i]
-                assert isinstance(co, dict)
+                collect_index, co = pairs[pos]
                 page.append(
-                    _one_company_row(
-                        i,
+                    _one_company_row_lite(
+                        collect_index,
                         co,
-                        raw_contacts=raw_contacts,
-                        key_index=key_index,
                         find_completed=find_completed,
                     ),
                 )
@@ -224,10 +359,11 @@ def get_run_companies_with_status(
     filter_and_page_ms = (time.perf_counter() - t_filter0) * 1000
     total_ms = (time.perf_counter() - t_all0) * 1000
 
-    _log.info(
+    _log_method = _log.info if total_ms >= 500.0 else _log.debug
+    _log_method(
         "run_companies rid=%s limit=%s offset=%s q=%r "
-        "db_steps_ms=%.2f contacts_load=%s collect_step_id=%s find_step_id=%s collect_status=%s find_status=%s "
-        "raw_companies_len=%s raw_contacts_len=%s built_rows_count=%s page_len=%s "
+        "db_steps_ms=%.2f contacts_load=none collect_step_id=%s find_step_id=%s collect_status=%s find_status=%s "
+        "raw_companies_len=%s raw_contacts_len=0 built_rows_count=%s page_len=%s "
         "build_rows_ms=%.2f filter_page_ms=%.2f "
         "companies_total=%s total_ms=%.2f",
         run_id,
@@ -235,13 +371,11 @@ def get_run_companies_with_status(
         offset,
         q,
         db_steps_ms,
-        contacts_load_tag,
         collect_step_id,
         find_step_id,
         collect_status,
         find_status,
-        len(raw_companies) if isinstance(raw_companies, list) else 0,
-        len(raw_contacts) if isinstance(raw_contacts, list) else 0,
+        len(pairs),
         len(rows) if q and q.strip() else len(page),
         len(page),
         build_rows_ms,

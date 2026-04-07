@@ -1,5 +1,7 @@
 from datetime import datetime
+from typing import NamedTuple
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, defer
 
 from app.models.contact import Contact
@@ -49,6 +51,151 @@ def create_contact(
 
 
 _REVIEW_RANK = {"pending": 0, "rejected": 1, "approved": 2, "edited": 2}
+
+
+class ContactMinimal(NamedTuple):
+    """Scalar columns only — no JSON blobs. Used for GET /contacts/run dedupe + paging without loading full ORM rows."""
+
+    id: int
+    run_id: int
+    company: str | None
+    website: str | None
+    name: str | None
+    role: str | None
+    email: str | None
+    linkedin: str | None
+    status: str
+    confidence: str | None
+    review_status: str
+    review_notes: str | None
+    reviewed_at: datetime | None
+    email_health: str
+    last_contact_event_at: datetime | None
+    gmail_history_status: str | None
+    gmail_history_checked_at: datetime | None
+    gmail_inbox_imported_at: datetime | None
+    created_at: datetime
+
+
+def _load_contact_minimals_for_run(db: Session, run_id: int) -> list[ContactMinimal]:
+    """Single round-trip; does not read source_json / personalization_json."""
+    stmt = (
+        select(
+            Contact.id,
+            Contact.run_id,
+            Contact.company,
+            Contact.website,
+            Contact.name,
+            Contact.role,
+            Contact.email,
+            Contact.linkedin,
+            Contact.status,
+            Contact.confidence,
+            Contact.review_status,
+            Contact.review_notes,
+            Contact.reviewed_at,
+            Contact.email_health,
+            Contact.last_contact_event_at,
+            Contact.gmail_history_status,
+            Contact.gmail_history_checked_at,
+            Contact.gmail_inbox_imported_at,
+            Contact.created_at,
+        )
+        .where(Contact.run_id == run_id)
+        .order_by(Contact.id.asc())
+    )
+    return [ContactMinimal(*r) for r in db.execute(stmt).all()]
+
+
+def _dedupe_contact_minimals(
+    rows: list[ContactMinimal],
+    draft_contact_ids: set[int],
+) -> list[ContactMinimal]:
+    """Same semantics as list_contacts_by_run (email collapse + no-email identity), on minimal rows."""
+    if not rows:
+        return []
+
+    no_email_groups: dict[str, list[ContactMinimal]] = {}
+    no_email_fallback: list[ContactMinimal] = []
+    by_email: dict[str, list[ContactMinimal]] = {}
+    for c in rows:
+        em = (c.email or "").strip().lower()
+        if not em or "@" not in em:
+            ik = contact_identity_key_from_row(
+                name=c.name,
+                company=c.company,
+                website=c.website,
+            )
+            if ik:
+                no_email_groups.setdefault(ik, []).append(c)
+            else:
+                no_email_fallback.append(c)
+            continue
+        by_email.setdefault(em, []).append(c)
+
+    identities_with_email: set[str] = set()
+    for group in by_email.values():
+        for c in group:
+            ik = contact_identity_key_from_row(
+                name=c.name,
+                company=c.company,
+                website=c.website,
+            )
+            if ik:
+                identities_with_email.add(ik)
+
+    def pick_canonical(group: list[ContactMinimal]) -> ContactMinimal:
+        if len(group) == 1:
+            return group[0]
+        with_draft = [c for c in group if c.id in draft_contact_ids]
+        if with_draft:
+            return min(with_draft, key=lambda c: c.id)
+        best = group[0]
+        best_r = _REVIEW_RANK.get(best.review_status or "pending", 0)
+        for c in group[1:]:
+            cr = _REVIEW_RANK.get(c.review_status or "pending", 0)
+            if cr > best_r or (cr == best_r and c.id < best.id):
+                best, best_r = c, cr
+        return best
+
+    out: list[ContactMinimal] = list(no_email_fallback)
+    for ik, group in no_email_groups.items():
+        if ik in identities_with_email:
+            continue
+        out.append(pick_canonical(group))
+    for group in by_email.values():
+        out.append(pick_canonical(group))
+    out.sort(key=lambda c: c.id)
+    return out
+
+
+def dedupe_contact_minimals_for_run(db: Session, run_id: int) -> list[ContactMinimal]:
+    """Deduped visible rows for a run — scalar load only; no JSON columns."""
+    rows = _load_contact_minimals_for_run(db, run_id)
+    if not rows:
+        return []
+    ids = [c.id for c in rows]
+    draft_contact_ids = {
+        r[0]
+        for r in db.query(EmailDraft.contact_id)
+        .filter(EmailDraft.contact_id.in_(ids))
+        .distinct()
+        .all()
+    }
+    return _dedupe_contact_minimals(rows, draft_contact_ids)
+
+
+def hydrate_contacts_for_list_read(db: Session, ordered_ids: list[int]) -> list[Contact]:
+    """Load ORM rows (JSON deferred) for ContactRead in ``ordered_ids`` order."""
+    if not ordered_ids:
+        return []
+    q = (
+        db.query(Contact)
+        .options(defer(Contact.source_json), defer(Contact.personalization_json))
+        .filter(Contact.id.in_(ordered_ids))
+    )
+    by_id = {c.id: c for c in q.all()}
+    return [by_id[i] for i in ordered_ids if i in by_id]
 
 
 def list_contacts_by_run(db: Session, run_id: int, *, load_json: bool = True) -> list[Contact]:

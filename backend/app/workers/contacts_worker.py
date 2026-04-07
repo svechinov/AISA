@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run
 from app.repositories.run_company_repo import list_run_companies_sparse
+from app.services.apollo_service import try_find_contacts_via_apollo
 from app.services.contact_persistence_service import contacts_raw_for_pipeline_dicts
 from app.services.llm_gateway import generate_json
 from app.utils.contact_identity import contact_identity_key_from_dict
@@ -17,6 +18,10 @@ def find_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict
 
     rules = get_effective_rules_from_run(db, run_id, "find_contacts")
     task = build_find_contacts_task(run)
+
+    apollo_out = try_find_contacts_via_apollo(db, run_id, run, step_input)
+    if apollo_out is not None:
+        return apollo_out
 
     companies = step_input.get("companies") if isinstance(step_input, dict) else None
     if not isinstance(companies, list):

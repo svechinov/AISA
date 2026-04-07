@@ -75,6 +75,10 @@ def absorb_legacy_kv_into_scope(
         return {}
     replace_kv_dict(db, scope, entity_id, leg)
     clear_legacy()
+    # Persist migration: GET handlers use get_db() without auto-commit; rollback would
+    # re-run this work on every request and can stall the client until timeout.
+    db.flush()
+    db.commit()
     return leg
 
 

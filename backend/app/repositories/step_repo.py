@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -7,6 +8,37 @@ from app.constants.entity_kv_scope import SCOPE_STEP_INPUT, SCOPE_STEP_OUTPUT
 from app.models.entity_json_kv import EntityJsonKV
 from app.models.step import Step
 from app.utils.step_payload import persist_step_input, persist_step_output
+
+
+def get_collect_and_find_steps_meta(db: Session, run_id: int) -> dict[str, Any]:
+    """One round-trip: ids + statuses for collect_companies and find_contacts (Human UI GET /runs/:id/companies)."""
+    rows = (
+        db.query(Step.id, Step.step_name, Step.status)
+        .filter(
+            Step.run_id == run_id,
+            Step.step_name.in_(("collect_companies", "find_contacts")),
+        )
+        .order_by(Step.id.asc())
+        .all()
+    )
+    out: dict[str, Any] = {
+        "collect_step_id": None,
+        "find_step_id": None,
+        "collect_status": None,
+        "find_status": None,
+    }
+    seen: set[str] = set()
+    for sid, name, status in rows:
+        if name in seen:
+            continue
+        seen.add(name)
+        if name == "collect_companies":
+            out["collect_step_id"] = sid
+            out["collect_status"] = status
+        elif name == "find_contacts":
+            out["find_step_id"] = sid
+            out["find_status"] = status
+    return out
 
 
 def get_step_status_by_run_and_name(db: Session, run_id: int, step_name: str) -> str | None:
@@ -27,20 +59,28 @@ def _contact_lite_dict(ct: dict) -> dict:
     return {"name": ct.get("name"), "website": ct.get("website"), "email": ct.get("email")}
 
 
-def get_find_contacts_for_matching(db: Session, run_id: int) -> tuple[list[dict], str]:
+def get_find_contacts_for_matching(
+    db: Session,
+    run_id: int,
+    *,
+    limit: int | None = None,
+) -> tuple[list[dict], str]:
     """Contacts as name/website/email only — canonical ``contacts`` table (not step JSON)."""
     from app.models.contact import Contact
 
-    rows = (
+    q = (
         db.query(Contact.name, Contact.website, Contact.email)
         .filter(Contact.run_id == run_id)
         .order_by(Contact.id.asc())
-        .all()
     )
+    if limit is not None:
+        q = q.limit(max(1, int(limit)))
+    rows = q.all()
     out: list[dict] = []
     for name, website, email in rows:
         out.append(_contact_lite_dict({"name": name, "website": website, "email": email}))
-    return out, "contacts_table"
+    tag = "contacts_table" if limit is None else f"contacts_table_limit_{limit}"
+    return out, tag
 
 
 def create_step(

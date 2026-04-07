@@ -115,7 +115,30 @@ export default function SetupRequiredGate({ children }) {
         },
         SETUP_STATUS_TIMEOUT_MS,
       );
-      if (!res.ok) throw new Error(`Status ${res.status}`);
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const j = await res.json();
+          if (j?.error_message) {
+            detail = String(j.error_message);
+            if (j?.error_type) detail = `${j.error_type}: ${detail}`;
+          } else if (j?.detail != null) {
+            detail =
+              typeof j.detail === "string"
+                ? j.detail
+                : Array.isArray(j.detail)
+                  ? JSON.stringify(j.detail)
+                  : JSON.stringify(j.detail, null, 2);
+          } else if (j && typeof j === "object") {
+            detail = JSON.stringify(j, null, 2);
+          }
+        } catch {
+          /* ignore */
+        }
+        throw new Error(
+          detail ? `Status ${res.status} — ${detail}` : `Status ${res.status}`,
+        );
+      }
       setStatus(await res.json());
     } catch (e) {
       const name = e?.name;

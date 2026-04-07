@@ -3,7 +3,9 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
 from app.repositories.contact_repo import (
+    dedupe_contact_minimals_for_run,
     get_contact,
+    hydrate_contacts_for_list_read,
     list_contacts_by_run,
     update_contact_fields,
     update_contact_review,
@@ -16,9 +18,14 @@ from app.schemas.contact import (
     ContactRunBucketResponse,
     PaginatedContactsRunResponse,
     contact_matches_list_search,
+    contact_matches_minimal_search,
     contact_read_for_run_list,
 )
-from app.services.contact_review_bucket import ALL_REVIEW_BUCKETS, filter_contacts_by_review_bucket, review_counts_from_contacts
+from app.services.contact_review_bucket import (
+    ALL_REVIEW_BUCKETS,
+    review_bucket_for_contact_minimal,
+    review_counts_from_minimals,
+)
 from app.schemas.email_draft import EmailDraftRead, email_draft_to_read
 from app.workers.email_worker import (
     ensure_outreach_draft_for_contact,
@@ -47,8 +54,8 @@ def list_contacts_for_run(
     run_id: int,
     review_bucket: str | None = Query(
         None,
-        description="If set (pending|approved|…|no_email), response is {review_counts, contacts} for that tab only; "
-        "omit for full list (TrackingView, scripts). DB still loads the full run once for dedupe + counts.",
+        description="If set (pending|approved|…|no_email), response is {review_counts, contacts} for that tab only. "
+        "Scalar columns only for dedupe + counts; full ORM rows are loaded for the returned page only.",
     ),
     limit: int | None = Query(
         None,
@@ -69,9 +76,17 @@ def list_contacts_for_run(
 
     With `review_bucket`: JSON object with `review_counts` for all tabs and `contacts` for the
     requested tab. When `limit` is set, `contacts` is a page and `total` is the filtered count.
+
+    When `limit` or `review_bucket` is set: dedupe uses scalar columns only; ``Contact`` rows (JSON
+    deferred) are hydrated only for the returned slice — not for every contact in the run.
     """
-    rows = list_contacts_by_run(db, run_id, load_json=False)
-    counts_dict = review_counts_from_contacts(rows)
+    # Legacy: raw JSON array, no query params — same behavior as before (full deduped list).
+    if limit is None and review_bucket is None:
+        rows = list_contacts_by_run(db, run_id, load_json=False)
+        filtered = [c for c in rows if contact_matches_list_search(c, q)]
+        return [contact_read_for_run_list(c) for c in filtered]
+
+    minimals = dedupe_contact_minimals_for_run(db, run_id)
 
     if review_bucket is not None:
         if review_bucket not in ALL_REVIEW_BUCKETS:
@@ -79,35 +94,39 @@ def list_contacts_for_run(
                 status_code=400,
                 detail=f"Invalid review_bucket. Use one of: {', '.join(ALL_REVIEW_BUCKETS)}",
             )
-        filtered = filter_contacts_by_review_bucket(rows, review_bucket)
-        filtered = [c for c in filtered if contact_matches_list_search(c, q)]
-        total_f = len(filtered)
+        counts_dict = review_counts_from_minimals(minimals)
+        filtered_m = [
+            m
+            for m in minimals
+            if review_bucket_for_contact_minimal(m) == review_bucket and contact_matches_minimal_search(m, q)
+        ]
+        total_f = len(filtered_m)
         off = max(0, offset)
         if limit is None:
-            page = filtered
+            page_m = filtered_m
             lim = total_f
             off_out = 0
         else:
             lim = limit
-            page = filtered[off : off + limit]
+            page_m = filtered_m[off : off + limit]
             off_out = off
+        hydrated = hydrate_contacts_for_list_read(db, [m.id for m in page_m])
         return ContactRunBucketResponse(
             review_counts=ContactReviewCountsRead(**counts_dict),
-            contacts=[contact_read_for_run_list(c) for c in page],
+            contacts=[contact_read_for_run_list(c) for c in hydrated],
             total=total_f,
             limit=lim,
             offset=off_out,
         )
 
-    filtered = [c for c in rows if contact_matches_list_search(c, q)]
-    total_f = len(filtered)
-    if limit is None:
-        return [contact_read_for_run_list(c) for c in filtered]
-
+    assert limit is not None
+    filtered_m = [m for m in minimals if contact_matches_minimal_search(m, q)]
+    total_f = len(filtered_m)
     off = max(0, offset)
-    page = filtered[off : off + limit]
+    page_m = filtered_m[off : off + limit]
+    hydrated = hydrate_contacts_for_list_read(db, [m.id for m in page_m])
     return PaginatedContactsRunResponse(
-        items=[contact_read_for_run_list(c) for c in page],
+        items=[contact_read_for_run_list(c) for c in hydrated],
         total=total_f,
         limit=limit,
         offset=off,

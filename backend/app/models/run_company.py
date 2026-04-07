@@ -24,6 +24,7 @@ class RunCompany(Base):
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_hallucination: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    contact_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     extra_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 

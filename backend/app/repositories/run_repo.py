@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, defer, selectinload
 
 from app.models.run import Run
@@ -62,6 +63,28 @@ def get_run(db: Session, run_id: int) -> Run | None:
             defer(Run.master_email),
         )
         .filter(Run.id == run_id)
+        .first()
+    )
+
+
+def run_exists(db: Session, run_id: int) -> bool:
+    """Cheap existence check — no relation loads (use for routes that only need 404 vs ok)."""
+    return db.execute(select(Run.id).where(Run.id == run_id)).scalar_one_or_none() is not None
+
+
+def get_run_for_workspace_lite(db: Session, run_id: int) -> Run | None:
+    """Single ``runs`` row, no selectinload — for GET /workspace-lite and metrics polling."""
+    return (
+        db.query(Run)
+        .filter(Run.id == run_id)
+        .options(
+            defer(Run.context_json),
+            defer(Run.input_json),
+            defer(Run.master_email),
+            defer(Run.master_prompt),
+            defer(Run.master_email_body),
+            defer(Run.sender_signature_html),
+        )
         .first()
     )
 

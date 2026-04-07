@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run, update_run_status
 from app.repositories.run_company_repo import list_run_companies_sparse, sync_run_companies_from_dicts
+from app.services.run_companies_status_service import recompute_and_persist_contact_statuses_for_run
 from app.repositories.step_repo import (
     create_step,
     get_step_by_run_and_name,
@@ -365,6 +366,9 @@ def execute_step(db: Session, run_id: int, step_name: str):
                 "invalid_count": len(output.get("invalid_contacts") or []),
             }
         mark_step_completed(db, step, output)
+
+        if step_name == "find_contacts":
+            recompute_and_persist_contact_statuses_for_run(db, run_id)
 
         if step_name == "generate_emails":
             persist_generated_emails(db, run_id, output)

@@ -43,6 +43,7 @@ from app.utils.run_relational_payload import (
 )
 from app.utils.step_payload import persist_step_input, persist_step_output
 from app.utils.template_variables_io import replace_template_variables_from_dict
+from app.constants.run_company_contact_status import PERSISTED_CONTACT_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -141,12 +142,27 @@ def migrate_domain_json_to_relational(db: Session) -> None:
             replace_kv_dict(db, SCOPE_ASSET_PACKET, p.id, clean if clean else None)
             touched["packets"] += 1
     for rc in db.query(RunCompany).order_by(RunCompany.id.asc()).all():
-        ej = dict(rc.extra_json or {})
+        orig = dict(rc.extra_json or {})
+        ej = dict(orig)
+        cs_raw = ej.pop("contact_status", None)
+        if isinstance(cs_raw, str) and cs_raw in PERSISTED_CONTACT_STATUSES and rc.contact_status is None:
+            rc.contact_status = cs_raw
+            db.add(rc)
         if ej and not get_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, rc.id):
             replace_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, rc.id, ej)
             rc.extra_json = {}
             db.add(rc)
             touched["run_companies"] += 1
+        elif orig and not ej:
+            rc.extra_json = {}
+            db.add(rc)
+            touched["run_companies"] += 1
+        if "contact_status" in dict(rc.extra_json or {}):
+            nx = dict(rc.extra_json or {})
+            if nx.pop("contact_status", None) is not None:
+                rc.extra_json = nx
+                db.add(rc)
+                touched["run_companies"] += 1
 
     for ft in db.query(FollowUpTask).order_by(FollowUpTask.id.asc()).all():
         if not get_kv_dict(db, SCOPE_FOLLOW_UP_SOURCE, ft.id):

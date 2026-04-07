@@ -8,9 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.api.setup_gate import router as setup_gate_router
 from app.config import settings
 from app.db import SessionLocal
-from app.services.gmail_oauth import google_client_configured, google_refresh_token_value
 
 _log = logging.getLogger(__name__)
 
@@ -24,17 +24,33 @@ class RoutesLoadingMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if path in ("/openapi.json", "/favicon.ico"):
             return await call_next(request)
+        # /setup is registered synchronously below; do not block it until the heavy async route import finishes.
+        if path.startswith("/setup"):
+            return await call_next(request)
         rt = getattr(request.app.state, "routes_task", None)
-        if rt is not None and not rt.done():
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "API routes are still loading; retry shortly."},
-                headers={"Retry-After": "1"},
-            )
+        if rt is not None:
+            if not rt.done():
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "API routes are still loading; retry shortly."},
+                    headers={"Retry-After": "1"},
+                )
+            rex = rt.exception()
+            if rex is not None:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "routes_failed",
+                        "error_type": type(rex).__name__,
+                        "error_message": str(rex)[:2000],
+                    },
+                    headers={"Retry-After": "3"},
+                )
         return await call_next(request)
 
 
 async def _gmail_background_sync_loop(interval_sec: int) -> None:
+    from app.services.gmail_oauth import google_client_configured, google_refresh_token_value
     from app.services.gmail_tracking_sync_service import sync_gmail_all_open_runs
 
     await asyncio.sleep(8.0)
@@ -42,13 +58,18 @@ async def _gmail_background_sync_loop(interval_sec: int) -> None:
         if not google_client_configured() or not google_refresh_token_value():
             await asyncio.sleep(float(interval_sec))
             continue
-        db = SessionLocal()
-        try:
-            sync_gmail_all_open_runs(db)
-        except Exception:
-            _log.exception("Background Gmail sync failed")
-        finally:
-            db.close()
+
+        def _sync_once() -> None:
+            db = SessionLocal()
+            try:
+                sync_gmail_all_open_runs(db)
+            except Exception:
+                _log.exception("Background Gmail sync failed")
+            finally:
+                db.close()
+
+        # Must not block the asyncio loop — long Gmail I/O would stall every HTTP handler (e.g. GET /runs/:id/companies).
+        await asyncio.to_thread(_sync_once)
         await asyncio.sleep(float(interval_sec))
 
 
@@ -101,6 +122,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+
+# Lightweight GET /setup/status only — no boto3 at import time (see app.api.setup_gate).
+app.include_router(setup_gate_router)
 
 app.add_middleware(
     CORSMiddleware,

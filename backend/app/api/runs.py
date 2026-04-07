@@ -13,7 +13,9 @@ from app.repositories.run_repo import (
     create_run,
     get_run,
     get_run_for_edit_form,
+    get_run_for_workspace_lite,
     list_runs_by_project,
+    run_exists,
     update_run_email_style_mode,
     update_run_human_ui_preferences,
     update_run_outreach_fields,
@@ -52,6 +54,7 @@ from app.schemas.run import (
     RunTrackingStripRead,
     RunWorkspaceLiteRead,
     RunWorkspaceRead,
+    RunWorkspaceTickRead,
     run_read_from_orm,
 )
 from app.services.orchestrator import continue_workflow_after_review, run_workflow
@@ -66,6 +69,7 @@ from app.services.retry_company_find_service import (
 from app.services.run_companies_status_service import get_run_companies_with_status
 from app.services.run_display_service import (
     build_run_workspace_lite,
+    build_run_workspace_tick,
     enrich_run_for_card,
     get_conversations_snapshot,
     get_prompt_setup_editor_initial_text_for_ui,
@@ -162,10 +166,19 @@ def get_run_tracking_strip_route(run_id: int, db: Session = Depends(get_db)):
 @router.get("/{run_id}/workspace-lite", response_model=RunWorkspaceLiteRead)
 def run_workspace_lite_route(run_id: int, db: Session = Depends(get_db)):
     """Light dashboard refresh: phase, setup_summary counts, performance, conversations, hourly chart (no run row / contacts / drafts)."""
-    run = get_run(db, run_id)
+    run = get_run_for_workspace_lite(db, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return RunWorkspaceLiteRead(**build_run_workspace_lite(db, run))
+
+
+@router.get("/{run_id}/workspace-tick", response_model=RunWorkspaceTickRead)
+def run_workspace_tick_route(run_id: int, db: Session = Depends(get_db)):
+    """Metrics poll: phase + setup_summary + performance only — skips hourly scan and conversation/reminder aggregates."""
+    run = get_run_for_workspace_lite(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return RunWorkspaceTickRead(**build_run_workspace_tick(db, run))
 
 
 @router.get("/{run_id}/companies", response_model=RunCompaniesRead)
@@ -181,16 +194,29 @@ def run_companies_route(
     q: str | None = Query(None, description="Filter companies by name or website (substring, case-insensitive)."),
     db: Session = Depends(get_db),
 ):
+    """
+    Companies table for Human UI.
+
+    Does **not** query the ``contacts`` table and does **not** call ``get_kv_maps_for_entities`` for
+    ``run_companies`` (uses ``iter_run_company_table_rows`` — row columns + ``extra_json``).
+
+    Row-level ``contact_status`` is read from the ``run_companies.contact_status`` column when set by
+    the worker or retry path (``recompute_and_persist_contact_statuses_for_run``). Otherwise the API returns
+    ``pending`` / ``llm_error`` / ``unknown`` without loading contacts.
+
+    If ``run_companies`` is empty, legacy fallback may read the collect step payload via
+    ``effective_step_output_json`` (can touch step ``entity_kv`` — rare after migration).
+    """
     t_route0 = time.perf_counter()
-    run = get_run(db, run_id)
-    if not run:
+    if not run_exists(db, run_id):
         raise HTTPException(status_code=404, detail="Run not found")
     get_run_ms = (time.perf_counter() - t_route0) * 1000
     t_svc0 = time.perf_counter()
     data = get_run_companies_with_status(db, run_id, limit=limit, offset=offset, q=q)
     service_call_ms = (time.perf_counter() - t_svc0) * 1000
     total_route_ms = (time.perf_counter() - t_route0) * 1000
-    _log.info(
+    _log_method = _log.info if total_route_ms >= 500.0 else _log.debug
+    _log_method(
         "run_companies_route rid=%s limit=%s offset=%s q=%r get_run_ms=%.2f "
         "service_call_ms=%.2f total_route_ms=%.2f",
         run_id,

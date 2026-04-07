@@ -551,14 +551,14 @@ const RUN_REVIEW_SETUP_LITE_TIMEOUT_MS = 20000;
 const LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS = 120000;
 /** Edit-form is light on the server; client timeout is generous so a slow/blocked worker does not fail before heavier GET /runs. */
 const EDIT_FORM_OPEN_TIMEOUT_MS = LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
-/** GET /runs/:id/companies — run_companies + statuses; allow long wait like other run bundles. */
-const COMPANIES_HTTP_TIMEOUT_MS = LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
+/** GET /runs/:id/companies — allow long wait when the server worker is busy (do not abort client-side). */
+const COMPANIES_HTTP_TIMEOUT_MS = 300000;
 /** POST /sending/.../mock-send-preview — synchronous Gmail on server; allow long wait. */
 const MOCK_SEND_PREVIEW_POST_TIMEOUT_MS = 120000;
 /** Poll GET /email-drafts/:id until terminal status (API returns 202 immediately; Gmail runs in background). */
 const OUTBOUND_SEND_POLL_MS = 2000;
 const OUTBOUND_SEND_POLL_MAX = 30;
-/** Background poll / metrics-only refresh: workspace-lite + global performance (no contact/draft lists). */
+/** Background poll / metrics-only refresh: workspace-tick + global performance (no contact/draft lists). */
 const POLL_METRICS_TIMEOUT_MS = 60000;
 /** Don’t spam the activity log with the same silent metrics failure on every poll tick. */
 const METRICS_SILENT_FAILURE_LOG_INTERVAL_MS = 45000;
@@ -604,6 +604,13 @@ function normalizeCompaniesPanelResponse(data, offsetFallback = 0) {
     offset: respOffset,
     limit: data?.limit != null ? Number(data.limit) : COMPANIES_FETCH_MAX,
   };
+}
+
+/** Single numeric key for per-row company UI state (must match between queue scan API and table rows). */
+function normalizeCompanyCollectIndex(row) {
+  if (row == null || typeof row !== "object") return null;
+  const n = Number(row.collect_index);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 function combineAbortSignals(a, b) {
@@ -666,7 +673,7 @@ function formatSetupIntegrationInformer(si) {
   return { llmPart, cdnPart };
 }
 
-/** Merge GET /runs/:id/workspace-lite into existing full workspace (metrics-only refresh path). */
+/** Merge GET /runs/:id/workspace-lite or workspace-tick into existing workspace (metrics-only refresh path). */
 function mergeWorkspaceLiteInto(prevWorkspace, lite) {
   if (!lite || typeof lite !== "object") return prevWorkspace;
   const base =
@@ -1111,11 +1118,14 @@ function mainNavNeedsParentAssetsFetch(nav) {
   return nav === "drafts" || nav === "assets" || nav === "packets";
 }
 
-/** Which list GETs belong in `loadRunDetails` for the current nav (at most one of contacts vs drafts). */
-function listInclusionsForMainNav(nav) {
+/**
+ * Section lists (contacts / drafts) are not part of the run «card» bundle — each section loads its own
+ * GET when you open that tab (`refreshRunContactsOnly` / `refreshRunDraftsOnly`). Keeps workspace-lite fast.
+ */
+function listInclusionsForMainNav(_nav) {
   return {
-    includeContacts: nav === "contacts" || nav === "contact-analyzer",
-    includeDrafts: nav === "drafts",
+    includeContacts: false,
+    includeDrafts: false,
   };
 }
 
@@ -1242,12 +1252,20 @@ export default function AiBizOsHumanUI() {
   const draftsListReadyRunIdRef = useRef(null);
   /** Stale-response guard for GET /runs/:id/companies (Companies tab). */
   const companiesListFetchSeqRef = useRef(0);
+  /** Abort in-flight Companies GET when switching run or section (stream A); refresh stream calls `abort` at start of a new fetch. */
+  const companiesListAbortRef = useRef(null);
   /** Last run id we applied Companies pagination for — detects run switch before `companiesPage` state updates. */
   const companiesFetchRunIdRef = useRef(null);
+  /** Clears companies panel only when selected run id changes — not when switching Contacts ↔ Companies (keeps instant return). */
+  const prevSelectedRunIdForCompaniesCacheRef = useRef(null);
   /** Last workspace.setup_summary.companies_collected seen for selected run — refresh list on real count change without re-fetching on every metrics poll tick. */
   const prevCompaniesCollectedRef = useRef(null);
+  /** Aligns with `companiesRefreshNonce` so the refresh-only effect skips the first tick (primary [run,nav] already fetches). */
+  const lastCompaniesRefreshNonceAppliedRef = useRef(null);
   /** One metrics poll at a time — avoids overlapping GETs when interval (e.g. 8s) < request duration. */
   const metricsPollInFlightRef = useRef(false);
+  /** Abort in-flight workspace-tick/global-performance when switching to Companies tab (same-origin fetch queue). */
+  const metricsPollAbortRef = useRef(null);
   /** Mirrors `restartsInFlight` for sync handlers (metrics poll skips only runs with background restart). */
   const restartsInFlightRef = useRef({});
   /** One interval per run_id polling GET /runs/:id until needs_review/failed after 202 restart. */
@@ -1257,6 +1275,9 @@ export default function AiBizOsHumanUI() {
   /** Concurrent section fetches share one "busy" flag — use depth so one finally() cannot clear spinner while another is still in flight. */
   const contactsSectionFetchDepthRef = useRef(0);
   const draftsSectionFetchDepthRef = useRef(0);
+  /** Paged GET /contacts/run and /email-drafts/run — abort when leaving that tab so other sections (e.g. Companies) are not queued behind them. */
+  const contactsRunListAbortRef = useRef(null);
+  const draftsRunListAbortRef = useRef(null);
   const [draftForm, setDraftForm] = useState({
     subject: "",
     body: "",
@@ -1458,6 +1479,37 @@ export default function AiBizOsHumanUI() {
     [appendActivityLog],
   );
 
+  /**
+   * Activity log: every HTTP GET/POST with duration so heavy work (workspace-lite, contacts, etc.) is visible.
+   */
+  const logTimedApi = useCallback(
+    async (phaseLabel, path, apiOptions = {}) => {
+      const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+      appendActivityLog(`[net START] ${phaseLabel} → ${path}`);
+      try {
+        const data = await api(path, apiOptions);
+        const ms = Math.round(
+          (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+        );
+        appendActivityLog(`[net OK] ${phaseLabel} ${ms}ms ← ${path}`);
+        return data;
+      } catch (e) {
+        const ms = Math.round(
+          (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+        );
+        appendActivityLog(
+          `[net FAIL] ${phaseLabel} ${ms}ms ← ${path} — ${String(e?.message || e).slice(0, 500)}`,
+        );
+        throw e;
+      }
+    },
+    [appendActivityLog],
+  );
+
+  /** Stable handles for Companies-tab fetch so the effect deps stay [run, nav, refreshNonce] only. */
+  const appendActivityLogRef = useRef(appendActivityLog);
+  appendActivityLogRef.current = appendActivityLog;
+
   useEffect(() => {
     if (activityLogLines.length === 0) return;
     queueMicrotask(() => {
@@ -1559,13 +1611,15 @@ export default function AiBizOsHumanUI() {
 
   const retryCompanyFind = async (runId, collectIndex) => {
     if (!runId || collectIndex == null) return;
+    const k = Number(collectIndex);
+    if (!Number.isFinite(k) || k < 0) return;
     setError("");
-    setCompanyRetryLoading((prev) => ({ ...prev, [collectIndex]: true }));
-    appendActivityLog(`Companies: POST /runs/${runId}/companies/retry-find { collect_index: ${collectIndex} }`);
+    setCompanyRetryLoading((prev) => ({ ...prev, [k]: true }));
+    appendActivityLog(`Companies: POST /runs/${runId}/companies/retry-find { collect_index: ${k} }`);
     try {
       const result = await api(`/runs/${runId}/companies/retry-find`, {
         method: "POST",
-        body: { collect_index: collectIndex },
+        body: { collect_index: k },
         timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
       });
       const merged =
@@ -1582,38 +1636,38 @@ export default function AiBizOsHumanUI() {
       });
       const normalized = normalizeCompaniesPanelResponse(data, 0);
       setCompaniesPanel(normalized);
-      const rowAfter = normalized.companies?.find((c) => c.collect_index === collectIndex);
+      const rowAfter = normalized.companies?.find((c) => normalizeCompanyCollectIndex(c) === k);
       if (
         (rowAfter?.contact_status === "none" || rowAfter?.contact_status === "no_email") &&
         merged === 0
       ) {
-        setCompanyFindUnavailable((prev) => ({ ...prev, [collectIndex]: true }));
+        setCompanyFindUnavailable((prev) => ({ ...prev, [k]: true }));
       }
       if (rowAfter?.contact_status === "found") {
         setCompanyFindUnavailable((prev) => {
-          if (!prev[collectIndex]) return prev;
+          if (!prev[k]) return prev;
           const next = { ...prev };
-          delete next[collectIndex];
+          delete next[k];
           return next;
         });
       }
       refreshRunMetricsOnly(runId);
       const label = String(rowAfter?.name ?? rowAfter?.company ?? "—").trim() || "—";
       appendActivityLog(
-        `Companies: retry-find done — collect_index=${collectIndex} "${label}" → contact_status=${rowAfter?.contact_status ?? "—"}, new_contacts_merged=${merged}`,
-        { runId, collectIndex },
+        `Companies: retry-find done — collect_index=${k} "${label}" → contact_status=${rowAfter?.contact_status ?? "—"}, new_contacts_merged=${merged}`,
+        { runId, collectIndex: k },
       );
     } catch (e) {
       const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
-      appendActivityLog(`Companies: retry-find error (collect_index=${collectIndex}) — ${msg}`, {
+      appendActivityLog(`Companies: retry-find error (collect_index=${k}) — ${msg}`, {
         runId,
-        collectIndex,
+        collectIndex: k,
       });
       setUiError(setError, e);
     } finally {
       setCompanyRetryLoading((prev) => {
         const next = { ...prev };
-        delete next[collectIndex];
+        delete next[k];
         return next;
       });
     }
@@ -1644,11 +1698,16 @@ export default function AiBizOsHumanUI() {
         const fullScan = await api(retryQueueScanUrl(), {
           timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
         });
-        const row = fullScan.companies?.find(
-          (c) =>
-            (c.contact_status === "none" || c.contact_status === "no_email") &&
-            !unavailableAcc[c.collect_index],
-        );
+        const row = fullScan.companies?.find((c) => {
+          const idx = normalizeCompanyCollectIndex(c);
+          if (idx == null) return false;
+          return (
+            (c.contact_status === "none" ||
+              c.contact_status === "no_email" ||
+              c.contact_status === "unknown") &&
+            !unavailableAcc[idx]
+          );
+        });
         if (!row) {
           const snap = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
           setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
@@ -1656,7 +1715,8 @@ export default function AiBizOsHumanUI() {
           break;
         }
 
-        const collectIndex = row.collect_index;
+        const collectIndex = normalizeCompanyCollectIndex(row);
+        if (collectIndex == null) continue;
         const rowLabel = String(row?.name ?? row?.company ?? "—").trim() || "—";
         appendActivityLog(
           `Companies: Retry all — POST retry-find collect_index=${collectIndex} "${rowLabel}" (was: contact_status=${row?.contact_status ?? "—"})`,
@@ -1678,7 +1738,7 @@ export default function AiBizOsHumanUI() {
           const dataAfter = await api(retryQueueScanUrl(), {
             timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
           });
-          const rowAfter = dataAfter.companies?.find((c) => c.collect_index === collectIndex);
+          const rowAfter = dataAfter.companies?.find((c) => normalizeCompanyCollectIndex(c) === collectIndex);
           const snap = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
           setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
           if (
@@ -1778,16 +1838,6 @@ export default function AiBizOsHumanUI() {
       setDraftsListFailedRunId(null);
       setContacts([]);
       setDrafts([]);
-    } else if (includeContacts || includeDrafts) {
-      contactsListReadyRunIdRef.current = null;
-      draftsListReadyRunIdRef.current = null;
-      setContactsListReadyRunId(null);
-      setContactsListFailedRunId(null);
-      setCompaniesListFailedRunId(null);
-      setDraftsListReadyRunId(null);
-      setDraftsListFailedRunId(null);
-      setContacts([]);
-      setDrafts([]);
     }
     setRunDetailsHydratedId((prev) => (Number(prev) === rid ? prev : null));
     const rowGuess = runRowHint ?? runsList.find((r) => Number(r.id) === rid);
@@ -1803,12 +1853,63 @@ export default function AiBizOsHumanUI() {
     }
     try {
       const wsLitePath = `/runs/${rid}/workspace-lite`;
-      const pWsLite = api(wsLitePath, { timeoutMs: requestTimeoutMs });
+      const pWsLite = logTimedApi(
+        `loadRunDetails workspace-lite`,
+        wsLitePath,
+        { timeoutMs: requestTimeoutMs },
+      );
       const pContacts = includeContacts
-        ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), `/contacts/run/${rid}`)
+        ? (async () => {
+          appendActivityLog(`[net START] loadRunDetails contacts (bundled) → /contacts/run/${rid}`);
+          const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+          try {
+            const data = await fetchAllPagedItems(
+              (u) => api(u, { timeoutMs: requestTimeoutMs }),
+              `/contacts/run/${rid}`,
+            );
+            const ms = Math.round(
+              (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+            );
+            const n = Array.isArray(data) ? data.length : 0;
+            appendActivityLog(`[net OK] loadRunDetails contacts ${ms}ms — ${n} rows ← /contacts/run/${rid}`);
+            return data;
+          } catch (e) {
+            const ms = Math.round(
+              (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+            );
+            appendActivityLog(
+              `[net FAIL] loadRunDetails contacts ${ms}ms ← /contacts/run/${rid} — ${String(e?.message || e).slice(0, 400)}`,
+            );
+            throw e;
+          }
+        })()
         : null;
       const pDrafts = includeDrafts
-        ? fetchAllPagedItems((u) => api(u, { timeoutMs: requestTimeoutMs }), emailDraftsRunListPath(rid))
+        ? (async () => {
+          const base = emailDraftsRunListPath(rid);
+          appendActivityLog(`[net START] loadRunDetails drafts (bundled) → ${base}`);
+          const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+          try {
+            const data = await fetchAllPagedItems(
+              (u) => api(u, { timeoutMs: requestTimeoutMs }),
+              base,
+            );
+            const ms = Math.round(
+              (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+            );
+            const n = Array.isArray(data) ? data.length : 0;
+            appendActivityLog(`[net OK] loadRunDetails drafts ${ms}ms — ${n} rows ← ${base}`);
+            return data;
+          } catch (e) {
+            const ms = Math.round(
+              (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0,
+            );
+            appendActivityLog(
+              `[net FAIL] loadRunDetails drafts ${ms}ms ← ${base} — ${String(e?.message || e).slice(0, 400)}`,
+            );
+            throw e;
+          }
+        })()
         : null;
 
       let wsLiteData;
@@ -1824,7 +1925,9 @@ export default function AiBizOsHumanUI() {
         [wsLiteData] = await Promise.all([pWsLite]);
       }
       if (runLoadTargetRef.current !== rid) return null;
-      appendActivityLog("→ Workspace-lite received (sidebar row + metrics; no GET /runs/:id).");
+      appendActivityLog(
+        "→ loadRunDetails: workspace-lite applied (sidebar + metrics bundle; no full GET /runs/:id).",
+      );
       setSelectedRun((prev) => {
         const base = rowGuess || prev || { id: rid };
         return { ...base, display_phase: wsLiteData.display_phase ?? base.display_phase };
@@ -1871,23 +1974,6 @@ export default function AiBizOsHumanUI() {
       setWorkspace(ws);
       if (ws) snapshotWriteRunCards(rid, ws);
       setRunDetailsHydratedId(rid);
-      void (async () => {
-        try {
-          const tp = await api("/sending/global-performance", { timeoutMs: requestTimeoutMs });
-          if (runLoadTargetRef.current !== rid) return;
-          setTotalPerformance({
-            emails_sent: Number(tp?.emails_sent) || 0,
-            emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
-            replies: Number(tp?.replies) || 0,
-          });
-        } catch (e) {
-          const msg = detailFromApiErrorMessage(e?.message || e);
-          appendActivityLog(`Total performance: GET /sending/global-performance — ${msg}`, {
-            runId: rid,
-            phase: "loadRunDetails",
-          });
-        }
-      })();
       return ws;
     } catch (e) {
       if (runDetailsLoadGenRef.current !== myGen) return null;
@@ -1991,20 +2077,50 @@ export default function AiBizOsHumanUI() {
   };
 
   /**
-   * Workspace-lite + Total performance only — updates Run setup counts, Run performance, hourly chart, sidebar cards.
-   * Does not reload contacts or drafts (avoids multi‑second full bundle on every tick).
+   * Workspace-tick + Total performance — updates Run setup counts, Run performance, sidebar cards.
+   * Hourly chart and conversation/reminder counters refresh on loadRunDetails or full workspace-lite.
    */
   const refreshRunMetricsOnly = useCallback((runId) => {
     if (!runId) return;
-    if (restartsInFlightRef.current[runId]) return;
-    if (metricsPollInFlightRef.current) return;
+    if (restartsInFlightRef.current[runId]) {
+      appendActivityLog(
+        `[metrics SKIPPED] run_id=${runId}: restart/background work in progress — not starting parallel GET /workspace-tick + /global-performance (worker/DB may be busy; avoids starving other tabs).`,
+      );
+      return;
+    }
+    if (metricsPollInFlightRef.current) {
+      appendActivityLog(
+        `[metrics SKIPPED] run_id=${runId}: previous metrics poll still in flight — lightweight GETs can wait behind GET /runs/${runId}/workspace-tick + GET /sending/global-performance.`,
+      );
+      return;
+    }
+    metricsPollAbortRef.current?.abort();
+    const ac = new AbortController();
+    metricsPollAbortRef.current = ac;
     metricsPollInFlightRef.current = true;
+    appendActivityLog(
+      `[metrics START] run_id=${runId}: parallel GET /runs/${runId}/workspace-tick (phase + setup_summary + performance; no hourly/reminders) + GET /sending/global-performance`,
+    );
     void (async () => {
+      const bundleT0 = typeof performance !== "undefined" ? performance.now() : Date.now();
       try {
         const [wsLite, tp] = await Promise.all([
-          api(`/runs/${runId}/workspace-lite`, { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
-          api("/sending/global-performance", { timeoutMs: POLL_METRICS_TIMEOUT_MS }),
+          logTimedApi(
+            `metrics workspace-tick`,
+            `/runs/${runId}/workspace-tick`,
+            { timeoutMs: POLL_METRICS_TIMEOUT_MS, signal: ac.signal },
+          ),
+          logTimedApi(`metrics global-performance`, `/sending/global-performance`, {
+            timeoutMs: POLL_METRICS_TIMEOUT_MS,
+            signal: ac.signal,
+          }),
         ]);
+        const bundleMs = Math.round(
+          (typeof performance !== "undefined" ? performance.now() : Date.now()) - bundleT0,
+        );
+        appendActivityLog(
+          `[metrics BUNDLE OK] run_id=${runId} wall-clock ${bundleMs}ms (both requests finished; server may still have been busy before this tick).`,
+        );
         metricsSilentFailureLastLogAtRef.current = 0;
         setWorkspace((prev) => {
           if (!prev || Number(prev.id) !== Number(runId)) return prev;
@@ -2047,7 +2163,13 @@ export default function AiBizOsHumanUI() {
         });
       } catch (e) {
         const msg = String(e?.message || e);
-        if (isConsoleOnlyApiFailure(msg)) {
+        const aborted =
+          ac.signal.aborted ||
+          e?.name === "AbortError" ||
+          /aborted|cancel/i.test(msg);
+        if (aborted) {
+          appendActivityLog(`[metrics CANCELLED] run_id=${runId} — poll aborted (e.g. switched to Companies tab or new poll replaced this one).`);
+        } else if (isConsoleOnlyApiFailure(msg)) {
           const now = Date.now();
           if (now - metricsSilentFailureLastLogAtRef.current >= METRICS_SILENT_FAILURE_LOG_INTERVAL_MS) {
             metricsSilentFailureLastLogAtRef.current = now;
@@ -2062,9 +2184,12 @@ export default function AiBizOsHumanUI() {
         }
       } finally {
         metricsPollInFlightRef.current = false;
+        if (metricsPollAbortRef.current === ac) {
+          metricsPollAbortRef.current = null;
+        }
       }
     })();
-  }, [setError, appendActivityLog]);
+  }, [setError, appendActivityLog, logTimedApi]);
 
   /** Both lists — used by poll during generation and after actions that touch contacts + drafts. */
   const refreshRunContactsAndDrafts = useCallback(
@@ -2072,6 +2197,10 @@ export default function AiBizOsHumanUI() {
       if (!runId) return;
       const c = ++contactsListFetchSeqRef.current;
       const d = ++draftsListFetchSeqRef.current;
+      appendActivityLog(
+        `[net START] poll refreshRunContactsAndDrafts [HEAVY: parallel paged] /contacts/run/${runId} + ${emailDraftsRunListPath(runId)}`,
+      );
+      const bundleT0 = typeof performance !== "undefined" ? performance.now() : Date.now();
       try {
         const [contactsData, draftsData] = await Promise.all([
           fetchAllPagedItems(
@@ -2083,6 +2212,14 @@ export default function AiBizOsHumanUI() {
             emailDraftsRunListPath(runId),
           ),
         ]);
+        const bundleMs = Math.round(
+          (typeof performance !== "undefined" ? performance.now() : Date.now()) - bundleT0,
+        );
+        const cn = normalizeContactsRunPayload(contactsData).length;
+        const dn = Array.isArray(draftsData) ? draftsData.length : "?";
+        appendActivityLog(
+          `[net OK] refreshRunContactsAndDrafts ${bundleMs}ms contacts_rows=${cn} drafts_rows=${dn} run_id=${runId}`,
+        );
         if (c !== contactsListFetchSeqRef.current || d !== draftsListFetchSeqRef.current) return;
         setContactsListFailedRunId(null);
         setContacts(Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData));
@@ -2133,11 +2270,18 @@ export default function AiBizOsHumanUI() {
       setContactsListFailedRunId(null);
       contactsSectionFetchDepthRef.current += 1;
       setContactsSectionFetchBusy(true);
-      appendActivityLog(`Contacts: GET /contacts/run/${runId} (all pages, limit/offset)`);
+      try {
+        contactsRunListAbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+      const ac = new AbortController();
+      contactsRunListAbortRef.current = ac;
+      appendActivityLog(`Contacts: GET /contacts/run/${runId} (paged; section-only load)`);
       const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       try {
         const contactsData = await fetchAllPagedItems(
-          (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+          (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS, signal: ac.signal }),
           `/contacts/run/${runId}`,
         );
         if (seq !== contactsListFetchSeqRef.current) return;
@@ -2168,6 +2312,13 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         if (seq !== contactsListFetchSeqRef.current) return;
         const msg = String(e?.message || e);
+        if (/aborted|cancel/i.test(msg)) {
+          appendActivityLog(`Contacts: cancelled (tab switch or newer refresh).`, {
+            runId,
+            source: "refreshRunContactsOnly",
+          });
+          return;
+        }
         const clientMs =
           typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
         appendActivityLog(`Contacts: error — ${detailFromApiErrorMessage(msg) || msg}`, {
@@ -2182,6 +2333,9 @@ export default function AiBizOsHumanUI() {
           setUiError(setError, e);
         }
       } finally {
+        if (contactsRunListAbortRef.current === ac) {
+          contactsRunListAbortRef.current = null;
+        }
         contactsSectionFetchDepthRef.current = Math.max(0, contactsSectionFetchDepthRef.current - 1);
         setContactsSectionFetchBusy(contactsSectionFetchDepthRef.current > 0);
       }
@@ -2196,11 +2350,18 @@ export default function AiBizOsHumanUI() {
       const seq = ++draftsListFetchSeqRef.current;
       draftsSectionFetchDepthRef.current += 1;
       setDraftsSectionFetchBusy(true);
+      try {
+        draftsRunListAbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+      const dac = new AbortController();
+      draftsRunListAbortRef.current = dac;
       appendActivityLog(`Drafts: GET ${emailDraftsRunListPath(runId)} (compact list, body_preview)`);
       const t0 = typeof performance !== "undefined" ? performance.now() : 0;
       try {
         const draftsData = await fetchAllPagedItems(
-          (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
+          (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS, signal: dac.signal }),
           emailDraftsRunListPath(runId),
         );
         if (seq !== draftsListFetchSeqRef.current) return;
@@ -2232,6 +2393,13 @@ export default function AiBizOsHumanUI() {
       } catch (e) {
         if (seq !== draftsListFetchSeqRef.current) return;
         const msg = String(e?.message || e);
+        if (/aborted|cancel/i.test(msg)) {
+          appendActivityLog(`Drafts: cancelled (tab switch or newer refresh).`, {
+            runId,
+            source: "refreshRunDraftsOnly",
+          });
+          return;
+        }
         const clientMs =
           typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
         appendActivityLog(`Drafts: error — ${detailFromApiErrorMessage(msg) || msg}`, {
@@ -2246,12 +2414,32 @@ export default function AiBizOsHumanUI() {
           setUiError(setError, e);
         }
       } finally {
+        if (draftsRunListAbortRef.current === dac) {
+          draftsRunListAbortRef.current = null;
+        }
         draftsSectionFetchDepthRef.current = Math.max(0, draftsSectionFetchDepthRef.current - 1);
         setDraftsSectionFetchBusy(draftsSectionFetchDepthRef.current > 0);
       }
     },
     [setError, appendActivityLog],
   );
+
+  useEffect(() => {
+    if (mainNav !== "contacts" && mainNav !== "contact-analyzer") {
+      try {
+        contactsRunListAbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (mainNav !== "drafts") {
+      try {
+        draftsRunListAbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [mainNav]);
 
   /**
    * After POST 202 queued: Gmail runs in a worker thread — poll until this draft is terminal (sent/failed).
@@ -2391,38 +2579,36 @@ export default function AiBizOsHumanUI() {
   }, [projectView, loadProjects]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const tp = await api("/sending/global-performance");
-        if (!cancelled) {
-          setTotalPerformance({
-            emails_sent: Number(tp?.emails_sent) || 0,
-            emails_sent_24h: Number(tp?.emails_sent_24h) || 0,
-            replies: Number(tp?.replies) || 0,
-          });
-        }
-      } catch (e) {
-        if (!cancelled) {
-          const msg = detailFromApiErrorMessage(e?.message || e);
-          appendActivityLog(`Total performance: initial load — ${msg}`, {
-            source: "initialGlobalPerformance",
-          });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [appendActivityLog]);
-
-  useEffect(() => {
-    void loadSetupIntegration();
-  }, [loadSetupIntegration]);
-
-  useEffect(() => {
     if (mainNav === "drafts") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
+
+  /** Header «LLMs · CDN» — one GET /setup/status when a project is selected (not tied to Drafts/Assets only). */
+  useEffect(() => {
+    if (!selectedProject) return;
+    void loadSetupIntegration();
+  }, [selectedProject?.id, loadSetupIntegration]);
+
+  /** Drop section payloads when leaving that section — no hoarding lists for tabs you are not viewing. */
+  useEffect(() => {
+    if (mainNav !== "drafts") {
+      setDrafts([]);
+      setDraftsListReadyRunId(null);
+      draftsListReadyRunIdRef.current = null;
+    }
+    /** Drafts UI joins drafts + contacts (e.g. «Generating…» placeholders) — keep contacts while on Drafts. */
+    if (!["contacts", "contact-analyzer", "companies", "drafts"].includes(mainNav)) {
+      setContacts([]);
+      setContactsListReadyRunId(null);
+      contactsListReadyRunIdRef.current = null;
+    }
+    if (mainNav !== "companies") {
+      setCompaniesPanel(null);
+    }
+    if (mainNav !== "contact-analyzer") {
+      setAnalyzerRows([]);
+      setAnalyzerLoading(false);
+    }
+  }, [mainNav]);
 
   const prevRunIdDebugRef = useRef(null);
   useEffect(() => {
@@ -2561,6 +2747,120 @@ export default function AiBizOsHumanUI() {
     }
   }, [loadSetupIntegration]);
 
+  /**
+   * Single GET /runs/:id/companies (first page). Used by two sequenced triggers: (1) run id or main nav
+   * changes — React effect cleanup aborts the previous request; (2) companiesRefreshNonce only — same
+   * effect deps do NOT re-run, so workspace `companies_collected` updates cannot cancel an in-flight load
+   * via effect cleanup (only an explicit follow-up fetch replaces it).
+   */
+  const startCompaniesSnapshotFetch = useCallback(() => {
+    if (companiesListAbortRef.current) {
+      try {
+        companiesListAbortRef.current.abort();
+      } catch {
+        /* ignore */
+      }
+      companiesListAbortRef.current = null;
+    }
+
+    const runId = selectedRunIdRef.current;
+    if (runId == null || mainNavRef.current !== "companies") {
+      setCompaniesLoading(false);
+      if (runId == null) {
+        setCompaniesPanel(null);
+        companiesFetchRunIdRef.current = null;
+      }
+      return;
+    }
+    const rid = Number(runId);
+    companiesFetchRunIdRef.current = rid;
+
+    const ac = new AbortController();
+    companiesListAbortRef.current = ac;
+
+    const seq = ++companiesListFetchSeqRef.current;
+    setCompaniesListFailedRunId(null);
+    setCompaniesLoading(true);
+    (async () => {
+      const t0 = typeof performance !== "undefined" ? performance.now() : 0;
+      try {
+        const ps = new URLSearchParams();
+        ps.set("limit", String(COMPANIES_FETCH_MAX));
+        ps.set("offset", "0");
+        const path = `/runs/${rid}/companies?${ps}`;
+        appendActivityLogRef.current(`Companies: requesting table snapshot (run_id=${rid})…`, {
+          runId: rid,
+          source: "companiesTab",
+        });
+        const data = await api(path, {
+          timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+          signal: ac.signal,
+        });
+        if (seq !== companiesListFetchSeqRef.current) return;
+        {
+          const cur = selectedRunIdRef.current;
+          if (cur != null && rid != null && Number(cur) !== Number(rid)) return;
+        }
+        const normalized = normalizeCompaniesPanelResponse(data, 0);
+        const { companies, companies_total } = normalized;
+        setCompaniesPanel(normalized);
+        setCompaniesLoading(false);
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLogRef.current(
+          `Companies: snapshot OK total=${companies_total} loaded_rows=${companies.length} client=${clientMs ?? "?"}ms collect=${data?.collect_step_status ?? "—"} find=${data?.find_step_status ?? "—"} (pages ${WORKSPACE_TABLE_PAGE_SIZE}/page)`,
+          {
+            runId: rid,
+            companies_total,
+            pageLen: companies.length,
+            clientMs,
+            collect_step_status: data?.collect_step_status,
+            find_step_status: data?.find_step_status,
+            limit: COMPANIES_FETCH_MAX,
+            offset: 0,
+            source: "companiesTab",
+          },
+        );
+      } catch (e) {
+        if (seq !== companiesListFetchSeqRef.current) return;
+        {
+          const cur = selectedRunIdRef.current;
+          if (cur != null && rid != null && Number(cur) !== Number(rid)) return;
+        }
+        const msg = String(e?.message || e);
+        const aborted =
+          ac.signal.aborted || e?.name === "AbortError" || /aborted|cancel/i.test(msg);
+        if (aborted) {
+          return;
+        }
+        const clientMs =
+          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
+        appendActivityLogRef.current(
+          `Companies: error — ${detailFromApiErrorMessage(msg) || msg} (client ${clientMs ?? "?"}ms, rid=${rid}, limit=${COMPANIES_FETCH_MAX}, offset=0)`,
+          {
+            runId: rid,
+            message: msg,
+            clientMs,
+            errorName: e?.name,
+            source: "companiesTab",
+          },
+        );
+        setCompaniesPanel(null);
+        setCompaniesListFailedRunId(rid);
+        if (!isConsoleOnlyApiFailure(msg)) {
+          setUiError(setError, e);
+        }
+      } finally {
+        if (companiesListAbortRef.current === ac) {
+          companiesListAbortRef.current = null;
+        }
+        if (seq === companiesListFetchSeqRef.current) {
+          setCompaniesLoading(false);
+        }
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     prevCompaniesCollectedRef.current = null;
   }, [selectedRun?.id]);
@@ -2586,91 +2886,48 @@ export default function AiBizOsHumanUI() {
   }, [mainNav, selectedRun?.id, workspace?.setup_summary?.companies_collected]);
 
   useEffect(() => {
-    if (!selectedRun?.id || mainNav !== "companies") {
+    const rid = selectedRun?.id != null ? Number(selectedRun.id) : null;
+    const prev = prevSelectedRunIdForCompaniesCacheRef.current;
+    prevSelectedRunIdForCompaniesCacheRef.current =
+      Number.isFinite(rid) && rid > 0 ? rid : null;
+    if (!Number.isFinite(rid) || rid <= 0) {
       setCompaniesPanel(null);
-      setCompaniesLoading(false);
-      if (!selectedRun?.id) companiesFetchRunIdRef.current = null;
+      companiesFetchRunIdRef.current = null;
       return;
     }
-    const rid = Number(selectedRun.id);
-    const runJustChanged = companiesFetchRunIdRef.current !== rid;
-    if (runJustChanged) {
-      companiesFetchRunIdRef.current = rid;
-      setCompaniesPanel(null);
-    }
+    if (prev === rid) return;
+    companiesFetchRunIdRef.current = null;
+    setCompaniesPanel(null);
+  }, [selectedRun?.id]);
 
-    const seq = ++companiesListFetchSeqRef.current;
-    setCompaniesListFailedRunId(null);
-    /** Only block the table on first paint or run switch. Metrics-driven refresh (companiesRefreshNonce) keeps showing rows. */
-    if (runJustChanged || companiesPanel === null) {
-      setCompaniesLoading(true);
-    }
-    appendActivityLog(
-      `Companies: GET /runs/${rid}/companies?limit=${COMPANIES_FETCH_MAX}&offset=0 (client-side pages of ${WORKSPACE_TABLE_PAGE_SIZE})`,
-    );
-    (async () => {
-      const t0 = typeof performance !== "undefined" ? performance.now() : 0;
+  /** Stream A — switch run or main section: abort previous GET via effect cleanup only for these deps. */
+  useEffect(() => {
+    startCompaniesSnapshotFetch();
+    return () => {
       try {
-        const ps = new URLSearchParams();
-        ps.set("limit", String(COMPANIES_FETCH_MAX));
-        ps.set("offset", "0");
-        const data = await api(`/runs/${rid}/companies?${ps}`, {
-          timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
-        });
-        if (seq !== companiesListFetchSeqRef.current) return;
-        {
-          const cur = selectedRunIdRef.current;
-          if (cur != null && rid != null && Number(cur) !== Number(rid)) return;
-        }
-        const normalized = normalizeCompaniesPanelResponse(data, 0);
-        const { companies, companies_total } = normalized;
-        setCompaniesPanel(normalized);
-        setCompaniesLoading(false);
-        const clientMs =
-          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
-        appendActivityLog(
-          `Companies: OK (total=${companies_total}, loaded_rows=${companies.length}, client=${clientMs ?? "?"}ms, collect=${data?.collect_step_status ?? "—"}, find=${data?.find_step_status ?? "—"}, limit=${COMPANIES_FETCH_MAX}, offset=0).`,
-          {
-            runId: rid,
-            companies_total,
-            pageLen: companies.length,
-            clientMs,
-            collect_step_status: data?.collect_step_status,
-            find_step_status: data?.find_step_status,
-            limit: COMPANIES_FETCH_MAX,
-            offset: 0,
-            source: "companiesTab",
-          },
-        );
-      } catch (e) {
-        if (seq !== companiesListFetchSeqRef.current) return;
-        {
-          const cur = selectedRunIdRef.current;
-          if (cur != null && rid != null && Number(cur) !== Number(rid)) return;
-        }
-        const msg = String(e?.message || e);
-        const clientMs =
-          typeof performance !== "undefined" ? Math.round(performance.now() - t0) : null;
-        appendActivityLog(
-          `Companies: error — ${detailFromApiErrorMessage(msg) || msg} (client ${clientMs ?? "?"}ms, rid=${rid}, limit=${COMPANIES_FETCH_MAX}, offset=0)`,
-          {
-            runId: rid,
-            message: msg,
-            clientMs,
-            errorName: e?.name,
-            source: "companiesTab",
-          },
-        );
-        setCompaniesPanel(null);
-        setCompaniesListFailedRunId(rid);
-        if (!isConsoleOnlyApiFailure(msg)) {
-          setUiError(setError, e);
-        }
-      } finally {
-        if (seq === companiesListFetchSeqRef.current) setCompaniesLoading(false);
+        companiesListAbortRef.current?.abort();
+      } catch {
+        /* ignore */
       }
-    })();
-  }, [selectedRun?.id, mainNav, appendActivityLog, companiesRefreshNonce]);
+    };
+  }, [selectedRun?.id, mainNav, startCompaniesSnapshotFetch]);
+
+  /**
+   * Stream B — workspace “how many companies collected” changed while you stay on the same run and
+   * Companies section: bump refresh counter only; does not re-run stream A, so metrics cannot cancel
+   * the in-flight snapshot via React cleanup.
+   */
+  useEffect(() => {
+    if (mainNav !== "companies" || selectedRun?.id == null) return;
+    const prev = lastCompaniesRefreshNonceAppliedRef.current;
+    if (prev === companiesRefreshNonce) return;
+    if (prev === null) {
+      lastCompaniesRefreshNonceAppliedRef.current = companiesRefreshNonce;
+      return;
+    }
+    lastCompaniesRefreshNonceAppliedRef.current = companiesRefreshNonce;
+    startCompaniesSnapshotFetch();
+  }, [companiesRefreshNonce, mainNav, selectedRun?.id, startCompaniesSnapshotFetch]);
 
   useEffect(() => {
     setCompanyFindUnavailable({});
@@ -2790,21 +3047,6 @@ export default function AiBizOsHumanUI() {
     }
   }, [totalPerformance]);
 
-  useEffect(() => {
-    if (!selectedRun?.id) return;
-    if (selectedRun?.id != null && restartsInFlight[selectedRun.id]) return;
-    const id = selectedRun.id;
-    const phase = workspace?.display_phase;
-    // Active: slightly faster metrics tick; Preparing/Ready: slower — lists do not reload here.
-    const ms =
-      phase === "Active" ? 8000 : phase === "Ready" ? 20000 : phase === "Preparing" ? 45000 : 60000;
-    const interval = setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      refreshRunMetricsOnly(id);
-    }, ms);
-    return () => clearInterval(interval);
-  }, [selectedRun?.id, workspace?.display_phase, refreshRunMetricsOnly, restartsInFlight]);
-
   /**
    * Per-section list load from DB. Depends on *ready run id* so we re-fetch when lists were cleared
    * (e.g. loadRunDetails with `includeDrafts` on the same run) while nav did not change.
@@ -2853,18 +3095,18 @@ export default function AiBizOsHumanUI() {
     });
   }, [drafts]);
 
-  /** Poll contacts + drafts while outbound generation is in progress (background LLM). */
+  /** While LLM generates a draft — poll lists only on Drafts (not when you are in another section). */
   useEffect(() => {
     const busy = Object.keys(pendingOutboundDraftByContactId).some(
       (k) => pendingOutboundDraftByContactId[k],
     );
-    if (!busy || !selectedRun?.id) return;
+    if (!busy || !selectedRun?.id || mainNav !== "drafts") return;
     void refreshRunContactsAndDrafts(selectedRun.id);
     const t = setInterval(() => {
       void refreshRunContactsAndDrafts(selectedRun.id);
     }, 2500);
     return () => clearInterval(t);
-  }, [pendingOutboundDraftByContactId, selectedRun?.id, refreshRunContactsAndDrafts]);
+  }, [pendingOutboundDraftByContactId, selectedRun?.id, mainNav, refreshRunContactsAndDrafts]);
 
   const createProject = async () => {
     const project = await api("/projects", {
@@ -5946,8 +6188,8 @@ export default function AiBizOsHumanUI() {
                     <div className="min-w-0 space-y-1.5">
                       <CardTitle>Companies</CardTitle>
                       <CardDescription>
-                        List from the collect step. Status reflects find-contacts: match with at least one email,
-                        matches but no emails (Not available), no match (Not found), or search still in progress.
+                        List from the collect step. Contact search status is stored on each company row after find /
+                        retry runs (this screen does not load the contacts table).
                       </CardDescription>
                       {companiesPanel?.collect_step_status != null || companiesPanel?.find_step_status != null ? (
                         <p className="text-xs text-muted-foreground">
@@ -5985,11 +6227,16 @@ export default function AiBizOsHumanUI() {
                           )}
                         </Button>
                       ) : null}
-                      {companiesPanel?.companies?.some(
-                        (c) =>
-                          (c.contact_status === "none" || c.contact_status === "no_email") &&
-                          !companyFindUnavailable[c.collect_index],
-                      ) &&
+                      {companiesPanel?.companies?.some((c) => {
+                        const idx = normalizeCompanyCollectIndex(c);
+                        if (idx == null) return false;
+                        return (
+                          (c.contact_status === "none" ||
+                            c.contact_status === "no_email" ||
+                            c.contact_status === "unknown") &&
+                          !companyFindUnavailable[idx]
+                        );
+                      }) &&
                       selectedRun &&
                       !selectedRun.closed_at &&
                       !restartsInFlight[selectedRun.id] ? (
@@ -6095,13 +6342,14 @@ export default function AiBizOsHumanUI() {
                             <tr>
                               <th className="px-3 py-2">Company</th>
                               <th className="px-3 py-2">Website</th>
-                              <th className="px-3 py-2">Contact search</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Contact search</th>
                             </tr>
                           </thead>
                           <tbody>
                             {companiesRows.map((row) => {
                               const st = row.contact_status;
-                              const unavailable = !!companyFindUnavailable[row.collect_index];
+                              const ci = normalizeCompanyCollectIndex(row);
+                              const unavailable = ci != null && !!companyFindUnavailable[ci];
                               const onlyBouncedOrDead =
                                 st === "found" && companyHasOnlyBouncedOrDeadContacts(contacts, row);
                               const badge =
@@ -6112,6 +6360,14 @@ export default function AiBizOsHumanUI() {
                                   >
                                     <CircleAlert className="h-3 w-3 shrink-0" aria-hidden />
                                     LLM error
+                                  </Badge>
+                                ) : st === "unknown" ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="border-muted-foreground/40 font-normal text-muted-foreground"
+                                    title="Status not synced yet — run find/retry, or open Contacts after the next workflow step"
+                                  >
+                                    Not synced
                                   </Badge>
                                 ) : onlyBouncedOrDead ? (
                                   <Badge variant="destructive" className="font-normal">
@@ -6133,6 +6389,13 @@ export default function AiBizOsHumanUI() {
                                   <Badge variant="secondary" className="font-normal">
                                     Not found
                                   </Badge>
+                                ) : st === "pending" ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100"
+                                  >
+                                    Not searched yet
+                                  </Badge>
                                 ) : (
                                   <Badge
                                     variant="outline"
@@ -6141,14 +6404,14 @@ export default function AiBizOsHumanUI() {
                                     Not searched yet
                                   </Badge>
                                 );
-                              const retryingRow = !!companyRetryLoading[row.collect_index];
                               const canRetryCompanyFind =
-                                (st === "none" || st === "no_email") &&
+                                (st === "none" || st === "no_email" || st === "unknown") &&
                                 st !== "llm_error" &&
                                 !unavailable &&
                                 selectedRun &&
                                 !selectedRun.closed_at &&
                                 !restartsInFlight[selectedRun.id];
+                              const retryingRow = ci != null && !!companyRetryLoading[ci];
                               return (
                                 <tr
                                   key={`company-${row.collect_index}`}
@@ -6169,17 +6432,17 @@ export default function AiBizOsHumanUI() {
                                       "—"
                                     )}
                                   </td>
-                                  <td className="px-3 py-2.5">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                      {badge}
+                                  <td className="align-middle whitespace-nowrap px-3 py-2.5">
+                                    <div className="inline-flex min-w-max max-w-none flex-nowrap items-center gap-2">
+                                      <span className="inline-flex shrink-0 whitespace-nowrap">{badge}</span>
                                       {canRetryCompanyFind ? (
                                         <Button
                                           type="button"
                                           size="sm"
                                           variant="outline"
-                                          className="h-6 rounded-full px-2.5 text-xs font-medium"
+                                          className="h-6 shrink-0 whitespace-nowrap rounded-full px-2.5 text-xs font-medium"
                                           disabled={retryingRow}
-                                          onClick={() => void retryCompanyFind(selectedRun.id, row.collect_index)}
+                                          onClick={() => void retryCompanyFind(selectedRun.id, ci ?? row.collect_index)}
                                         >
                                           {retryingRow ? (
                                             <>
@@ -6198,8 +6461,7 @@ export default function AiBizOsHumanUI() {
                             })}
                           </tbody>
                         </table>
-                      </div>
-                      {companiesTotalForUi > WORKSPACE_TABLE_PAGE_SIZE ? (
+                    {companiesTotalForUi > WORKSPACE_TABLE_PAGE_SIZE ? (
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
                           <span>
                             {companiesRangeStart > 0 && companiesRangeEnd > 0 ? (
@@ -6241,6 +6503,7 @@ export default function AiBizOsHumanUI() {
                           {companiesTotalForUi === 1 ? "company" : "companies"} total.
                         </p>
                       ) : null}
+                      </div>
                     </div>
                   ) : companiesLoading && !companiesPanel ? (
                     <p className="text-sm text-muted-foreground">Loading companies...</p>

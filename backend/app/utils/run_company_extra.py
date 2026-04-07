@@ -22,5 +22,7 @@ def effective_run_company_extra(db: Session, row: RunCompany) -> dict[str, Any]:
 
 
 def persist_run_company_extra(db: Session, row: RunCompany, data: dict[str, Any] | None) -> None:
-    replace_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, row.id, data or None)
+    raw = dict(data or {})
+    raw.pop("contact_status", None)
+    replace_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, row.id, raw or None)
     row.extra_json = {}
