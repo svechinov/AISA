@@ -1,8 +1,10 @@
 """
 Apollo.io REST API — organization search, people search, bulk enrichment (emails).
 
-Uses x-api-key header. See https://docs.apollo.io/reference/organization-search
-and https://docs.apollo.io/reference/people-api-search .
+Uses ``x-api-key`` header. Company discovery: ``POST /organizations/search`` (JSON body).
+People discovery: ``POST /mixed_people/api_search`` (JSON body). Employee-size filter applies only to
+company search — not people search (avoids empty results when Apollo headcount ≠ collected org).
+See https://docs.apollo.io/reference/people-api-search .
 """
 
 from __future__ import annotations
@@ -16,12 +18,22 @@ import httpx
 
 from app.config import settings
 from app.repositories.run_company_repo import list_run_companies_sparse
+from app.services.apollo_llm_hints import apollo_llm_hints_for_run
+from app.services.human_ui_activity import push_human_ui_activity, push_human_ui_activity_once
 from app.services.company_website_check import normalize_company_website_url
 from app.services.run_context_service import coalesce_str, get_effective_context
 
 logger = logging.getLogger(__name__)
 
 APOLLO_BASE = "https://api.apollo.io/api/v1"
+
+# Employee-count buckets for «up to 100 people at the company» (Apollo UI: 1–10, 11–20, 21–50, 51–100).
+_APOLLO_ORG_NUM_EMPLOYEES_RANGES_UP_TO_100: tuple[str, str, str, str] = (
+    "1,10",
+    "11,20",
+    "21,50",
+    "51,100",
+)
 
 
 def apollo_configured() -> bool:
@@ -109,9 +121,20 @@ def _apollo_post(path: str, *, params: list[tuple[str, Any]], json_body: dict | 
     return data if isinstance(data, dict) else {}
 
 
+def _apollo_post_json(path: str, *, json_body: dict[str, Any]) -> dict:
+    """POST with JSON body only (no query string) — matches Apollo ``/organizations/search`` usage."""
+    url = f"{APOLLO_BASE}{path}"
+    timeout = httpx.Timeout(settings.APOLLO_HTTP_TIMEOUT_SEC)
+    with httpx.Client(timeout=timeout) as client:
+        r = client.post(url, headers=_headers(), json=json_body)
+        r.raise_for_status()
+        data = r.json()
+    return data if isinstance(data, dict) else {}
+
+
 def organization_row_to_company(org: dict[str, Any]) -> dict[str, Any] | None:
     name = (org.get("name") or "").strip()
-    pd = (org.get("primary_domain") or "").strip().lower()
+    pd = (org.get("primary_domain") or org.get("domain") or "").strip().lower()
     if not name or not pd:
         return None
     wu = (org.get("website_url") or "").strip()
@@ -122,22 +145,46 @@ def organization_row_to_company(org: dict[str, Any]) -> dict[str, Any] | None:
     return {"name": name, "website": website}
 
 
+def _organizations_from_apollo_search_payload(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize org list from Apollo search responses (field name varies by endpoint)."""
+    for key in ("organizations", "accounts", "mixed_companies", "companies"):
+        v = data.get(key)
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+    return []
+
+
 def search_organizations_json(keyword_tags: list[str], *, page: int, per_page: int) -> dict:
-    params: list[tuple[str, Any]] = [("page", page), ("per_page", per_page)]
-    for t in keyword_tags:
-        params.append(("q_organization_keyword_tags[]", t))
-    return _apollo_post("/mixed_companies/search", params=params, json_body={})
+    """Company search via ``POST /organizations/search`` (JSON body)."""
+    tags = [str(t).strip() for t in keyword_tags if t and str(t).strip()]
+    per = min(max(1, int(per_page)), 100)
+    pg = max(1, int(page))
+    body: dict[str, Any] = {
+        "page": pg,
+        "per_page": per,
+        "organization_num_employees_ranges": list(_APOLLO_ORG_NUM_EMPLOYEES_RANGES_UP_TO_100),
+    }
+    if tags:
+        body["q_organization_keyword_tags"] = tags[:20]
+    else:
+        body["q_keywords"] = "business"
+    return _apollo_post_json("/organizations/search", json_body=body)
 
 
 def search_people_json(domain: str, person_titles: list[str], *, per_page: int) -> dict:
-    params: list[tuple[str, Any]] = [
-        ("page", 1),
-        ("per_page", per_page),
-        ("q_organization_domains_list[]", domain),
-    ]
-    for t in person_titles:
-        params.append(("person_titles[]", t))
-    return _apollo_post("/mixed_people/api_search", params=params, json_body={})
+    """People search: same JSON shape as Apollo docs; no duplicate employee filter (companies already ≤100)."""
+    dom = (domain or "").strip().lower().removeprefix("www.")
+    titles = [str(t).strip() for t in person_titles if t and str(t).strip()][:12]
+    if not titles:
+        titles = ["marketing"]
+    per = min(max(1, int(per_page)), 100)
+    body: dict[str, Any] = {
+        "page": 1,
+        "per_page": per,
+        "q_organization_domains_list": [dom],
+        "person_titles": titles,
+    }
+    return _apollo_post_json("/mixed_people/api_search", json_body=body)
 
 
 def bulk_match_people(ids: list[str]) -> list[dict[str, Any]]:
@@ -172,9 +219,31 @@ def try_collect_companies_via_apollo(
     Returns {"companies": [...]} with new orgs not already present by domain, or None to use LLM.
     """
     if not apollo_configured():
+        push_human_ui_activity_once(
+            db,
+            run_id,
+            "apollo_not_configured",
+            "Apollo: на сервере не задан ключ API — запросы к Apollo не отправлялись. "
+            "Добавьте ключ в настройки бэкенда и при необходимости перезапустите сбор.",
+        )
         return None
     ctx = get_effective_context(run)
-    tags = keyword_tags_from_context(ctx)
+    hints = apollo_llm_hints_for_run(run_id, run)
+    if hints:
+        tags, _ = hints
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: теги для поиска организаций заданы через LLM под формат Apollo (keyword tags).",
+        )
+        push_human_ui_activity(db, run_id, f"Apollo LLM → tags: {', '.join(tags[:16])}.")
+    else:
+        tags = keyword_tags_from_context(ctx)
+        push_human_ui_activity(
+            db,
+            run_id,
+            f"Apollo: теги (эвристика, без LLM или сбой LLM): {', '.join(tags[:8])}.",
+        )
     prior = list_run_companies_sparse(db, run_id)
     prior_domains: set[str] = set()
     for c in prior:
@@ -188,15 +257,19 @@ def try_collect_companies_via_apollo(
         settings.APOLLO_MAX_ORG_PAGE_SIZE,
         50 if continuation else 25,
     )
+    push_human_ui_activity(db, run_id, "Apollo: запрос поиска организаций…")
     try:
         data = search_organizations_json(tags, page=1, per_page=per_page)
     except Exception:
         logger.exception("Apollo organization search failed; falling back to LLM")
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: ошибка поиска организаций — будет использован другой сценарий сбора.",
+        )
         return None
 
-    orgs = data.get("organizations")
-    if not isinstance(orgs, list):
-        orgs = []
+    orgs = _organizations_from_apollo_search_payload(data)
     rows: list[dict[str, Any]] = []
     for org in orgs:
         if not isinstance(org, dict):
@@ -213,15 +286,31 @@ def try_collect_companies_via_apollo(
 
     if not rows:
         logger.info("Apollo organization search returned no new companies; falling back to LLM")
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: в ответе нет новых организаций — будет использован другой сценарий сбора.",
+        )
         return None
+    push_human_ui_activity(db, run_id, f"Apollo: из поиска организаций добавлено компаний: {len(rows)}.")
     return {"companies": rows}
 
 
 def try_find_contacts_via_apollo(db, run_id: int, run, step_input: dict) -> dict[str, Any] | None:
     """
-    Returns {"contacts": [...]} or None to use LLM (not configured, error, or no contacts found).
+    Returns {"contacts": [...]} when Apollo should handle find_contacts.
+
+    - ``None`` only if Apollo is **not** configured (caller may use LLM).
+    - If Apollo **is** configured, always returns a dict (possibly empty) — no LLM fallback for contact search.
     """
     if not apollo_configured():
+        push_human_ui_activity_once(
+            db,
+            run_id,
+            "apollo_not_configured",
+            "Apollo: на сервере не задан ключ API — запросы к Apollo не отправлялись. "
+            "Добавьте ключ в настройки бэкенда и при необходимости перезапустите сбор.",
+        )
         return None
 
     companies = step_input.get("companies") if isinstance(step_input, dict) else None
@@ -236,15 +325,42 @@ def try_find_contacts_via_apollo(db, run_id: int, run, step_input: dict) -> dict
         if isinstance(c, dict) and not c.get("llm_hallucination")
     ]
     if not grounded:
-        logger.info("Apollo find_contacts: no grounded companies; falling back to LLM")
-        return None
+        logger.info("Apollo find_contacts: no grounded companies — returning empty contacts (LLM not used)")
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: нет компаний для поиска контактов (после фильтра).",
+        )
+        return {"contacts": []}
 
     ctx = get_effective_context(run)
-    titles = person_titles_from_context(ctx)
+    hints = apollo_llm_hints_for_run(run_id, run)
+    if hints:
+        _, titles = hints
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: должности для поиска людей — из того же LLM-ответа, что и теги организаций.",
+        )
+    else:
+        titles = person_titles_from_context(ctx)
     per_co = max(1, int(settings.APOLLO_MAX_PEOPLE_PER_COMPANY))
     cap = max(1, int(settings.APOLLO_MAX_PEOPLE_TOTAL))
     contacts: list[dict[str, Any]] = []
     remaining = cap
+
+    logger.info(
+        "Apollo find_contacts run_id=%s: starting — %d company row(s), role hints=%d, cap=%d (people API + bulk_match)",
+        run_id,
+        len(grounded),
+        len(titles),
+        cap,
+    )
+    push_human_ui_activity(
+        db,
+        run_id,
+        f"Apollo: поиск контактов — компаний: {len(grounded)}, подсказок по ролям: {len(titles)}, лимит: {cap}.",
+    )
 
     try:
         for co in grounded:
@@ -254,6 +370,11 @@ def try_find_contacts_via_apollo(db, run_id: int, run, step_input: dict) -> dict
             website = (co.get("website") or "").strip()
             domain = domain_from_website(website)
             if not domain:
+                push_human_ui_activity(
+                    db,
+                    run_id,
+                    f"Apollo: skip contact search for «{name}» — no domain derived from website (fix URL or retry after editing).",
+                )
                 continue
 
             pdata = search_people_json(domain, titles, per_page=min(per_co, 25, remaining))
@@ -295,10 +416,36 @@ def try_find_contacts_via_apollo(db, run_id: int, run, step_input: dict) -> dict
                 if remaining <= 0:
                     break
     except Exception:
-        logger.exception("Apollo find_contacts failed; falling back to LLM")
-        return None
+        logger.exception("Apollo find_contacts failed — returning empty contacts (LLM not used)")
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: ошибка при поиске людей — контакты не получены.",
+        )
+        return {"contacts": []}
 
     if not contacts:
-        logger.info("Apollo find_contacts returned no contacts; falling back to LLM")
-        return None
+        logger.info("Apollo find_contacts: no people matched — returning empty contacts (LLM not used)")
+        push_human_ui_activity(
+            db,
+            run_id,
+            "Apollo: в ответе API нет контактов для этого запуска.",
+        )
+        return {"contacts": []}
+    with_email = sum(
+        1
+        for c in contacts
+        if isinstance(c, dict) and "@" in str(c.get("email") or "").strip().lower()
+    )
+    logger.info(
+        "Apollo find_contacts run_id=%s: OK — %d contact row(s) from Apollo (%d with email in payload)",
+        run_id,
+        len(contacts),
+        with_email,
+    )
+    push_human_ui_activity(
+        db,
+        run_id,
+        f"Apollo: готово — контактов: {len(contacts)}, с email в ответе: {with_email}.",
+    )
     return {"contacts": contacts}

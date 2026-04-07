@@ -984,6 +984,21 @@ def _ensure_run_company_contact_status_column() -> None:
             conn.execute(text("ALTER TABLE run_companies ADD COLUMN contact_status VARCHAR(32)"))
 
 
+def _ensure_run_company_ai_fit_columns() -> None:
+    """Add LLM campaign-fit columns on ``run_companies`` if missing."""
+    insp = inspect(engine)
+    if "run_companies" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_companies")}
+    with engine.begin() as conn:
+        if "ai_fit_status" not in columns:
+            conn.execute(text("ALTER TABLE run_companies ADD COLUMN ai_fit_status VARCHAR(16)"))
+        if "ai_fit_reason" not in columns:
+            conn.execute(text("ALTER TABLE run_companies ADD COLUMN ai_fit_reason TEXT"))
+        if "ai_fit_checked_at" not in columns:
+            conn.execute(text("ALTER TABLE run_companies ADD COLUMN ai_fit_checked_at TIMESTAMP"))
+
+
 def _backfill_run_company_contact_status_from_legacy_storage() -> None:
     """Fill NULL ``contact_status`` from extra_json or entity_kv — never clears other fields."""
     from app.constants.entity_kv_scope import SCOPE_RUN_COMPANY_EXTRA
@@ -1061,6 +1076,7 @@ def ensure_schema() -> None:
     # Before clearing runs.context_json into KV: move event_chain into relational tables.
     _backfill_run_event_chain_from_context_json()
     _ensure_run_company_contact_status_column()
+    _ensure_run_company_ai_fit_columns()
     _run_domain_json_migration()
     _backfill_run_company_contact_status_from_legacy_storage()
     _strip_template_variables_json_blob_columns()

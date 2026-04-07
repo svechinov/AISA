@@ -57,6 +57,7 @@ import {
   sortThreadPanelLiteRows,
 } from "@/lib/runPanelLite";
 import { fetchAllPagedItems } from "@/lib/paginatedApi";
+import { formatDateTimeYmdHms, formatDateYmd } from "@/lib/formatDate";
 
 /** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
 function threadMessageBodyLooksLikeHtml(s) {
@@ -88,6 +89,19 @@ const THREAD_CLASS_LABELS = {
 };
 
 const REMINDER_ACTIVE_STATUSES = ["scheduled", "triggered", "snoozed"];
+
+/** Threads list UI — page size (full list still loaded from API). */
+const THREADS_UI_PAGE_SIZE = 50;
+
+const THREAD_STALE_NO_REPLY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Open status, no inbound reply yet, last thread activity at least 7 days ago. */
+function threadOpenStaleSevenPlusDays(status, inboundCount, lastMessageAt) {
+  if (String(status || "").toLowerCase() !== "open") return false;
+  if (Number(inboundCount) > 0) return false;
+  if (!lastMessageAt) return false;
+  return Date.now() - new Date(lastMessageAt).getTime() >= THREAD_STALE_NO_REPLY_MS;
+}
 
 function toDatetimeLocalValue(d) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -216,7 +230,7 @@ function ThreadCardFromLite({ row }) {
             <Badge
               variant="outline"
               className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
-              title={`Reminder: ${new Date(row.remind_at).toLocaleString()}`}
+              title={`Reminder: ${formatDateTimeYmdHms(row.remind_at)}`}
             >
               <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
               Remind later
@@ -238,11 +252,20 @@ function ThreadCardFromLite({ row }) {
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant="secondary">{row.status}</Badge>
+          {threadOpenStaleSevenPlusDays(row.status, row.msg_in, row.last_message_at) ? (
+            <Badge
+              variant="outline"
+              className="gap-1 border-orange-400/55 bg-orange-500/20 font-normal text-orange-950 dark:border-orange-500/45 dark:bg-orange-950/35 dark:text-orange-100"
+              title="No reply yet — last activity 7+ days ago"
+            >
+              7+ days
+            </Badge>
+          ) : null}
           <span>
             Out {row.msg_out} · In {row.msg_in}
           </span>
           {row.last_message_at ? (
-            <span>Last: {new Date(row.last_message_at).toLocaleString()}</span>
+            <span>Last: {formatDateYmd(row.last_message_at)}</span>
           ) : null}
         </div>
       </div>
@@ -291,6 +314,7 @@ export default function TrackingView({
   const [threadDeliveryLlmResult, setThreadDeliveryLlmResult] = useState(null);
   const [threadRemindAtLocal, setThreadRemindAtLocal] = useState("");
   const [threadBucketTab, setThreadBucketTab] = useState("active");
+  const [threadsUiPage, setThreadsUiPage] = useState(1);
   const [eventBucketTab, setEventBucketTab] = useState("active");
   const [replyDrafts, setReplyDrafts] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -936,6 +960,35 @@ export default function TrackingView({
     () => filterThreadPanelLiteByTab(runPanelLiteSnapshot?.threads || [], threadBucketTab),
     [runPanelLiteSnapshot?.threads, threadBucketTab],
   );
+
+  const sortedThreadPanelLiteRowsForTab = useMemo(
+    () => sortThreadPanelLiteRows(filteredThreadPanelLiteRows),
+    [filteredThreadPanelLiteRows],
+  );
+
+  const threadListCountForPager = trackingCountsReady
+    ? sortedFilteredThreads.length
+    : sortedThreadPanelLiteRowsForTab.length;
+  const threadsPageCount = Math.max(1, Math.ceil(threadListCountForPager / THREADS_UI_PAGE_SIZE));
+  const threadsPageSafe = Math.min(Math.max(1, threadsUiPage), threadsPageCount);
+
+  const pagedSortedFilteredThreads = useMemo(() => {
+    const start = (threadsPageSafe - 1) * THREADS_UI_PAGE_SIZE;
+    return sortedFilteredThreads.slice(start, start + THREADS_UI_PAGE_SIZE);
+  }, [sortedFilteredThreads, threadsPageSafe]);
+
+  const pagedThreadPanelLiteRows = useMemo(() => {
+    const start = (threadsPageSafe - 1) * THREADS_UI_PAGE_SIZE;
+    return sortedThreadPanelLiteRowsForTab.slice(start, start + THREADS_UI_PAGE_SIZE);
+  }, [sortedThreadPanelLiteRowsForTab, threadsPageSafe]);
+
+  useEffect(() => {
+    setThreadsUiPage(1);
+  }, [threadBucketTab, runId]);
+
+  useEffect(() => {
+    setThreadsUiPage((p) => Math.min(p, threadsPageCount));
+  }, [threadsPageCount]);
 
   const filteredEventsPanelLiteRows = useMemo(
     () => filterEventsPanelLiteByTab(runPanelLiteSnapshot?.eventsGroups || [], eventBucketTab),
@@ -2027,7 +2080,7 @@ export default function TrackingView({
                                     <div className="text-xs text-muted-foreground">Event #{event.id}</div>
                                   </div>
                                 </div>
-                                <Badge variant="secondary">{new Date(event.created_at).toLocaleString()}</Badge>
+                                <Badge variant="secondary">{formatDateYmd(event.created_at)}</Badge>
                               </div>
                               {index < draftEvents.length - 1 ? <Separator className="my-2" /> : null}
                             </div>
@@ -2169,7 +2222,7 @@ export default function TrackingView({
             </div>
             {trackingCountsReady ? (
             <>
-            {sortedFilteredThreads.map((t) => {
+            {pagedSortedFilteredThreads.map((t) => {
               const contact = contactById.get(t.contact_id);
               const counts = messageCountsByThreadId.get(t.id) || { in: 0, out: 0 };
               const label = t.classification;
@@ -2239,7 +2292,7 @@ export default function TrackingView({
                           <Badge
                             variant="outline"
                             className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
-                            title={`Reminder: ${new Date(threadRemind.remind_at).toLocaleString()}`}
+                            title={`Reminder: ${formatDateTimeYmdHms(threadRemind.remind_at)}`}
                           >
                             <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
                             Remind later
@@ -2264,11 +2317,20 @@ export default function TrackingView({
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <Badge variant="secondary">{t.status}</Badge>
+                        {threadOpenStaleSevenPlusDays(t.status, counts.in, t.last_message_at) ? (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-orange-400/55 bg-orange-500/20 font-normal text-orange-950 dark:border-orange-500/45 dark:bg-orange-950/35 dark:text-orange-100"
+                            title="No reply yet — last activity 7+ days ago"
+                          >
+                            7+ days
+                          </Badge>
+                        ) : null}
                         <span>
                           Out {counts.out} · In {counts.in}
                         </span>
                         {t.last_message_at ? (
-                          <span>Last: {new Date(t.last_message_at).toLocaleString()}</span>
+                          <span>Last: {formatDateYmd(t.last_message_at)}</span>
                         ) : null}
                       </div>
                     </div>
@@ -2278,6 +2340,35 @@ export default function TrackingView({
                 </div>
               );
             })}
+            {threadListCountForPager > 0 && threadsPageCount > 1 ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-sm text-muted-foreground">
+                <span className="tabular-nums">
+                  {(threadsPageSafe - 1) * THREADS_UI_PAGE_SIZE + 1}–
+                  {Math.min(threadsPageSafe * THREADS_UI_PAGE_SIZE, threadListCountForPager)} of{" "}
+                  {threadListCountForPager}
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={threadsPageSafe <= 1}
+                    onClick={() => setThreadsUiPage((p) => Math.max(1, p - 1))}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={threadsPageSafe >= threadsPageCount}
+                    onClick={() => setThreadsUiPage((p) => Math.min(threadsPageCount, p + 1))}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {!threads.length ? (
               <div className="text-sm text-muted-foreground">No threads yet — send at least one draft.</div>
             ) : null}
@@ -2296,9 +2387,38 @@ export default function TrackingView({
                 <p className="text-xs text-muted-foreground" role="status">
                   Showing cached threads — refreshing from server…
                 </p>
-                {filteredThreadPanelLiteRows.map((row) => (
+                {pagedThreadPanelLiteRows.map((row) => (
                   <ThreadCardFromLite key={row.id} row={row} />
                 ))}
+                {threadListCountForPager > 0 && threadsPageCount > 1 ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-sm text-muted-foreground">
+                    <span className="tabular-nums">
+                      {(threadsPageSafe - 1) * THREADS_UI_PAGE_SIZE + 1}–
+                      {Math.min(threadsPageSafe * THREADS_UI_PAGE_SIZE, threadListCountForPager)} of{" "}
+                      {threadListCountForPager}
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={threadsPageSafe <= 1}
+                        onClick={() => setThreadsUiPage((p) => Math.max(1, p - 1))}
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={threadsPageSafe >= threadsPageCount}
+                        onClick={() => setThreadsUiPage((p) => Math.min(threadsPageCount, p + 1))}
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
                 {runPanelLiteSnapshot?.threads?.length && filteredThreadPanelLiteRows.length === 0 ? (
                   <div className="text-sm text-muted-foreground">
                     {threadBucketTab === "active"
@@ -2610,7 +2730,7 @@ export default function TrackingView({
                           <Badge variant="outline">{r.status}</Badge>
                           <Badge variant="secondary">{r.priority}</Badge>
                           <span className="text-xs text-muted-foreground">
-                            Remind: {remindDate.toLocaleString()}
+                            Remind: {formatDateTimeYmdHms(r.remind_at)}
                           </span>
                           {isOverdue ? (
                             <Badge variant="destructive" className="font-normal">
@@ -3565,7 +3685,7 @@ export default function TrackingView({
                   {activeForThread ? (
                     <div className="space-y-2">
                       <p className="text-sm text-muted-foreground">
-                        Active: {new Date(activeForThread.remind_at).toLocaleString()} —{" "}
+                        Active: {formatDateTimeYmdHms(activeForThread.remind_at)} —{" "}
                         <span className="font-medium text-foreground">{activeForThread.status}</span>
                       </p>
                       <div className="flex flex-wrap gap-2">
@@ -3628,7 +3748,7 @@ export default function TrackingView({
                   >
                     <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <Badge variant="outline">{m.direction}</Badge>
-                      <span>{new Date(m.created_at).toLocaleString()}</span>
+                      <span>{formatDateTimeYmdHms(m.created_at)}</span>
                     </div>
                     <div className="font-medium">{m.subject}</div>
                     <div className="mt-1 text-xs text-muted-foreground">

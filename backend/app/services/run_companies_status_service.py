@@ -96,7 +96,7 @@ def _matching_contacts(
     return [raw_contacts[j] for j in seen]
 
 
-class CompanyStatusRow(TypedDict):
+class CompanyStatusRow(TypedDict, total=False):
     collect_index: int
     name: str
     website: str
@@ -108,6 +108,22 @@ class CompanyStatusRow(TypedDict):
         "llm_error",
         "unknown",
     ]
+    ai_fit_status: Literal["correct", "incorrect"]
+    ai_fit_reason: str
+    ai_fit_checked_at: str
+
+
+def _merge_ai_fit_from_company_dict(co: dict, row: dict) -> dict:
+    v = co.get("ai_fit_status")
+    if isinstance(v, str) and v in ("correct", "incorrect"):
+        row["ai_fit_status"] = v  # type: ignore[typeddict-item]
+    r = co.get("ai_fit_reason")
+    if isinstance(r, str) and r.strip():
+        row["ai_fit_reason"] = r.strip()[:2000]
+    t = co.get("ai_fit_checked_at")
+    if isinstance(t, str) and t.strip():
+        row["ai_fit_checked_at"] = t.strip()
+    return row
 
 
 def _one_company_row_with_contacts(
@@ -121,12 +137,15 @@ def _one_company_row_with_contacts(
     name = str(co.get("name") or "").strip() or f"Company {i + 1}"
     website = str(co.get("website") or "").strip()
     if co.get("llm_hallucination") is True:
-        return {
-            "collect_index": i,
-            "name": name,
-            "website": website,
-            "contact_status": "llm_error",
-        }
+        return _merge_ai_fit_from_company_dict(
+            co,
+            {
+                "collect_index": i,
+                "name": name,
+                "website": website,
+                "contact_status": "llm_error",
+            },
+        )
     ckeys = _entity_keys(co)
     matching = _matching_contacts(ckeys, raw_contacts, key_index)
     has_match = bool(matching)
@@ -139,12 +158,13 @@ def _one_company_row_with_contacts(
         status = "none"
     else:
         status = "pending"
-    return {
+    out: dict = {
         "collect_index": i,
         "name": name,
         "website": website,
         "contact_status": status,
     }
+    return _merge_ai_fit_from_company_dict(co, out)
 
 
 def _one_company_row_lite(
@@ -157,33 +177,45 @@ def _one_company_row_lite(
     name = str(co.get("name") or "").strip() or f"Company {i + 1}"
     website = str(co.get("website") or "").strip()
     if co.get("llm_hallucination") is True:
-        return {
-            "collect_index": i,
-            "name": name,
-            "website": website,
-            "contact_status": "llm_error",
-        }
+        return _merge_ai_fit_from_company_dict(
+            co,
+            {
+                "collect_index": i,
+                "name": name,
+                "website": website,
+                "contact_status": "llm_error",
+            },
+        )
     persisted = co.get("contact_status")
     if isinstance(persisted, str) and persisted in PERSISTED_CONTACT_STATUSES:
-        return {
-            "collect_index": i,
-            "name": name,
-            "website": website,
-            "contact_status": persisted,  # type: ignore[typeddict-item]
-        }
+        return _merge_ai_fit_from_company_dict(
+            co,
+            {
+                "collect_index": i,
+                "name": name,
+                "website": website,
+                "contact_status": persisted,  # type: ignore[typeddict-item]
+            },
+        )
     if not find_completed:
-        return {
+        return _merge_ai_fit_from_company_dict(
+            co,
+            {
+                "collect_index": i,
+                "name": name,
+                "website": website,
+                "contact_status": "pending",
+            },
+        )
+    return _merge_ai_fit_from_company_dict(
+        co,
+        {
             "collect_index": i,
             "name": name,
             "website": website,
-            "contact_status": "pending",
-        }
-    return {
-        "collect_index": i,
-        "name": name,
-        "website": website,
-        "contact_status": "unknown",
-    }
+            "contact_status": "unknown",
+        },
+    )
 
 
 def _persist_run_company_contact_status(

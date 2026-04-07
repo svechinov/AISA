@@ -63,6 +63,7 @@ import {
   stripDraftForPanelLite,
 } from "@/lib/runPanelLite";
 import { fetchAllPagedItems } from "@/lib/paginatedApi";
+import { formatDateTimeYmdHms, formatDateYmd } from "@/lib/formatDate";
 import {
   Archive,
   ArchiveRestore,
@@ -77,6 +78,7 @@ import {
   FileText,
   Loader2,
   Mail,
+  Notebook,
   Pencil,
   RefreshCw,
   Search,
@@ -504,7 +506,7 @@ function seedNewRunFormFromRun(run) {
   const brief = ctx ? contextToOutreachBriefText(ctx) : DEFAULT_OUTREACH_BRIEF;
   const baseName = String(run.name ?? "").trim();
   const seg = String(run.segment ?? "").trim();
-  const dateStr = new Date().toLocaleDateString();
+  const dateStr = formatDateYmd(new Date());
   const name = baseName
     ? baseName
     : seg
@@ -526,7 +528,7 @@ function seedNewRunFormFromEditFormRead(payload) {
   }
   const baseName = String(payload.name ?? "").trim();
   const seg = String(payload.segment ?? "").trim();
-  const dateStr = new Date().toLocaleDateString();
+  const dateStr = formatDateYmd(new Date());
   const name = baseName ? baseName : seg ? seg : `Outreach wave · ${dateStr}`;
   return {
     name,
@@ -543,6 +545,8 @@ const API_TIMEOUT_MS = 25000;
 const START_RUN_TIMEOUT_MS = 600000;
 /** Single-company find retry calls the LLM again; allow longer than default API timeout. */
 const COMPANY_RETRY_FIND_TIMEOUT_MS = 120000;
+/** POST …/companies/analyze-fit-pending — many LLM calls in one request. */
+const COMPANY_AI_FIT_BATCH_TIMEOUT_MS = 600000;
 /** Background PATCH after optimistic UI; server is fast — this bounds how long we retry reconciling. */
 const RUN_SETUP_PATCH_TIMEOUT_MS = 45000;
 /** GET /runs/:id/review-setup-fields — tiny JSON for Prompt/Signature dialogs (no full run row). */
@@ -558,6 +562,9 @@ const MOCK_SEND_PREVIEW_POST_TIMEOUT_MS = 120000;
 /** Poll GET /email-drafts/:id until terminal status (API returns 202 immediately; Gmail runs in background). */
 const OUTBOUND_SEND_POLL_MS = 2000;
 const OUTBOUND_SEND_POLL_MAX = 30;
+/** After «Send all approved»: poll draft list this often so cards leave Review one-by-one (sequential Gmail). */
+const BULK_SEND_DRAFTS_POLL_MS = 450;
+const BULK_SEND_DRAFTS_POLL_MAX_ITER = 140;
 /** Background poll / metrics-only refresh: workspace-tick + global performance (no contact/draft lists). */
 const POLL_METRICS_TIMEOUT_MS = 60000;
 /** Don’t spam the activity log with the same silent metrics failure on every poll tick. */
@@ -670,7 +677,25 @@ function formatSetupIntegrationInformer(si) {
       : "—";
   const cdnId = String(si?.cdn_provider ?? "").trim().toLowerCase();
   const cdnPart = cdnId ? SETUP_CDN_LABELS[cdnId] || pretty(cdnId) : "—";
-  return { llmPart, cdnPart };
+  const outreachPart = si?.apollo_outreach_ready === true ? "Apollo" : "—";
+  return { llmPart, cdnPart, outreachPart };
+}
+
+/** Known-fixed server bug text — hide in Review even if drafts state was cached before API strip. */
+function isStaleOutboundDraftErrorMessage(msg) {
+  if (msg == null || msg === "") return false;
+  return String(msg).toLowerCase().includes("simplenamespace");
+}
+
+/** Append server-pushed Activity lines (e.g. Apollo progress) from workspace-lite / workspace-tick. */
+function appendHumanUiActivityInformers(lite, appendLog) {
+  const rows = lite?.activity_informers;
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  for (const row of rows) {
+    const text = typeof row?.text === "string" ? row.text.trim() : "";
+    if (!text) continue;
+    appendLog(text);
+  }
 }
 
 /** Merge GET /runs/:id/workspace-lite or workspace-tick into existing workspace (metrics-only refresh path). */
@@ -809,6 +834,17 @@ function detailFromApiErrorMessage(msg) {
     /* plain text */
   }
   return m;
+}
+
+/** True when Gmail refresh failed (expired/revoked token) — UI should offer Connect Gmail even if setup still showed «ready». */
+function isGmailAuthReconnectErrorMessage(raw) {
+  const m = String(detailFromApiErrorMessage(raw) || raw || "").toLowerCase();
+  return (
+    m.includes("gmail authorization failed") ||
+    m.includes("invalid_grant") ||
+    m.includes("token has been expired") ||
+    m.includes("token has been revoked")
+  );
 }
 
 function formatApiError(e) {
@@ -1143,7 +1179,8 @@ export default function AiBizOsHumanUI() {
   const [contactsSectionFetchBusy, setContactsSectionFetchBusy] = useState(false);
   /** Right-top activity log: { id, t, text }[] */
   const [activityLogLines, setActivityLogLines] = useState([]);
-  const [activityLogDismissed, setActivityLogDismissed] = useState(false);
+  /** Activity panel: only visible when user opens it via the notebook button (never auto). */
+  const [activityLogPinnedOpen, setActivityLogPinnedOpen] = useState(false);
   const runDetailsLoadGenRef = useRef(0);
   const activityLogEndRef = useRef(null);
   const [error, setError] = useState("");
@@ -1312,6 +1349,11 @@ export default function AiBizOsHumanUI() {
    * Keyed by collect_index; reset when switching runs.
    */
   const [companyFindUnavailable, setCompanyFindUnavailable] = useState(() => ({}));
+  /** { name, engine: "apollo" | "llm" } while Continue searching / Retry all / per-row Retry runs find. */
+  const [companyBulkFindProgress, setCompanyBulkFindProgress] = useState(null);
+  const [removeCompanyDialog, setRemoveCompanyDialog] = useState(null);
+  const [removeCompanyInFlight, setRemoveCompanyInFlight] = useState(false);
+  const [companyAiFitBatchLoading, setCompanyAiFitBatchLoading] = useState(false);
   const [setupIntegration, setSetupIntegration] = useState(null);
   const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
   const [gmailForm, setGmailForm] = useState({
@@ -1457,7 +1499,6 @@ export default function AiBizOsHumanUI() {
       full += `\n${formatDebugDetail(detail)}`;
     }
     setActivityLogLines((prev) => [...prev.slice(-400), { id, t: Date.now(), text: full }]);
-    setActivityLogDismissed(false);
   }, []);
 
   useLayoutEffect(() => {
@@ -1585,26 +1626,92 @@ export default function AiBizOsHumanUI() {
     if (!runId) return;
     setError("");
     setContinueCompanyFindLoading(true);
-    appendActivityLog(`Companies: POST /runs/${runId}/companies/continue-find`);
-    try {
-      await api(`/runs/${runId}/companies/continue-find`, {
-        method: "POST",
-        timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
-      });
+    const engine = setupIntegration?.apollo_outreach_ready === true ? "apollo" : "llm";
+    const engineLabel = engine === "apollo" ? "Apollo" : "LLM";
+    appendActivityLog(`Companies: Continue searching — start (run_id=${runId}, ${engineLabel})`);
+    const companiesSnapshotUrl = () => {
       const ps = new URLSearchParams();
       ps.set("limit", String(COMPANIES_FETCH_MAX));
       ps.set("offset", "0");
-      const data = await api(`/runs/${runId}/companies?${ps}`, {
-        timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
-      });
+      return `/runs/${runId}/companies?${ps}`;
+    };
+    const retryQueueScanUrl = () => {
+      const ps = new URLSearchParams();
+      ps.set("limit", String(COMPANIES_RETRY_QUEUE_SCAN_MAX));
+      ps.set("offset", "0");
+      return `/runs/${runId}/companies?${ps}`;
+    };
+    const finalizeContinueFind = async () => {
+      try {
+        appendActivityLog(`Companies: POST /runs/${runId}/companies/continue-find (finalize)`);
+        await api(`/runs/${runId}/companies/continue-find`, {
+          method: "POST",
+          timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
+        });
+      } catch (e) {
+        const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
+        if (!/already completed/i.test(msg)) {
+          throw e;
+        }
+        appendActivityLog(`Continue searching finalize skipped: ${msg}`);
+      }
+    };
+    try {
+      const scan = await api(retryQueueScanUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
+      const hasPending = (list) =>
+        Array.isArray(list) && list.some((c) => c.contact_status === "pending");
+      if (!hasPending(scan.companies)) {
+        await finalizeContinueFind();
+        const data = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
+        setCompaniesPanel(normalizeCompaniesPanelResponse(data, 0));
+        setCompanyFindUnavailable({});
+        refreshRunMetricsOnly(runId);
+        appendActivityLog("Continue searching finished; table refreshed.");
+        return;
+      }
+      for (let safety = 0; safety < 500; safety++) {
+        const fullScan = await api(retryQueueScanUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
+        const row = fullScan.companies?.find((c) => {
+          const idx = normalizeCompanyCollectIndex(c);
+          if (idx == null) return false;
+          return c.contact_status === "pending";
+        });
+        if (!row) {
+          break;
+        }
+        const k = normalizeCompanyCollectIndex(row);
+        if (k == null) continue;
+        const rowLabel = String(row?.name ?? row?.company ?? "—").trim() || "—";
+        setCompanyBulkFindProgress({ name: rowLabel, engine });
+        setCompanyRetryLoading((prev) => ({ ...prev, [k]: true }));
+        appendActivityLog(`Companies: Continue searching — ${engineLabel} «${rowLabel}» (collect_index=${k})`);
+        try {
+          await api(`/runs/${runId}/companies/retry-find`, {
+            method: "POST",
+            body: { collect_index: k },
+            timeoutMs: COMPANY_RETRY_FIND_TIMEOUT_MS,
+          });
+        } finally {
+          setCompanyRetryLoading((prev) => {
+            const next = { ...prev };
+            delete next[k];
+            return next;
+          });
+        }
+        const snap = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
+        setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
+      }
+      await finalizeContinueFind();
+      const data = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
       setCompaniesPanel(normalizeCompaniesPanelResponse(data, 0));
       setCompanyFindUnavailable({});
       refreshRunMetricsOnly(runId);
-      appendActivityLog("Continue-find finished; table refreshed.");
+      appendActivityLog("Continue searching finished; table refreshed.");
     } catch (e) {
-      appendActivityLog(`Continue-find: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
+      appendActivityLog(`Continue searching: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
       setUiError(setError, e);
     } finally {
+      setCompanyBulkFindProgress(null);
       setContinueCompanyFindLoading(false);
     }
   };
@@ -1614,6 +1721,10 @@ export default function AiBizOsHumanUI() {
     const k = Number(collectIndex);
     if (!Number.isFinite(k) || k < 0) return;
     setError("");
+    const engine = setupIntegration?.apollo_outreach_ready === true ? "apollo" : "llm";
+    const rowHint = companiesPanel?.companies?.find((c) => normalizeCompanyCollectIndex(c) === k);
+    const progressName = String(rowHint?.name ?? rowHint?.company ?? "—").trim() || "—";
+    setCompanyBulkFindProgress({ name: progressName, engine });
     setCompanyRetryLoading((prev) => ({ ...prev, [k]: true }));
     appendActivityLog(`Companies: POST /runs/${runId}/companies/retry-find { collect_index: ${k} }`);
     try {
@@ -1665,6 +1776,7 @@ export default function AiBizOsHumanUI() {
       });
       setUiError(setError, e);
     } finally {
+      setCompanyBulkFindProgress(null);
       setCompanyRetryLoading((prev) => {
         const next = { ...prev };
         delete next[k];
@@ -1677,6 +1789,7 @@ export default function AiBizOsHumanUI() {
   const retryAllCompanyFindNotFound = async (runId) => {
     if (!runId) return;
     setError("");
+    const engine = setupIntegration?.apollo_outreach_ready === true ? "apollo" : "llm";
     setCompanyRetryAllLoading(true);
     appendActivityLog(`Companies: Retry all — start (run_id=${runId})`);
     let retryAllAbortedByError = false;
@@ -1701,6 +1814,7 @@ export default function AiBizOsHumanUI() {
         const row = fullScan.companies?.find((c) => {
           const idx = normalizeCompanyCollectIndex(c);
           if (idx == null) return false;
+          if (c.ai_fit_status === "incorrect") return false;
           return (
             (c.contact_status === "none" ||
               c.contact_status === "no_email" ||
@@ -1711,13 +1825,19 @@ export default function AiBizOsHumanUI() {
         if (!row) {
           const snap = await api(companiesSnapshotUrl(), { timeoutMs: COMPANIES_HTTP_TIMEOUT_MS });
           setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
-          appendActivityLog(`Companies: Retry all — queue empty, table refreshed (run_id=${runId}).`);
+          const findSt = snap?.find_step_status;
+          appendActivityLog(
+            findSt && findSt !== "completed"
+              ? `Companies: Retry all — no rows with Not found / no email / unknown (or all skipped as unavailable); find step=${findSt}. For «Not searched yet» use Continue searching. Table refreshed (run_id=${runId}).`
+              : `Companies: Retry all — queue empty, table refreshed (run_id=${runId}).`,
+          );
           break;
         }
 
         const collectIndex = normalizeCompanyCollectIndex(row);
         if (collectIndex == null) continue;
         const rowLabel = String(row?.name ?? row?.company ?? "—").trim() || "—";
+        setCompanyBulkFindProgress({ name: rowLabel, engine });
         appendActivityLog(
           `Companies: Retry all — POST retry-find collect_index=${collectIndex} "${rowLabel}" (was: contact_status=${row?.contact_status ?? "—"})`,
           { runId, collectIndex },
@@ -1786,7 +1906,75 @@ export default function AiBizOsHumanUI() {
         appendActivityLog(`Companies: Retry all — finished (run_id=${runId}).`);
       }
     } finally {
+      setCompanyBulkFindProgress(null);
       setCompanyRetryAllLoading(false);
+    }
+  };
+
+  const confirmRemoveCompanyFromRun = async () => {
+    if (!removeCompanyDialog || !selectedRun?.id) return;
+    const { collectIndex, name } = removeCompanyDialog;
+    setRemoveCompanyInFlight(true);
+    setError("");
+    appendActivityLog(`Companies: DELETE /runs/${selectedRun.id}/companies/${collectIndex} (${name})`);
+    try {
+      await api(`/runs/${selectedRun.id}/companies/${collectIndex}`, { method: "DELETE" });
+      const ps = new URLSearchParams();
+      ps.set("limit", String(COMPANIES_FETCH_MAX));
+      ps.set("offset", "0");
+      const data = await api(`/runs/${selectedRun.id}/companies?${ps}`, {
+        timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+      });
+      setCompaniesPanel(normalizeCompaniesPanelResponse(data, 0));
+      setCompanyFindUnavailable((prev) => {
+        if (!(collectIndex in prev)) return prev;
+        const next = { ...prev };
+        delete next[collectIndex];
+        return next;
+      });
+      refreshRunMetricsOnly(selectedRun.id);
+      appendActivityLog(`Companies: removed «${name}» (collect_index=${collectIndex}).`);
+      setRemoveCompanyDialog(null);
+    } catch (e) {
+      appendActivityLog(`Companies: remove error — ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
+      setUiError(setError, e);
+    } finally {
+      setRemoveCompanyInFlight(false);
+    }
+  };
+
+  /** POST …/companies/analyze-fit-pending — LLM labels rows without ``ai_fit_checked_at`` (not repeated). */
+  const runCompaniesAiFitPending = async (runId) => {
+    if (!runId) return;
+    setError("");
+    setCompanyAiFitBatchLoading(true);
+    appendActivityLog(`Companies: AI analysis — starting… (run_id=${runId})`);
+    try {
+      const ps0 = new URLSearchParams();
+      ps0.set("limit", String(COMPANIES_FETCH_MAX));
+      ps0.set("offset", "0");
+      const companiesPath = `/runs/${runId}/companies?${ps0}`;
+      const data = await logTimedApi(
+        "Companies AI analysis",
+        `/runs/${runId}/companies/analyze-fit-pending`,
+        {
+          method: "POST",
+          body: { max_rows: 200, force: false },
+          timeoutMs: COMPANY_AI_FIT_BATCH_TIMEOUT_MS,
+        },
+      );
+      const n = typeof data?.analyzed === "number" ? data.analyzed : 0;
+      const errN = Array.isArray(data?.errors) ? data.errors.length : 0;
+      appendActivityLog(`Companies: AI analysis — done — analyzed=${n}, row_errors=${errN}`);
+      const snap = await logTimedApi("Companies table (after AI analysis)", companiesPath, {
+        timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+      });
+      setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
+      refreshRunMetricsOnly(runId);
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setCompanyAiFitBatchLoading(false);
     }
   };
 
@@ -1925,6 +2113,7 @@ export default function AiBizOsHumanUI() {
         [wsLiteData] = await Promise.all([pWsLite]);
       }
       if (runLoadTargetRef.current !== rid) return null;
+      appendHumanUiActivityInformers(wsLiteData, appendActivityLog);
       appendActivityLog(
         "→ loadRunDetails: workspace-lite applied (sidebar + metrics bundle; no full GET /runs/:id).",
       );
@@ -2077,31 +2266,32 @@ export default function AiBizOsHumanUI() {
   };
 
   /**
-   * Workspace-tick + Total performance — updates Run setup counts, Run performance, sidebar cards.
-   * Hourly chart and conversation/reminder counters refresh on loadRunDetails or full workspace-lite.
+   * Workspace-tick + Total performance — updates Run setup (summary + hourly chart), performance, sidebar cards.
+   * Conversation/reminder rollups still refresh on loadRunDetails or full workspace-lite.
+   * Returns a Promise so callers (e.g. bulk-send poll) can await and avoid stacking skipped refreshes.
    */
   const refreshRunMetricsOnly = useCallback((runId) => {
-    if (!runId) return;
+    if (!runId) return Promise.resolve();
     if (restartsInFlightRef.current[runId]) {
       appendActivityLog(
         `[metrics SKIPPED] run_id=${runId}: restart/background work in progress — not starting parallel GET /workspace-tick + /global-performance (worker/DB may be busy; avoids starving other tabs).`,
       );
-      return;
+      return Promise.resolve();
     }
     if (metricsPollInFlightRef.current) {
       appendActivityLog(
         `[metrics SKIPPED] run_id=${runId}: previous metrics poll still in flight — lightweight GETs can wait behind GET /runs/${runId}/workspace-tick + GET /sending/global-performance.`,
       );
-      return;
+      return Promise.resolve();
     }
     metricsPollAbortRef.current?.abort();
     const ac = new AbortController();
     metricsPollAbortRef.current = ac;
     metricsPollInFlightRef.current = true;
     appendActivityLog(
-      `[metrics START] run_id=${runId}: parallel GET /runs/${runId}/workspace-tick (phase + setup_summary + performance; no hourly/reminders) + GET /sending/global-performance`,
+      `[metrics START] run_id=${runId}: parallel GET /runs/${runId}/workspace-tick (phase + setup_summary + performance + hourly chart) + GET /sending/global-performance`,
     );
-    void (async () => {
+    return (async () => {
       const bundleT0 = typeof performance !== "undefined" ? performance.now() : Date.now();
       try {
         const [wsLite, tp] = await Promise.all([
@@ -2121,6 +2311,7 @@ export default function AiBizOsHumanUI() {
         appendActivityLog(
           `[metrics BUNDLE OK] run_id=${runId} wall-clock ${bundleMs}ms (both requests finished; server may still have been busy before this tick).`,
         );
+        appendHumanUiActivityInformers(wsLite, appendActivityLog);
         metricsSilentFailureLastLogAtRef.current = 0;
         setWorkspace((prev) => {
           if (!prev || Number(prev.id) !== Number(runId)) return prev;
@@ -2461,7 +2652,7 @@ export default function AiBizOsHumanUI() {
         await new Promise((r) => setTimeout(r, OUTBOUND_SEND_POLL_MS));
       }
       await refreshRunContactsAndDrafts(runId);
-      refreshRunMetricsOnly(runId);
+      await refreshRunMetricsOnly(runId);
     },
     [refreshRunContactsAndDrafts, refreshRunMetricsOnly],
   );
@@ -2474,8 +2665,9 @@ export default function AiBizOsHumanUI() {
         options.initialSentIds instanceof Set
           ? new Set(options.initialSentIds)
           : new Set();
-      await new Promise((r) => setTimeout(r, 500));
-      for (let i = 0; i < 90; i++) {
+      let prevSentRowCount = -1;
+      await new Promise((r) => setTimeout(r, 250));
+      for (let i = 0; i < BULK_SEND_DRAFTS_POLL_MAX_ITER; i++) {
         try {
           const draftsData = await fetchAllPagedItems(
             (u) => api(u, { timeoutMs: LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS }),
@@ -2483,6 +2675,22 @@ export default function AiBizOsHumanUI() {
           );
           const arr = Array.isArray(draftsData) ? draftsData : [];
           const stillSending = arr.some((x) => x.status === "sending");
+          if (Number(selectedRunIdRef.current) === Number(runId)) {
+            setDrafts(arr);
+            try {
+              const dp = draftsForRunPanelLitePreview(arr)
+                .map(stripDraftForPanelLite)
+                .filter(Boolean);
+              snapshotMergeWriteRunPanelLite(runId, { draftsPreview: dp });
+            } catch {
+              /* best-effort */
+            }
+          }
+          const sentRowCount = arr.filter((x) => String(x?.status) === "sent").length;
+          if (prevSentRowCount >= 0 && sentRowCount > prevSentRowCount) {
+            await refreshRunMetricsOnly(runId);
+          }
+          prevSentRowCount = sentRowCount;
           for (const row of arr) {
             if (String(row?.status) !== "sent") continue;
             const did = Number(row.id);
@@ -2503,14 +2711,15 @@ export default function AiBizOsHumanUI() {
         } catch {
           break;
         }
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, BULK_SEND_DRAFTS_POLL_MS));
       }
       appendActivityLog(`Send all approved: draft poll finished (run_id=${runId}).`, {
         runId,
         source: "reconcileAfterBulkSend",
       });
+      // Graph + Run setup strip first (light GETs); heavy contacts/drafts paged load must not block the chart.
+      await refreshRunMetricsOnly(runId);
       await refreshRunContactsAndDrafts(runId);
-      refreshRunMetricsOnly(runId);
     },
     [appendActivityLog, refreshRunContactsAndDrafts, refreshRunMetricsOnly],
   );
@@ -3781,6 +3990,9 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
+      if (isGmailAuthReconnectErrorMessage(String(e?.message ?? e ?? ""))) {
+        openGmailSetup();
+      }
     } finally {
       setSendingOutboundDraftIds((p) => {
         const next = { ...p };
@@ -3824,6 +4036,9 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
+      if (isGmailAuthReconnectErrorMessage(String(e?.message ?? e ?? ""))) {
+        openGmailSetup();
+      }
     } finally {
       setSendAllApprovedBusy(false);
     }
@@ -3846,6 +4061,9 @@ export default function AiBizOsHumanUI() {
     } catch (e) {
       setUiError(setError, e);
       void loadSetupIntegration();
+      if (isGmailAuthReconnectErrorMessage(String(e?.message ?? e ?? ""))) {
+        openGmailSetup();
+      }
     } finally {
       setTestSendBusy(false);
     }
@@ -5133,12 +5351,28 @@ export default function AiBizOsHumanUI() {
     const cardClass = multi ? pickGroupContactCardClass(group) : contactCardClass(group[0]);
     const cardKey = multi ? `grp-${group.map((c) => c.id).join("-")}` : group[0].id;
     const touched = companyGroupHasActiveOutreachPending(group);
+    const companyAiFit = group[0]?.company_ai_fit_status;
     return (
       <Card key={cardKey} className={cardClass}>
         <CardContent className="p-5">
           <div className="mb-4 border-b border-border pb-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-lg font-semibold">{group[0].company || "Unnamed company"}</span>
+              {companyAiFit === "correct" ? (
+                <Badge
+                  variant="outline"
+                  className="border-emerald-300 bg-emerald-100 font-normal text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-100"
+                >
+                  AI OK
+                </Badge>
+              ) : companyAiFit === "incorrect" ? (
+                <Badge
+                  variant="outline"
+                  className="border-red-300 bg-red-100 font-normal text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100"
+                >
+                  AI Incorrect
+                </Badge>
+              ) : null}
               {touched ? (
                 <Badge
                   variant="default"
@@ -5480,6 +5714,7 @@ export default function AiBizOsHumanUI() {
             </div>
           </div>
           {draft.error_message &&
+          !isStaleOutboundDraftErrorMessage(draft.error_message) &&
           !["bounced", "dead_mailbox", "replied"].includes(String(draft.tracking_status || "")) &&
           !dismissedOutboundDraftErrorKeys.has(`${draft.id}:${draft.error_message}`) ? (
             <div className="flex items-start gap-2 rounded-xl border-2 border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
@@ -5518,8 +5753,7 @@ export default function AiBizOsHumanUI() {
     analyzerLoading ||
     continueCompanyFindLoading ||
     Object.keys(restartsInFlight).length > 0;
-  const showActivityLogPanel =
-    !activityLogDismissed && (activityLogBusy || activityLogLines.length > 0);
+  const showActivityLogPanel = activityLogPinnedOpen;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -5545,7 +5779,7 @@ export default function AiBizOsHumanUI() {
                 className="h-8 px-2 text-xs"
                 onClick={() => {
                   setActivityLogLines([]);
-                  setActivityLogDismissed(true);
+                  setActivityLogPinnedOpen(false);
                 }}
               >
                 Clear
@@ -5556,7 +5790,7 @@ export default function AiBizOsHumanUI() {
                 size="icon"
                 className="h-8 w-8 shrink-0"
                 aria-label="Close activity log"
-                onClick={() => setActivityLogDismissed(true)}
+                onClick={() => setActivityLogPinnedOpen(false)}
               >
                 <X className="h-4 w-4" aria-hidden />
               </Button>
@@ -5567,11 +5801,7 @@ export default function AiBizOsHumanUI() {
               {activityLogLines.map((line) => (
                 <li key={line.id} className="max-w-full whitespace-pre-wrap break-words">
                   <span className="tabular-nums text-muted-foreground">
-                    {new Date(line.t).toLocaleTimeString(undefined, {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      second: "2-digit",
-                    })}
+                    {formatDateTimeYmdHms(line.t)}
                   </span>{" "}
                   {line.text}
                 </li>
@@ -5611,6 +5841,17 @@ export default function AiBizOsHumanUI() {
                 </DialogContent>
               </Dialog>
               <ThemeToggle />
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 w-10 shrink-0 p-0"
+                aria-label={showActivityLogPanel ? "Hide activity log" : "Show activity log"}
+                aria-pressed={showActivityLogPanel}
+                title="Activity log"
+                onClick={() => setActivityLogPinnedOpen((p) => !p)}
+              >
+                <Notebook className="h-4 w-4" aria-hidden />
+              </Button>
             </div>
           </div>
 
@@ -5706,9 +5947,12 @@ export default function AiBizOsHumanUI() {
                   <div className="text-foreground/90">
                     <span className="text-muted-foreground">LLMs</span>{" "}
                     <span className="font-medium">{integrationInformer.llmPart}</span>
-                    <span className="px-1.5 text-muted-foreground">·</span>
+                    <span className="px-1.5 text-muted-foreground">•</span>
                     <span className="text-muted-foreground">CDN</span>{" "}
                     <span className="font-medium">{integrationInformer.cdnPart}</span>
+                    <span className="px-1.5 text-muted-foreground">•</span>
+                    <span className="text-muted-foreground">Outreach</span>{" "}
+                    <span className="font-medium">{integrationInformer.outreachPart}</span>
                   </div>
                 </div>
               </div>
@@ -6204,6 +6448,21 @@ export default function AiBizOsHumanUI() {
                           </span>
                         </p>
                       ) : null}
+                      {companyBulkFindProgress &&
+                      (continueCompanyFindLoading || companyRetryAllLoading || Object.keys(companyRetryLoading).length > 0) ? (
+                        <div
+                          role="status"
+                          className="flex items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-sm text-foreground"
+                        >
+                          <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
+                          <span>
+                            Searching{" "}
+                            <span className="font-medium">«{companyBulkFindProgress.name}»</span>
+                            {" — "}
+                            {companyBulkFindProgress.engine === "apollo" ? "Apollo" : "LLM"}
+                          </span>
+                        </div>
+                      ) : null}
                     </div>
                     <div className="flex shrink-0 flex-col gap-2 self-start sm:mt-0.5 sm:items-end">
                       {companiesPanel?.companies?.some((c) => c.contact_status === "pending") &&
@@ -6230,6 +6489,7 @@ export default function AiBizOsHumanUI() {
                       {companiesPanel?.companies?.some((c) => {
                         const idx = normalizeCompanyCollectIndex(c);
                         if (idx == null) return false;
+                        if (c.ai_fit_status === "incorrect") return false;
                         return (
                           (c.contact_status === "none" ||
                             c.contact_status === "no_email" ||
@@ -6259,6 +6519,34 @@ export default function AiBizOsHumanUI() {
                             </>
                           ) : (
                             "Retry all"
+                          )}
+                        </Button>
+                      ) : null}
+                      {(companiesPanel?.companies?.length ?? 0) > 0 &&
+                      selectedRun &&
+                      !selectedRun.closed_at &&
+                      !restartsInFlight[selectedRun.id] ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          title="Label companies that still need analysis (LLM vs your campaign brief). Already analyzed rows are skipped."
+                          disabled={
+                            companiesLoading ||
+                            continueCompanyFindLoading ||
+                            companyRetryAllLoading ||
+                            companyAiFitBatchLoading ||
+                            Object.keys(companyRetryLoading).length > 0
+                          }
+                          onClick={() => void runCompaniesAiFitPending(selectedRun.id)}
+                        >
+                          {companyAiFitBatchLoading ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                              AI analysis…
+                            </>
+                          ) : (
+                            "AI analysis"
                           )}
                         </Button>
                       ) : null}
@@ -6324,8 +6612,12 @@ export default function AiBizOsHumanUI() {
                               Not available
                             </Badge>
                             <span>
-                              Find returned people without emails, or retry added nothing — further retries are hidden
-                              for that row.
+                              <strong>Not available</strong> here means no <strong>usable email</strong> for this company
+                              in find-contacts output: Apollo may return people but often without an email in the API
+                              response (plan/tier), or the site had no domain for contact search. Collecting a company
+                              (org search) and finding a person with an email are separate steps. Use{" "}
+                              <strong>Retry</strong> if the row is still open, or <strong>Remove</strong> if the company
+                              is off-target.
                             </span>
                           </span>
                           <span className="inline-flex flex-wrap items-start gap-1.5">
@@ -6334,15 +6626,29 @@ export default function AiBizOsHumanUI() {
                             </Badge>
                             <span>Find-contacts still running or not completed — more results may arrive.</span>
                           </span>
+                          <span className="inline-flex flex-wrap items-start gap-1.5">
+                            <Badge variant="destructive" className="font-normal">
+                              Incorrect
+                            </Badge>
+                            <span className="inline-flex flex-wrap gap-1">
+                              <span className="font-medium text-foreground">Campaign fit</span> (AI analysis): one
+                              LLM pass per company vs your campaign brief.{" "}
+                              <strong>OK</strong> = plausible target; <strong>Incorrect</strong> = off-target. Analyzed
+                              rows are stored and are not analyzed again when you use <strong>AI analysis</strong>{" "}
+                              (only rows without a label yet).
+                            </span>
+                          </span>
                         </div>
                       </details>
-                      <div className="overflow-x-auto rounded-xl border-2 border-border">
-                        <table className="w-full min-w-[520px] text-left text-sm">
+                      <div className="overflow-x-auto rounded-xl border-2 border-border pb-4">
+                        <table className="w-full min-w-[760px] text-left text-sm">
                           <thead className="border-b border-border bg-muted/40 text-xs font-semibold text-muted-foreground">
                             <tr>
                               <th className="px-3 py-2">Company</th>
                               <th className="px-3 py-2">Website</th>
                               <th className="whitespace-nowrap px-3 py-2 align-bottom">Contact search</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Campaign fit</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Actions</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -6407,6 +6713,7 @@ export default function AiBizOsHumanUI() {
                               const canRetryCompanyFind =
                                 (st === "none" || st === "no_email" || st === "unknown") &&
                                 st !== "llm_error" &&
+                                row.ai_fit_status !== "incorrect" &&
                                 !unavailable &&
                                 selectedRun &&
                                 !selectedRun.closed_at &&
@@ -6456,16 +6763,69 @@ export default function AiBizOsHumanUI() {
                                       ) : null}
                                     </div>
                                   </td>
+                                  <td className="max-w-[14rem] px-3 py-2 align-middle text-xs">
+                                    {row.ai_fit_status === "incorrect" ? (
+                                      <Badge
+                                        variant="destructive"
+                                        className="font-normal"
+                                        title={
+                                          typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
+                                            ? row.ai_fit_reason.trim()
+                                            : "Does not match your campaign brief"
+                                        }
+                                      >
+                                        Incorrect
+                                      </Badge>
+                                    ) : row.ai_fit_status === "correct" ? (
+                                      <Badge
+                                        variant="outline"
+                                        className="border-emerald-600/40 font-normal text-emerald-950 dark:text-emerald-100"
+                                        title={
+                                          typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
+                                            ? row.ai_fit_reason.trim()
+                                            : "Plausible fit for this campaign"
+                                        }
+                                      >
+                                        OK
+                                      </Badge>
+                                    ) : (
+                                      <span className="text-muted-foreground">—</span>
+                                    )}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 align-middle">
+                                    {selectedRun &&
+                                    !selectedRun.closed_at &&
+                                    !restartsInFlight[selectedRun.id] &&
+                                    ci != null ? (
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-6 shrink-0 whitespace-nowrap rounded-full px-2.5 text-xs font-medium"
+                                        disabled={removeCompanyInFlight}
+                                        onClick={() =>
+                                          setRemoveCompanyDialog({
+                                            collectIndex: ci,
+                                            name: String(row?.name ?? "—").trim() || "—",
+                                          })
+                                        }
+                                      >
+                                        Remove
+                                      </Button>
+                                    ) : (
+                                      "—"
+                                    )}
+                                  </td>
                                 </tr>
                               );
                             })}
                           </tbody>
                         </table>
                     {companiesTotalForUi > WORKSPACE_TABLE_PAGE_SIZE ? (
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
-                          <span>
+                        <div className="mt-4 w-full border-t border-border px-3 pt-4">
+                          <div className="flex w-full flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
                             {companiesRangeStart > 0 && companiesRangeEnd > 0 ? (
-                              <>
+                              <span className="text-center">
                                 {companiesRangeStart}–{companiesRangeEnd} of {companiesTotalForUi}
                                 {companiesListTruncated ? (
                                   <span className="text-foreground">
@@ -6473,28 +6833,28 @@ export default function AiBizOsHumanUI() {
                                     (showing first {companiesLoadedCount} loaded)
                                   </span>
                                 ) : null}
-                              </>
+                              </span>
                             ) : null}
-                          </span>
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={companiesPage <= 1 || companiesLoading}
-                              onClick={() => setCompaniesPage((p) => Math.max(1, p - 1))}
-                            >
-                              Previous
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={companiesPage >= companiesPageCount || companiesLoading}
-                              onClick={() => setCompaniesPage((p) => Math.min(companiesPageCount, p + 1))}
-                            >
-                              Next
-                            </Button>
+                            <div className="flex flex-wrap items-center justify-center gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={companiesPage <= 1 || companiesLoading}
+                                onClick={() => setCompaniesPage((p) => Math.max(1, p - 1))}
+                              >
+                                Previous
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={companiesPage >= companiesPageCount || companiesLoading}
+                                onClick={() => setCompaniesPage((p) => Math.min(companiesPageCount, p + 1))}
+                              >
+                                Next
+                              </Button>
+                            </div>
                           </div>
                         </div>
                       ) : companiesTotalForUi > 0 ? (
@@ -6549,24 +6909,42 @@ export default function AiBizOsHumanUI() {
                   <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center md:max-w-none md:justify-end">
                     <div className="flex flex-wrap gap-2">
                       {mainNav === "drafts" ? (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          title="Send the first sendable approved draft to yourself (To = From: GMAIL_SEND_AS_EMAIL when set, else primary Gmail). Does not update drafts or the database."
-                          onClick={() => void testSendFirstApproved()}
-                          disabled={!selectedRun || approvedDrafts === 0 || testSendBusy}
-                        >
-                          {testSendBusy ? (
-                            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-                          ) : !gmailSendReady ? (
-                            <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
-                          ) : (
-                            <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
-                          )}
-                          Test
-                        </Button>
+                        <>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            title="Reconnect Google — refresh OAuth token or fix client credentials in the running API."
+                            onClick={() => openGmailSetup()}
+                            disabled={!selectedRun}
+                          >
+                            {!gmailSendReady ? (
+                              <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
+                            ) : (
+                              <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
+                            )}
+                            Connect Gmail
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            title="Send the first sendable approved draft to yourself (To = From: GMAIL_SEND_AS_EMAIL when set, else primary Gmail). Does not update drafts or the database."
+                            onClick={() => void testSendFirstApproved()}
+                            disabled={!selectedRun || approvedDrafts === 0 || testSendBusy}
+                          >
+                            {testSendBusy ? (
+                              <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                            ) : !gmailSendReady ? (
+                              <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
+                            ) : (
+                              <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
+                            )}
+                            Test
+                          </Button>
+                        </>
                       ) : null}
                       <Button
                         type="button"
@@ -7618,6 +7996,55 @@ export default function AiBizOsHumanUI() {
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setSwitchRunOpen(false)}>
               Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={removeCompanyDialog != null}
+        onOpenChange={(open) => {
+          if (!open && !removeCompanyInFlight) setRemoveCompanyDialog(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove this company?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            {removeCompanyDialog ? (
+              <>
+                Are you sure you want to remove{" "}
+                <span className="font-medium text-foreground">«{removeCompanyDialog.name}»</span> from this run? Matching
+                contacts stored for this company will be removed. This does not affect other runs.
+              </>
+            ) : (
+              "—"
+            )}
+          </p>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={removeCompanyInFlight}
+              onClick={() => setRemoveCompanyDialog(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={removeCompanyInFlight}
+              onClick={() => void confirmRemoveCompanyFromRun()}
+            >
+              {removeCompanyInFlight ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  Removing…
+                </>
+              ) : (
+                "Yes, remove"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

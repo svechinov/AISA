@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.services.apollo_service import apollo_configured
 from app.services.env_bootstrap import (
     build_setup_hints,
     cdn_configured_from_environ,
@@ -48,6 +49,10 @@ class SetupStatus(BaseModel):
     cdn_r2_upload_ready: bool = Field(
         False,
         description="True when Cloudflare R2 env is complete for POST /assets/upload (PDF etc.).",
+    )
+    apollo_outreach_ready: bool = Field(
+        False,
+        description="True when APOLLO_API_KEY is set — collect + find-contacts use Apollo for org/people search.",
     )
     gmail_client_configured: bool = Field(
         False,
@@ -141,6 +146,7 @@ def setup_status(response: Response) -> SetupStatus:
             llm_providers_ready=llm_providers_ready_from_environ(),
             cdn_provider=cdn_provider_id_from_environ(),
             cdn_r2_upload_ready=r2_ready,
+            apollo_outreach_ready=apollo_configured(),
             gmail_client_configured=gc,
             gmail_refresh_token_set=gr,
             gmail_send_ready=gc and gr,

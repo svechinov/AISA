@@ -154,13 +154,14 @@ def retry_find_for_collected_company(db: Session, run_id: int, collect_index: in
         raise ValueError("Run is closed")
 
     step_collect = get_step_by_run_and_name(db, run_id, "collect_companies")
-    step_find_ref = get_step_by_run_and_name(db, run_id, "find_contacts")
-    step_validate_ref = get_step_by_run_and_name(db, run_id, "validate_contacts")
+    if not step_collect:
+        raise ValueError("Collect companies step not found")
+    if step_collect.status == "failed":
+        raise ValueError("Collect companies step failed — fix the run and try again")
 
-    if not step_collect or step_collect.status != "completed":
-        raise ValueError("Collect companies step is not completed yet")
-    if not step_find_ref or step_find_ref.status != "completed":
-        raise ValueError("Find contacts step is not completed yet — retry when setup has finished")
+    step_find_ref = get_step_by_run_and_name(db, run_id, "find_contacts")
+    if not step_find_ref:
+        create_step(db, run_id, "find_contacts", {}, commit=True)
 
     company_row = get_company_dict_at_index(db, run_id, collect_index)
     if not company_row:

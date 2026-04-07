@@ -1,0 +1,10 @@
+---
+description: Локальная разработка фронта ai-biz-os — прокси /api, без VITE_API_BASE
+alwaysApply: true
+---
+
+# Локальная разработка API (ai-biz-os frontend)
+
+- **Не предлагай и не добавляй `VITE_API_BASE`** для обычной локальной разработки. Браузер должен ходить на **тот же origin**, что и UI (`/api/...`), а **Vite** проксирует на бэкенд (`frontend/vite.config.js`, цель из `VITE_API_PROXY_TARGET` в `frontend/.env.development`).
+- Если API на **другом порту**, меняют только **`VITE_API_PROXY_TARGET`** (например `http://127.0.0.1:8001`) и **перезапускают** `npm run dev`.
+- Сообщения об ошибках сети в UI **не раздувать** длинными подсказками про `curl` / health — для транзентных сбоев достаточно `setUiError` / короткий текст (см. `formatApiError` в `AiBizOsHumanUI.jsx`).

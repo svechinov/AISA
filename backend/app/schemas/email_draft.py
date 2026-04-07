@@ -88,6 +88,18 @@ def _prompt_setup_used_from_draft_row(d) -> str | None:
     return effective_prompt_setup_text_used(d)
 
 
+def _outbound_error_message_for_api(raw: str | None) -> str | None:
+    """
+    Hide known-fixed internal attachment errors (any wording / Gmail wrapper) — DB may still store the
+    old string until the next successful send.
+    """
+    if not raw or not str(raw).strip():
+        return None
+    if "simplenamespace" in str(raw).lower():
+        return None
+    return raw
+
+
 def email_draft_to_list_read(
     db: Session,
     d,
@@ -109,7 +121,7 @@ def email_draft_to_list_read(
         review_status=d.review_status,
         review_notes=d.review_notes,
         tracking_status=d.tracking_status,
-        error_message=d.error_message,
+        error_message=_outbound_error_message_for_api(d.error_message),
         attached_asset_ids=effective_attached_asset_ids_for_email_draft(db, d),
         prompt_setup_text_used=_prompt_setup_used_from_draft_row(d),
         generation_meta_json=effective_generation_meta_json_for_list(d),
@@ -131,7 +143,7 @@ def email_draft_to_read(db: Session, d) -> EmailDraftRead:
         tracking_status=d.tracking_status,
         provider_message_id=d.provider_message_id,
         thread_id=d.thread_id,
-        error_message=d.error_message,
+        error_message=_outbound_error_message_for_api(d.error_message),
         last_event_at=d.last_event_at,
         sent_at=d.sent_at,
         reviewed_at=d.reviewed_at,

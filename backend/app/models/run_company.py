@@ -25,6 +25,10 @@ class RunCompany(Base):
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_hallucination: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     contact_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: LLM campaign-fit analysis (POST analyze-fit); NULL = not analyzed yet.
+    ai_fit_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    ai_fit_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_fit_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     extra_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 

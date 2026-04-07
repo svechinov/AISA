@@ -40,9 +40,12 @@ def _ref_dict_from_asset_row(asset) -> dict:
 
 def get_ordered_asset_refs_for_packet(db: Session, packet: AssetPacket) -> list[dict]:
     """Membership/order: ``asset_packet_assets`` + ``assets`` rows only (no packet_json.assets)."""
+    pid = getattr(packet, "id", None)
+    if pid is None:
+        return []
     rows = (
         db.query(AssetPacketAsset)
-        .filter(AssetPacketAsset.packet_id == packet.id)
+        .filter(AssetPacketAsset.packet_id == pid)
         .order_by(AssetPacketAsset.position.asc(), AssetPacketAsset.id.asc())
         .all()
     )

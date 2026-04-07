@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, func, or_, select, union_all
+from sqlalchemy import and_, case, func, not_, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
@@ -22,6 +22,8 @@ from app.setup_milestones import (
     SETUP_MILESTONE_CONTACTS,
     SETUP_MILESTONE_VALID_CONTACTS,
 )
+from app.services.human_ui_activity import drain_human_ui_activity_pending
+
 
 def signature_html_has_meaningful_content(html: str | None) -> bool:
     """Match Human UI `runSignatureHasMeaningfulContent`: strip tags/styles, require non-empty text."""
@@ -244,6 +246,55 @@ def _live_valid_contact_count(db: Session, run_id: int) -> int:
     return int(n or 0)
 
 
+def _event_chain_bucket_counts_for_performance(db: Session, run_id: int) -> tuple[int, int]:
+    """Bounced / dead counts aligned with Human UI Events tab (TrackingView ``eventGroupTabBucket``).
+
+    One row per outbound draft that has at least one ``email_events`` row for this run. The latest
+    event by id defines the chain end; ``dead_mailbox`` overrides ``bounced``. Duplicate bounce
+    events for the same draft therefore contribute 1, not N — matching the Events filter tabs.
+    """
+    latest = (
+        db.query(
+            EmailEvent.draft_id.label("draft_id"),
+            func.max(EmailEvent.id).label("max_id"),
+        )
+        .filter(EmailEvent.run_id == run_id)
+        .group_by(EmailEvent.draft_id)
+        .subquery()
+    )
+    E = EmailEvent
+    D = EmailDraft
+    C = Contact
+    ts_tr = func.trim(D.tracking_status)
+    st_tr = func.trim(D.status)
+    draft_lifecycle = case(
+        (func.length(ts_tr) > 0, func.lower(ts_tr)),
+        else_=func.lower(st_tr),
+    )
+    ch = func.coalesce(func.lower(C.email_health), "")
+    ev_t = func.lower(E.event_type)
+    is_dead = or_(
+        draft_lifecycle == "dead_mailbox",
+        ch == "dead_mailbox",
+        ev_t == "dead_mailbox",
+    )
+    # Match JS: bounce on draft uses ``tracking_status`` only (not status fallback).
+    ts_bounced = func.lower(ts_tr) == "bounced"
+    is_bounced = or_(ts_bounced, ch == "bounced", ev_t == "bounced")
+
+    base = (
+        db.query(E.id)
+        .select_from(E)
+        .join(latest, latest.c.max_id == E.id)
+        .join(D, D.id == E.draft_id)
+        .outerjoin(C, C.id == D.contact_id)
+        .filter(E.run_id == run_id)
+    )
+    n_dead = int(base.filter(is_dead).count() or 0)
+    n_bounced = int(base.filter(and_(not_(is_dead), is_bounced)).count() or 0)
+    return n_bounced, n_dead
+
+
 def _active_threads_count_for_performance(db: Session, run_id: int) -> int:
     """Threads excluding bounced/dead — SQL-fast for metrics (no full thread/draft/message scan).
 
@@ -393,20 +444,7 @@ def get_run_performance_lite(
         .scalar()
         or 0
     )
-    ev_bounced = int(
-        db.query(func.count())
-        .select_from(EmailEvent)
-        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "bounced")
-        .scalar()
-        or 0
-    )
-    ev_dead = int(
-        db.query(func.count())
-        .select_from(EmailEvent)
-        .filter(EmailEvent.run_id == run_id, EmailEvent.event_type == "dead_mailbox")
-        .scalar()
-        or 0
-    )
+    ev_bounced, ev_dead = _event_chain_bucket_counts_for_performance(db, run_id)
     if active_threads is None:
         active_threads = _active_threads_count_for_performance(db, run_id)
     return {
@@ -476,14 +514,14 @@ def build_run_workspace_lite(db: Session, run) -> dict:
             db, rid, active_threads=active_threads, replies_received=replies_received
         ),
         "hourly_sends_24h": hourly_send_counts_24h_utc(db, rid),
+        "activity_informers": drain_human_ui_activity_pending(db, run),
     }
 
 
 def build_run_workspace_tick(db: Session, run) -> dict:
-    """Minimal poll payload: phase + setup_summary + performance counts only.
+    """Poll payload: phase, setup_summary, performance, hourly send buckets (same as lite chart).
 
-    Skips hourly bucket scan, reminder list load, and conversation reminder rollups — use
-    :func:`build_run_workspace_lite` for full dashboard (chart + sidebar conversation counts).
+    Skips full conversation/reminder rollups — use :func:`build_run_workspace_lite` for those.
     """
     phase = get_run_display_phase_lite(db, run)
     rid = run.id
@@ -502,6 +540,8 @@ def build_run_workspace_tick(db: Session, run) -> dict:
         "performance": get_run_performance_lite(
             db, rid, active_threads=active_threads, replies_received=replies_received
         ),
+        "hourly_sends_24h": hourly_send_counts_24h_utc(db, rid),
+        "activity_informers": drain_human_ui_activity_pending(db, run),
     }
 
 

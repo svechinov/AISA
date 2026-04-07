@@ -1,7 +1,7 @@
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -35,6 +35,11 @@ from app.services.run_context_service import (
     wrap_context,
 )
 from app.schemas.run import (
+    AnalyzeCompanyFitBody,
+    AnalyzeCompanyFitResult,
+    AnalyzeFitPendingBody,
+    AnalyzeFitPendingResult,
+    DeleteRunCompanyResult,
     RetryCompanyFindBody,
     RetryCompanyFindResult,
     RunCardRead,
@@ -66,6 +71,11 @@ from app.services.retry_company_find_service import (
     continue_find_for_pending_companies,
     retry_find_for_collected_company,
 )
+from app.services.run_company_ai_fit_service import (
+    analyze_run_companies_fit_pending,
+    analyze_run_company_fit,
+)
+from app.services.run_company_delete_service import delete_collected_company_at_index
 from app.services.run_companies_status_service import get_run_companies_with_status
 from app.services.run_display_service import (
     build_run_workspace_lite,
@@ -257,6 +267,73 @@ def continue_company_find_route(run_id: int, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return RetryCompanyFindResult(**data)
+
+
+@router.delete("/{run_id}/companies/{collect_index}", response_model=DeleteRunCompanyResult)
+def delete_run_company_route(
+    run_id: int,
+    collect_index: int = Path(ge=0, description="collect_index of the company row"),
+    db: Session = Depends(get_db),
+):
+    """Remove one company from the run and delete contacts that matched that company."""
+    if not run_exists(db, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        data = delete_collected_company_at_index(db, run_id, collect_index)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return DeleteRunCompanyResult(**data)
+
+
+@router.post("/{run_id}/companies/analyze-fit-pending", response_model=AnalyzeFitPendingResult)
+def analyze_companies_fit_pending_route(
+    run_id: int,
+    payload: AnalyzeFitPendingBody | None = None,
+    db: Session = Depends(get_db),
+):
+    """LLM: label companies not yet analyzed (``ai_fit_checked_at`` NULL)."""
+    body = payload or AnalyzeFitPendingBody()
+    if not run_exists(db, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        data = analyze_run_companies_fit_pending(
+            db,
+            run_id,
+            max_rows=body.max_rows,
+            force=body.force,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return AnalyzeFitPendingResult(**data)
+
+
+@router.post(
+    "/{run_id}/companies/{collect_index}/analyze-fit",
+    response_model=AnalyzeCompanyFitResult,
+)
+def analyze_one_company_fit_route(
+    run_id: int,
+    collect_index: int = Path(ge=0),
+    payload: AnalyzeCompanyFitBody | None = None,
+    db: Session = Depends(get_db),
+):
+    """LLM: campaign fit for one company row; skipped if already analyzed unless ``force``."""
+    body = payload or AnalyzeCompanyFitBody()
+    if not run_exists(db, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        data = analyze_run_company_fit(
+            db,
+            run_id,
+            collect_index,
+            force=body.force,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "Already analyzed" in msg:
+            raise HTTPException(status_code=409, detail=msg) from e
+        raise HTTPException(status_code=400, detail=msg) from e
+    return AnalyzeCompanyFitResult(**data)
 
 
 @router.patch("/{run_id}/outreach", response_model=RunEditFormRead)

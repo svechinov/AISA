@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,8 @@ class ContactRead(BaseModel):
     gmail_history_checked_at: datetime | None = None
     gmail_inbox_imported_at: datetime | None = None
     created_at: datetime
+    #: From ``run_companies`` AI campaign-fit when the contact matches that company row.
+    company_ai_fit_status: Literal["correct", "incorrect"] | None = None
 
     class Config:
         from_attributes = True
@@ -86,7 +89,11 @@ def contact_matches_minimal_search(m: object, q: str | None) -> bool:
     return False
 
 
-def contact_read_for_run_list(contact: Contact) -> ContactRead:
+def contact_read_for_run_list(
+    contact: Contact,
+    *,
+    company_ai_fit_status: Literal["correct", "incorrect"] | None = None,
+) -> ContactRead:
     """
     GET /contacts/run list rows: same shape as ContactRead but **does not** read ``source_json`` /
     ``personalization_json`` from the ORM (those columns stay deferred). Empty dicts keep payloads small
@@ -114,6 +121,7 @@ def contact_read_for_run_list(contact: Contact) -> ContactRead:
         gmail_history_checked_at=contact.gmail_history_checked_at,
         gmail_inbox_imported_at=contact.gmail_inbox_imported_at,
         created_at=contact.created_at,
+        company_ai_fit_status=company_ai_fit_status,
     )
 
 

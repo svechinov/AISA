@@ -19,8 +19,8 @@ from app.schemas.contact import (
     PaginatedContactsRunResponse,
     contact_matches_list_search,
     contact_matches_minimal_search,
-    contact_read_for_run_list,
 )
+from app.services.contact_company_ai_fit import contact_read_with_ai_fit, contact_reads_for_run_with_ai_fit
 from app.services.contact_review_bucket import (
     ALL_REVIEW_BUCKETS,
     review_bucket_for_contact_minimal,
@@ -84,7 +84,7 @@ def list_contacts_for_run(
     if limit is None and review_bucket is None:
         rows = list_contacts_by_run(db, run_id, load_json=False)
         filtered = [c for c in rows if contact_matches_list_search(c, q)]
-        return [contact_read_for_run_list(c) for c in filtered]
+        return contact_reads_for_run_with_ai_fit(db, run_id, filtered)
 
     minimals = dedupe_contact_minimals_for_run(db, run_id)
 
@@ -113,7 +113,7 @@ def list_contacts_for_run(
         hydrated = hydrate_contacts_for_list_read(db, [m.id for m in page_m])
         return ContactRunBucketResponse(
             review_counts=ContactReviewCountsRead(**counts_dict),
-            contacts=[contact_read_for_run_list(c) for c in hydrated],
+            contacts=contact_reads_for_run_with_ai_fit(db, run_id, hydrated),
             total=total_f,
             limit=lim,
             offset=off_out,
@@ -126,7 +126,7 @@ def list_contacts_for_run(
     page_m = filtered_m[off : off + limit]
     hydrated = hydrate_contacts_for_list_read(db, [m.id for m in page_m])
     return PaginatedContactsRunResponse(
-        items=[contact_read_for_run_list(c) for c in hydrated],
+        items=contact_reads_for_run_with_ai_fit(db, run_id, hydrated),
         total=total_f,
         limit=limit,
         offset=off,
@@ -188,7 +188,7 @@ def review_contact_route(
     )
     if updated.review_status in {"approved", "edited"}:
         background_tasks.add_task(_background_ensure_outreach_draft, updated.id)
-    return updated
+    return contact_read_with_ai_fit(db, updated)
 
 
 @router.patch("/{contact_id}/edit", response_model=ContactRead)
@@ -215,4 +215,4 @@ def edit_contact_route(
         review_notes=payload.review_notes,
     )
     background_tasks.add_task(_background_ensure_outreach_draft, updated.id)
-    return updated
+    return contact_read_with_ai_fit(db, updated)

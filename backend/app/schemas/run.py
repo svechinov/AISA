@@ -16,6 +16,9 @@ class RunCompanyRow(BaseModel):
         "llm_error",
         "unknown",
     ]
+    ai_fit_status: Literal["correct", "incorrect"] | None = None
+    ai_fit_reason: str | None = None
+    ai_fit_checked_at: str | None = None
 
 
 class RunCompaniesRead(BaseModel):
@@ -35,6 +38,33 @@ class RetryCompanyFindResult(BaseModel):
     contacts_before: int
     contacts_after: int
     new_contacts_merged: int
+
+
+class DeleteRunCompanyResult(BaseModel):
+    deleted_collect_index: int
+    contacts_removed: int
+
+
+class AnalyzeCompanyFitBody(BaseModel):
+    force: bool = False
+
+
+class AnalyzeCompanyFitResult(BaseModel):
+    collect_index: int
+    ai_fit_status: Literal["correct", "incorrect"]
+    ai_fit_reason: str
+    ai_fit_checked_at: str
+
+
+class AnalyzeFitPendingBody(BaseModel):
+    max_rows: int = Field(default=200, ge=1, le=500)
+    force: bool = False
+
+
+class AnalyzeFitPendingResult(BaseModel):
+    analyzed: int
+    results: list[AnalyzeCompanyFitResult]
+    errors: list[str]
 
 
 class RunStart(BaseModel):
@@ -268,6 +298,13 @@ class RunWorkspaceRead(RunRead):
     hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)
 
 
+class HumanUiActivityInformer(BaseModel):
+    """One line for the Human UI Activity panel (server-queued, drained on workspace GET)."""
+
+    id: str
+    text: str
+
+
 class RunWorkspaceLiteRead(BaseModel):
     """Cheap refresh for dashboard poll: phase, setup counts, performance + conversation counters (no full run row / contacts / drafts)."""
 
@@ -277,12 +314,15 @@ class RunWorkspaceLiteRead(BaseModel):
     performance: dict[str, Any]
     conversations: dict[str, Any]
     hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)
+    activity_informers: list[HumanUiActivityInformer] = Field(default_factory=list)
 
 
 class RunWorkspaceTickRead(BaseModel):
-    """Background metrics poll only: phase, setup_summary, performance — no hourly buckets or conversation/reminder rollups."""
+    """Background metrics poll: phase, setup_summary, performance, hourly sends chart (UTC)."""
 
     display_phase: str
     setup_state_message: str
     setup_summary: dict[str, Any]
     performance: dict[str, Any]
+    hourly_sends_24h: list[int] = Field(default_factory=lambda: [0] * 24)
+    activity_informers: list[HumanUiActivityInformer] = Field(default_factory=list)

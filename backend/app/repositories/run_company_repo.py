@@ -80,6 +80,15 @@ def _row_to_dict(
     cs_col = getattr(r, "contact_status", None)
     if isinstance(cs_col, str) and cs_col in PERSISTED_CONTACT_STATUSES:
         d["contact_status"] = cs_col
+    afs = getattr(r, "ai_fit_status", None)
+    if isinstance(afs, str) and afs.strip():
+        d["ai_fit_status"] = afs.strip()
+    afr = getattr(r, "ai_fit_reason", None)
+    if isinstance(afr, str) and afr.strip():
+        d["ai_fit_reason"] = afr.strip()
+    afc = getattr(r, "ai_fit_checked_at", None)
+    if afc is not None:
+        d["ai_fit_checked_at"] = afc.isoformat() + "Z"
     return d
 
 
@@ -118,6 +127,15 @@ def run_company_table_dict_from_row(r: RunCompany) -> dict[str, Any]:
         cs = extra.get("contact_status")
         if isinstance(cs, str) and cs in PERSISTED_CONTACT_STATUSES:
             d["contact_status"] = cs
+    afs = getattr(r, "ai_fit_status", None)
+    if isinstance(afs, str) and afs.strip():
+        d["ai_fit_status"] = afs.strip()
+    afr = getattr(r, "ai_fit_reason", None)
+    if isinstance(afr, str) and afr.strip():
+        d["ai_fit_reason"] = afr.strip()
+    afc = getattr(r, "ai_fit_checked_at", None)
+    if afc is not None:
+        d["ai_fit_checked_at"] = afc.isoformat() + "Z"
     for k, v in extra.items():
         if k == "contact_status":
             continue
@@ -255,6 +273,7 @@ def sync_run_companies_from_dicts(
     ids = [r.id for r in old_rows]
     kv_by_id = get_kv_maps_for_entities(db, SCOPE_RUN_COMPANY_EXTRA, ids) if ids else {}
     status_by_index: dict[int, str] = {}
+    ai_fit_by_index: dict[int, tuple[str | None, str | None, Any]] = {}
     for r in old_rows:
         cs = getattr(r, "contact_status", None)
         if isinstance(cs, str) and cs in PERSISTED_CONTACT_STATUSES:
@@ -269,6 +288,14 @@ def sync_run_companies_from_dicts(
         v2 = kv.get("contact_status")
         if isinstance(v2, str) and v2 in PERSISTED_CONTACT_STATUSES:
             status_by_index[r.collect_index] = v2
+    for r in old_rows:
+        chk = getattr(r, "ai_fit_checked_at", None)
+        if chk is not None:
+            ai_fit_by_index[r.collect_index] = (
+                getattr(r, "ai_fit_status", None),
+                getattr(r, "ai_fit_reason", None),
+                chk,
+            )
     for old in old_rows:
         delete_scope(db, SCOPE_RUN_COMPANY_EXTRA, old.id)
     db.query(RunCompany).filter(RunCompany.run_id == run_id).delete(synchronize_session=False)
@@ -302,6 +329,12 @@ def sync_run_companies_from_dicts(
             contact_status=preserved_cs,
             extra_json={},
         )
+        fit_tup = ai_fit_by_index.get(i)
+        if fit_tup is not None:
+            st, reason, checked = fit_tup
+            rc.ai_fit_status = st
+            rc.ai_fit_reason = reason
+            rc.ai_fit_checked_at = checked
         db.add(rc)
         db.flush()
         persist_run_company_extra(db, rc, extra or {})

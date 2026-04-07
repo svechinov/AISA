@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset
-from app.models.asset_packet import AssetPacket
 from app.repositories.asset_repo import get_asset
 from app.services.asset_packet_service import get_ordered_asset_refs_for_packet
 from app.services.cdn_upload_service import r2_get_object_bytes, r2_upload_ready
@@ -216,6 +215,37 @@ def _append_skip(skipped: list[dict], asset_id: int | None, reason: str) -> None
     skipped.append({"asset_id": asset_id, "reason": reason})
 
 
+def _refs_for_attachment_resolution(db: Session, packet: Any) -> list[dict]:
+    """
+    Ordered asset refs for MIME vs link-only rules.
+
+    Real :class:`~app.models.asset_packet.AssetPacket` rows use ``asset_packet_assets`` (see
+    :func:`get_ordered_asset_refs_for_packet`). Synthetic objects (e.g. ``SimpleNamespace`` with only
+    ``packet_json`` from :func:`resolve_sendable_attachments_for_asset_ids`) have no ``id`` — use
+    ``packet_json["assets"]`` so we never read ``packet.id`` on a namespace.
+    """
+    pid = getattr(packet, "id", None)
+    if pid is not None:
+        return get_ordered_asset_refs_for_packet(db, packet)
+    pj = getattr(packet, "packet_json", None)
+    if not isinstance(pj, dict):
+        return []
+    raw = pj.get("assets")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("asset_id") is not None:
+            out.append(dict(item))
+        else:
+            try:
+                aid = int(item)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            out.append({"asset_id": aid})
+    return out
+
+
 def resolve_sendable_attachments_for_asset_ids(
     db: Session,
     asset_ids: list[int],
@@ -228,13 +258,13 @@ def resolve_sendable_attachments_for_asset_ids(
         except (TypeError, ValueError):
             continue
         refs.append({"asset_id": aid})
-    fake = SimpleNamespace(status="draft", packet_json={"assets": refs})
+    fake = SimpleNamespace(id=None, status="draft", packet_json={"assets": refs})
     return resolve_sendable_attachments(db, fake)  # type: ignore[arg-type]
 
 
 def resolve_sendable_attachments(
     db: Session,
-    packet: AssetPacket,
+    packet: Any,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
     Returns (sendable_metas, link_only_asset_dicts, skipped).
@@ -249,7 +279,7 @@ def resolve_sendable_attachments(
     link_only: list[dict] = []
     skipped: list[dict] = []
 
-    for ref in get_ordered_asset_refs_for_packet(db, packet):
+    for ref in _refs_for_attachment_resolution(db, packet):
         if not isinstance(ref, dict):
             continue
         aid = ref.get("asset_id")
