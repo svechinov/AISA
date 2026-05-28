@@ -32,10 +32,12 @@ from app.setup_milestones import (
 from app.workers.contacts_worker import find_contacts, validate_contacts
 from app.workers.email_worker import generate_emails, generate_master_email_draft
 from app.workers.research_worker import collect_companies
+from app.workers.osint_worker import enrich_crm_data
 
 STEP_HANDLERS = {
     "collect_companies": collect_companies,
     "find_contacts": find_contacts,
+    "enrich_crm_data": enrich_crm_data,
     "validate_contacts": validate_contacts,
     "generate_master_email_draft": generate_master_email_draft,
     "generate_emails": generate_emails,
