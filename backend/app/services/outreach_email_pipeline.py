@@ -73,13 +73,22 @@ def _rules(db: Session, run_id: int) -> list[str]:
 
 
 def _serialize_personalization(db: Session, contact: Contact) -> dict[str, Any]:
+    from app.models.run_company import RunCompany
     pj = get_personalization_dict(db, contact.id, contact.personalization_json)
+    
+    osint_dossier = ""
+    if contact.company:
+        rc = db.query(RunCompany).filter(RunCompany.run_id == contact.run_id, RunCompany.name == contact.company).first()
+        if rc and rc.json_kv:
+            osint_dossier = rc.json_kv.get("osint_dossier", "")
+
     return {
         "company_facts": pj.get("company_facts") or [],
         "role_angle": (pj.get("role_angle") or "").strip(),
         "why_this_company": (pj.get("why_this_company") or "").strip(),
         "offer_fit": (pj.get("offer_fit") or "").strip(),
         "risks_or_constraints": (pj.get("risks_or_constraints") or "").strip(),
+        "osint_dossier": osint_dossier,
     }
 
 
@@ -120,15 +129,15 @@ def generate_email_reasoning(
 
     task = (
         f"{style_block}\n\n"
-        "Plan one outbound email for this recipient.\n\n"
+        "You are a Senior SDR at FG Consulting. Plan one outbound email for this recipient based on their OSINT dossier.\n\n"
         f"{variant_note}"
         "Return a short internal plan (not the email).\n"
         "Requirements:\n"
-        "- hook: one concrete reason this message fits this company/person (no generic praise)\n"
-        "- angle: how we frame the ask (one line)\n"
-        "- cta_type: what we ask for (e.g. reply, call, read)\n"
-        "- key_point: the single idea to land\n\n"
-        "Ground the hook in personalization.company_facts and role_angle when present; "
+        "- hook: one concrete reason this message fits this company/person based on personalization.osint_dossier.\n"
+        "- angle: how we frame the ask (Focus on Quick Wins in management/sales).\n"
+        "- cta_type: what we ask for (e.g. 15-minute call).\n"
+        "- key_point: the single idea or 'Quick Win' to land.\n\n"
+        "Ground the hook in personalization.osint_dossier and company_facts when present; "
         "do not invent companies, metrics, or awards not present in INPUT DATA.\n"
     )
     if (prompt_setup_text or "").strip():
@@ -204,18 +213,21 @@ def generate_email_draft(
     task = (
         f"{style_block}\n\n"
         + fix_block
-        + "Write one outbound email (subject + body) for this recipient.\n\n"
+        + "You are a Senior SDR and Business Strategist at 'FG Consulting'. "
+        "We specialize in implementing systemic changes in corporate governance and training (sales and leadership). "
+        "OUR CURRENT FOCUS: Selling fast, targeted solutions (Quick Wins) that give the client immediate value, 'unblock' bottlenecks, and open doors for long-term contracts.\n\n"
+        "Write one outbound B2B cold email (subject + body) for this recipient.\n\n"
         + master_block
         + "Hard requirements:\n"
-        "- If personalization.company_facts is non-empty, use at least one concrete detail in the body "
-        "(paraphrase allowed). If it is empty, anchor the email in recipient company/name/role only.\n"
-        "- Reflect personalization.role_angle when non-empty; otherwise stay specific to recipient fields.\n"
-        "- Explain briefly why this recipient/company (why_this_company or key_point from reasoning).\n"
-        "- Avoid generic openers: do not start with 'I hope this finds you well', 'I wanted to reach out', "
-        "'I came across', 'We help companies like yours', or similar filler.\n"
-        "- Body: include a brief salutation (e.g. Hi FirstName,) then paragraphs; 5–12 sentences total.\n"
-        "- Subject: specific, not generic.\n"
-        "- No markdown unless necessary.\n\n"
+        "- If personalization.osint_dossier is non-empty, you MUST use a concrete fact from it to create a powerful 'Product Hook' (an offer they cannot refuse, based on their 2026 plans or current HR challenges).\n"
+        "- Address their management hunger (lack of strong leaders, mergers, scaling issues) or sales problems if apparent from the dossier.\n"
+        "- Offer ONE specific, fast Quick Win step (e.g., training, facilitation session, workshop, express audit).\n"
+        "- The CTA (Call to Action) must be a short 15-minute call.\n"
+        "- DO NOT use IT jargon. Use words like 'external partner', 'development of managerial competencies'.\n"
+        "- Avoid generic openers: jump straight into the fact or trigger.\n"
+        "- Body: include a brief salutation (e.g. Hi FirstName,) then 5–10 sentences total.\n"
+        "- Subject: specific, not generic, intriguing.\n"
+        "- Return ONLY valid JSON matching the schema. No markdown wrapping the JSON.\n\n"
         "Internal reasoning (use, do not quote verbatim):\n"
         f"{json.dumps(reasoning, ensure_ascii=False)}\n"
     )
