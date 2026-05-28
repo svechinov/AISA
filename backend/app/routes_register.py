@@ -25,6 +25,7 @@ def import_api_routers():
     from app.api.research_tasks import router as research_tasks_router
     from app.api.rules import router as rules_router
     from app.api.runs import router as runs_router
+    from app.api.import_crm import router as import_crm_router
     from app.api.sending import router as sending_router
     from app.api.setup import router as setup_router
     from app.api.steps import router as steps_router
@@ -52,6 +53,7 @@ def import_api_routers():
         tracking_router,
         research_tasks_router,
         runs_router,
+        import_crm_router,
         contact_analyzer_router,
         gmail_sync_router,
         steps_router,

@@ -10,3 +10,5 @@ alembic
 redis
 httpx
 boto3
+pandas
+openpyxl
