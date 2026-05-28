@@ -121,11 +121,39 @@ async def lifespan(_app: FastAPI):
             pass
 
 
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # Skip if global password is not set
+        if not settings.GLOBAL_PASSWORD:
+            return await call_next(request)
+            
+        path = request.url.path
+        
+        # Paths that bypass auth
+        skip_paths = [
+            "/health", "/ready", "/docs", "/redoc", "/openapi.json", "/favicon.ico",
+            "/api/setup/status", "/api/auth/login"
+        ]
+        
+        if any(path.startswith(p) for p in skip_paths):
+            return await call_next(request)
+            
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            
+        token = auth_header.split(" ")[1]
+        if token != settings.GLOBAL_PASSWORD:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            
+        return await call_next(request)
+
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 # Lightweight GET /setup/status only — no boto3 at import time (see app.api.setup_gate).
 app.include_router(setup_gate_router)
 
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

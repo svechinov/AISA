@@ -210,7 +210,7 @@ def _ids_needing_personalization_backfill_sql():
             """
             SELECT c.id FROM contacts c
             WHERE (c.personalization_json IS NULL
-               OR c.personalization_json = CAST('{}' AS jsonb))
+               OR CAST(c.personalization_json AS TEXT) = '{}')
               AND NOT EXISTS (
                 SELECT 1 FROM contact_personalization cp WHERE cp.contact_id = c.id
               )

@@ -1058,8 +1058,9 @@ const PROJECT_VIEW_OPTS = [
 /** Stored as runs.email_style_mode slug; Auto uses contact-role heuristics (backend email_style_service). */
 const PROFESSIONAL_PROFILE_OPTIONS = [
   { value: "any_top_management", label: "Any Top Management" },
-  { value: "founder_or_ceo", label: "Founder or CEO" },
-  { value: "cto_or_developer", label: "CTO or Developer" },
+  { value: "hr_director_or_management", label: "HR Director or HR Management" },
+  { value: "head_of_training_center", label: "Head of Training Center / L&D" },
+  { value: "founder_or_ceo", label: "Founder or CEO" },  { value: "cto_or_developer", label: "CTO or Developer" },
   { value: "cmo_or_marketing", label: "CMO or Marketing Management" },
   { value: "head_of_licensing", label: "Head of Licensing or Licensing Management" },
   { value: "cfo_or_accountants", label: "CFO or Accountants" },

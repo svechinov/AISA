@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     APP_NAME: str = "AI Biz OS"
     APP_ENV: str = "dev"
+    GLOBAL_PASSWORD: str = ""
+    HTTP_PROXY: str = ""
 
     # LLM (at least one required for full operation; see /setup flow)
     ANTHROPIC_API_KEY: str = ""

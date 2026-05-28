@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 def import_api_routers():
     """Import all route modules; returns router instances in attach order."""
+    from app.api.auth import router as auth_router
     from app.api.asset_packets import router as asset_packets_router
     from app.api.assets import router as assets_router
     from app.api.contact_analyzer import router as contact_analyzer_router
@@ -31,6 +32,7 @@ def import_api_routers():
     from app.api.tracking import router as tracking_router
 
     return (
+        auth_router,
         setup_router,
         oauth_google_router,
         projects_router,

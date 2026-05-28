@@ -166,7 +166,8 @@ def _anthropic_complete(prompt: str, api_key: str) -> str:
         "max_tokens": 8192,
         "messages": [{"role": "user", "content": prompt}],
     }
-    with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+    proxy = settings.HTTP_PROXY.strip()
+    with httpx.Client(timeout=HTTP_TIMEOUT, proxy=proxy if proxy else None) as client:
         r = client.post(
             ANTHROPIC_API,
             headers={
@@ -208,7 +209,8 @@ def _openai_chat_complete(
         payload["response_format"] = {"type": "json_object"}
 
     def post(body: dict):
-        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+        proxy = settings.HTTP_PROXY.strip()
+        with httpx.Client(timeout=HTTP_TIMEOUT, proxy=proxy if proxy else None) as client:
             return client.post(
                 url,
                 headers={
