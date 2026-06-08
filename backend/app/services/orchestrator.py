@@ -389,6 +389,13 @@ def run_workflow(db: Session, run_id: int, *, continuation: bool = False):
 
     try:
         run_accumulating_setup_phase(db, run_id, continuation=continuation)
+        # OSINT enrichment (company dossier + missing-email discovery) runs once after the
+        # collect/find/validate accumulation settles, before the run goes to review — so the
+        # reviewer (and later email generation) sees enriched data. Previously enrich_crm_data
+        # was in the workflow registry but never executed by the auto-chain (pipeline stalled).
+        # NOTE (cost): enrich_crm_data calls Tavily per company; a per-run budget/cap is a
+        # follow-up (Q19) before large unattended runs.
+        execute_step(db, run_id, "enrich_crm_data")
         run = get_run(db, run_id)
         update_run_status(db, run, "needs_review")
         return

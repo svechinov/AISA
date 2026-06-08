@@ -1,21 +1,51 @@
 import io
+import logging
 import math
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 import pandas as pd
 
-from app.db import get_db
-from app.repositories.run_repo import create_run
+from app.db import SessionLocal, get_db
+from app.repositories.run_repo import create_run, get_run, update_run_status
 from app.repositories.run_company_repo import sync_run_companies_from_dicts
 from app.repositories.step_repo import create_step, mark_step_completed
 from app.repositories.contact_repo import create_contact
 from app.schemas.run import RunRead, run_read_from_orm
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+def _advance_imported_run(run_id: int) -> None:
+    """After an AmoCRM import, advance the run through OSINT enrichment + validation to review.
+
+    collect_companies / find_contacts are already completed by the import (contacts are known),
+    so we do NOT re-run discovery. We only enrich (company dossier + missing-email OSINT) and
+    validate, then park the run at ``needs_review`` for the user — same review gate as a normal run.
+    Runs in a background task with its own DB session (request session is closed by then).
+    """
+    db = SessionLocal()
+    try:
+        from app.services.orchestrator import execute_step
+
+        execute_step(db, run_id, "enrich_crm_data")
+        execute_step(db, run_id, "validate_contacts")
+        run = get_run(db, run_id)
+        if run:
+            update_run_status(db, run, "needs_review")
+    except Exception:
+        logger.exception("Post-import advance failed for run_id=%s", run_id)
+        run = get_run(db, run_id)
+        if run:
+            update_run_status(db, run, "failed")
+    finally:
+        db.close()
 
 
 @router.post("/import-amocrm", response_model=RunRead)
 async def import_amocrm_route(
+    background_tasks: BackgroundTasks,
     run_name: str = Form(...),
     project_id: int = Form(...),
     file: UploadFile = File(...),
@@ -113,5 +143,10 @@ async def import_amocrm_route(
         )
 
     db.commit()
+
+    # Advance the imported run through enrichment + validation to review (background).
+    # NOTE: this triggers OSINT (Tavily per company) automatically after import — for large
+    # imports a per-run company/token budget (Q19) should gate this before unattended use.
+    background_tasks.add_task(_advance_imported_run, run.id)
 
     return run_read_from_orm(run)

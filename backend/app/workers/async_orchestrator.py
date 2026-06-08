@@ -1,21 +1,21 @@
-import asyncio
 import logging
-from app.workers.tavily_dossier_agent import process_leads as run_tavily_dossier
-from app.workers.fg_profiler_agent import process_fg_leads as run_gemini_profiler
 
 logger = logging.getLogger(__name__)
 
+# Legacy status-based background loop (LeadGen lineage) — DISABLED 2026-06-08.
+#
+# It ran tavily_dossier_agent + fg_profiler_agent on contacts in ai_pipeline_status='needs_osint'.
+# Problems: (1) fg_profiler is a *rival* email generator (writes raw-markdown drafts via Gemini —
+# no key on VDS) competing with the canonical outreach_email_pipeline; (2) nothing sets contacts
+# to 'needs_osint' except a manual per-contact endpoint, so the loop spun idle and spammed logs.
+#
+# OSINT is now part of the step-based pipeline (enrich_crm_data, wired into run_workflow and the
+# AmoCRM import). See engine_reconciliation_plan: the status-based path is being retired; person-
+# level OSINT (Agent B -> person_osint) is the planned replacement for the personal hook.
+
+
 async def leadgen_background_orchestrator():
-    """Continuous async loop monitoring contact statuses for pipeline changes."""
-    logger.info("Starting Asyncio LeadGen Orchestrator in background...")
-    while True:
-        try:
-            # We run the synchronous functions in a threadpool to not block the FastAPI async event loop
-            await asyncio.to_thread(run_tavily_dossier)
-            await asyncio.to_thread(run_gemini_profiler)
-        except Exception as e:
-            logger.error(f"Error in background orchestrator: {e}")
-        
-        # Polling interval
-        await asyncio.sleep(60)
+    """Disabled no-op (kept for the main.py lifespan import). See module docstring above."""
+    logger.info("LeadGen background orchestrator is DISABLED (OSINT moved to step pipeline).")
+    return
 

@@ -11,15 +11,22 @@ import socket
 from duckduckgo_search import DDGS
 from urllib.parse import urlparse
 
+import logging
+logger = logging.getLogger(__name__)
+
 # ==========================================
 # КОНФИГУРАЦИЯ
 # ==========================================
+# TODO(Phase 2): DB_PATH is a leftover absolute path to the standalone LeadGen project DB.
+# hardcore_osint must use the app DB/session, not this path. Do not rely on it.
 DB_PATH = r"C:\Users\user\Documents\Обсидиан\ИИ-автоматизация\LeadGen\leads.db"
+# TODO(Phase 2): route LLM calls through llm_gateway (OpenAI) instead of direct Gemini.
+# There is no GEMINI_API_KEY on prod -> deep LPR OSINT is unavailable until reconciled.
 API_KEY = os.environ.get("GEMINI_API_KEY")
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
 
 if not API_KEY:
-    print("❌ ОШИБКА: Переменная окружения GEMINI_API_KEY не установлена.")
+    logger.warning("GEMINI_API_KEY not set - hardcore (deep LPR) OSINT unavailable until configured.")
 
 # ==========================================
 # УЗЕЛ 1: Entity-Scout & Pattern-Analyzer
