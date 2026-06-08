@@ -49,29 +49,6 @@ class RoutesLoadingMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-async def _gmail_background_sync_loop(interval_sec: int) -> None:
-    from app.services.gmail_oauth import google_client_configured, google_refresh_token_value
-    from app.services.gmail_tracking_sync_service import sync_gmail_all_open_runs
-
-    await asyncio.sleep(8.0)
-    while True:
-        if not google_client_configured() or not google_refresh_token_value():
-            await asyncio.sleep(float(interval_sec))
-            continue
-
-        def _sync_once() -> None:
-            db = SessionLocal()
-            try:
-                sync_gmail_all_open_runs(db)
-            except Exception:
-                _log.exception("Background Gmail sync failed")
-            finally:
-                db.close()
-
-        # Must not block the asyncio loop — long Gmail I/O would stall every HTTP handler (e.g. GET /runs/:id/companies).
-        await asyncio.to_thread(_sync_once)
-        await asyncio.sleep(float(interval_sec))
-
 
 async def _ensure_schema_task() -> None:
     """Idempotent DB migrations. Skipped when Docker entrypoint already ran ``ensure_schema()``."""
@@ -80,6 +57,10 @@ async def _ensure_schema_task() -> None:
     from app.init_db import ensure_schema
 
     await asyncio.to_thread(ensure_schema)
+
+async def _run_leadgen_orchestrator() -> None:
+    from app.workers.async_orchestrator import leadgen_background_orchestrator
+    await leadgen_background_orchestrator()
 
 
 async def _register_routes_task(app: FastAPI) -> None:
@@ -95,18 +76,10 @@ async def lifespan(_app: FastAPI):
     _app.state.schema_task = schema_task
     routes_task = asyncio.create_task(_register_routes_task(_app))
     _app.state.routes_task = routes_task
+    orchestrator_task = asyncio.create_task(_run_leadgen_orchestrator())
+    _app.state.orchestrator_task = orchestrator_task
 
-    interval = int(getattr(settings, "GMAIL_SYNC_INTERVAL_SECONDS", 0) or 0)
-    gmail_task: asyncio.Task | None = None
-    if interval > 0:
-        gmail_task = asyncio.create_task(_gmail_background_sync_loop(interval))
     yield
-    if gmail_task:
-        gmail_task.cancel()
-        try:
-            await gmail_task
-        except asyncio.CancelledError:
-            pass
     if routes_task and not routes_task.done():
         routes_task.cancel()
         try:
@@ -119,6 +92,12 @@ async def lifespan(_app: FastAPI):
             await schema_task
         except asyncio.CancelledError:
             pass
+    if orchestrator_task and not orchestrator_task.done():
+        orchestrator_task.cancel()
+        try:
+            await orchestrator_task
+        except asyncio.CancelledError:
+            pass
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -127,12 +106,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not settings.GLOBAL_PASSWORD:
             return await call_next(request)
             
-        path = request.url.path
+        full_path = request.url.path
+        # Normalize path: remove /api prefix if present for checking
+        path = full_path
+        if path.startswith("/api"):
+            path = path[4:]
+        if not path.startswith("/"):
+            path = "/" + path
+            
+        _log.warning(f"AuthMiddleware checking path: {full_path} (normalized: {path})")
         
-        # Paths that bypass auth
+        # Paths that bypass auth (normalized)
         skip_paths = [
             "/health", "/ready", "/docs", "/redoc", "/openapi.json", "/favicon.ico",
-            "/api/setup/status", "/api/auth/login"
+            "/setup/status", "/auth/login"
         ]
         
         if any(path.startswith(p) for p in skip_paths):
@@ -140,10 +127,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
+            _log.warning(f"AuthMiddleware missing or invalid header for {full_path}")
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
             
         token = auth_header.split(" ")[1]
         if token != settings.GLOBAL_PASSWORD:
+            _log.warning(f"AuthMiddleware invalid token for {full_path}. Got: {token[:4]}..., Expected: {settings.GLOBAL_PASSWORD[:4]}...")
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
             
         return await call_next(request)

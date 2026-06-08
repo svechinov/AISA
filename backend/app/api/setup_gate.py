@@ -99,15 +99,8 @@ def setup_status(response: Response) -> SetupStatus:
         hints = build_setup_hints(llm_ok=llm_ok, cdn_ok=cdn_ok, allow_write=allow)
 
         r2_ready = r2_upload_ready_from_environ()
-        try:
-            from app.services.gmail_oauth import google_client_configured, google_refresh_token_value
-
-            gc = google_client_configured()
-            gr = bool(google_refresh_token_value())
-        except Exception as gmail_exc:
-            logger.warning("GET /setup/status: Gmail env helpers failed (non-fatal): %s", gmail_exc)
-            gc = False
-            gr = False
+        gc = False
+        gr = False
         if not settings.EMAIL_ALLOW_MOCK and not (gc and gr):
             hints.append(
                 "Outbound email: EMAIL_ALLOW_MOCK is false — the API will not fake-deliver mail. "

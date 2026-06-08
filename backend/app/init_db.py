@@ -56,6 +56,16 @@ def _ensure_contacts_gmail_history_columns() -> None:
             else:
                 conn.execute(text("ALTER TABLE contacts ADD COLUMN gmail_inbox_imported_at TIMESTAMP"))
 
+def _ensure_contacts_leadgen_columns() -> None:
+    insp = inspect(engine)
+    if "contacts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("contacts")}
+    with engine.begin() as conn:
+        if "ai_pipeline_status" not in columns:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN ai_pipeline_status VARCHAR(50) NOT NULL DEFAULT 'new'"))
+        if "deep_dossier" not in columns:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN deep_dossier TEXT"))
 
 def _ensure_contacts_email_health_columns() -> None:
     insp = inspect(engine)
@@ -1059,6 +1069,7 @@ def ensure_schema() -> None:
     _ensure_email_drafts_tracking_columns()
     _ensure_contacts_email_health_columns()
     _ensure_contacts_gmail_history_columns()
+    _ensure_contacts_leadgen_columns()
     _ensure_projects_is_archived_column()
     _ensure_email_threads_classification_columns()
     _ensure_email_messages_rfc_message_id_column()

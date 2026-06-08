@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
 from app.repositories.contact_repo import (
+    create_contact,
     dedupe_contact_minimals_for_run,
     get_contact,
     hydrate_contacts_for_list_read,
@@ -10,6 +11,7 @@ from app.repositories.contact_repo import (
     update_contact_fields,
     update_contact_review,
 )
+from app.repositories.run_repo import get_run
 from app.schemas.contact import (
     ContactEditUpdate,
     ContactRead,
@@ -20,6 +22,20 @@ from app.schemas.contact import (
     contact_matches_list_search,
     contact_matches_minimal_search,
 )
+from pydantic import BaseModel
+
+class GenerateCompanyLeadsRequest(BaseModel):
+    company_name: str
+    website: str | None = None
+    target_roles: str | None = None
+
+class ManualContactCreateRequest(BaseModel):
+    company: str
+    name: str | None = None
+    role: str | None = None
+    email: str | None = None
+    linkedin: str | None = None
+
 from app.services.contact_company_ai_fit import contact_read_with_ai_fit, contact_reads_for_run_with_ai_fit
 from app.services.contact_review_bucket import (
     ALL_REVIEW_BUCKETS,
@@ -216,3 +232,47 @@ def edit_contact_route(
     )
     background_tasks.add_task(_background_ensure_outreach_draft, updated.id)
     return contact_read_with_ai_fit(db, updated)
+
+
+@router.post("/{contact_id}/deep_osint")
+def deep_osint_contact_route(
+    contact_id: int,
+    db: Session = Depends(get_db),
+):
+    """Mark contact for deep OSINT processing by the background agent."""
+    contact = get_contact(db, contact_id)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+        
+    contact.ai_pipeline_status = "needs_osint"
+    db.commit()
+    db.refresh(contact)
+    
+    return contact_read_with_ai_fit(db, contact)
+
+
+@router.post("/run/{run_id}/manual", response_model=ContactRead)
+def add_manual_contact_route(
+    run_id: int,
+    payload: ManualContactCreateRequest,
+    db: Session = Depends(get_db),
+):
+    """Manually add a single contact to a run."""
+    run = get_run(db, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+        
+    c = create_contact(
+        db=db,
+        run_id=run_id,
+        company=payload.company.strip() if payload.company else None,
+        website=None,
+        name=payload.name.strip() if payload.name else None,
+        role=payload.role.strip() if payload.role else None,
+        email=payload.email.strip() if payload.email else None,
+        linkedin=payload.linkedin.strip() if payload.linkedin else None,
+        status="valid",
+        review_status="pending"
+    )
+    
+    return contact_read_with_ai_fit(db, c)

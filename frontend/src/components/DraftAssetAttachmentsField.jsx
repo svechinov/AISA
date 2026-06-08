@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { FileAssetBadge } from "@/components/FileAssetBadge";
 import { Layers, Paperclip, X } from "lucide-react";
+import { t } from "@/lib/i18n";
 
 /** Normalize API JSON list to unique ints (order preserved). */
 export function normalizeAttachedAssetIds(raw) {
@@ -107,10 +108,10 @@ export function DraftAssetAttachmentsField({
           className="gap-1"
           onClick={() => setPickerOpen((o) => !o)}
           aria-expanded={pickerOpen}
-          title="Attach assets from library"
+          title={t("Attach assets from library")}
         >
           <Paperclip className="h-3.5 w-3.5" aria-hidden />
-          Assets
+          {t("Assets")}
         </Button>
         {usablePackets.length ? (
           <Button
@@ -120,10 +121,10 @@ export function DraftAssetAttachmentsField({
             className="gap-1"
             onClick={() => setPacketsOpen((o) => !o)}
             aria-expanded={packetsOpen}
-            title="Add all assets from a saved packet preset"
+            title={t("Add all assets from a saved packet preset")}
           >
             <Layers className="h-3.5 w-3.5" aria-hidden />
-            Packets
+            {t("Packets")}
           </Button>
         ) : null}
       </div>
@@ -141,7 +142,7 @@ export function DraftAssetAttachmentsField({
                       onChange={() => toggle(a.id)}
                     />
                     <span className="min-w-0 flex-1 text-sm">
-                      <span className="font-medium">{a.name || `Asset #${a.id}`}</span>
+                      <span className="font-medium">{a.name || `${t("Asset")} #${a.id}`}</span>
                       <span className="ml-2 text-xs text-muted-foreground">#{a.id}</span>
                       {a.asset_type ? (
                         <Badge variant="outline" className="ml-2 align-middle text-xs font-normal">
@@ -155,7 +156,7 @@ export function DraftAssetAttachmentsField({
               ))}
             </ul>
           ) : (
-            <p className="px-2 py-3 text-sm text-muted-foreground">No assets in library yet.</p>
+            <p className="px-2 py-3 text-sm text-muted-foreground">{t("No assets in library yet.")}</p>
           )}
         </div>
       ) : null}
@@ -170,13 +171,13 @@ export function DraftAssetAttachmentsField({
                   className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-background/80 px-2 py-2"
                 >
                   <div className="min-w-0 text-sm">
-                    <span className="font-medium">{p.title || `Packet #${p.id}`}</span>
+                    <span className="font-medium">{p.title || `${t("Packet")} #${p.id}`}</span>
                     <span className="ml-2 text-xs text-muted-foreground">
-                      {n} asset{n === 1 ? "" : "s"}
+                      {n} {t("assets")}
                     </span>
                   </div>
                   <Button type="button" size="sm" variant="secondary" onClick={() => mergePacket(p)}>
-                    Add assets
+                    {t("Add assets")}
                   </Button>
                 </li>
               );
@@ -192,7 +193,7 @@ export function DraftAssetAttachmentsField({
               className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/30 px-2 py-0.5 font-mono text-xs text-foreground"
               title={byId.get(id)?.name || undefined}
             >
-              [Asset #{id}]
+              [{t("Asset")} #{id}]
               <FileAssetBadge asset={byId.get(id)} className="font-sans align-middle" />
               <button
                 type="button"

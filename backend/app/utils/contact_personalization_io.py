@@ -25,6 +25,7 @@ def get_personalization_dict(db: Session, contact_id: int, legacy_json: dict | N
         "why_this_company": (row.why_this_company or "").strip(),
         "offer_fit": (row.offer_fit or "").strip(),
         "risks_or_constraints": (row.risks_or_constraints or "").strip(),
+        "person_osint": (legacy_json or {}).get("person_osint"),
     }
 
 

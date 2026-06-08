@@ -22,7 +22,12 @@ class Contact(Base):
     role: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     linkedin: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="new")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="valid")
+    
+    # LeadGen integration fields
+    ai_pipeline_status: Mapped[str] = mapped_column(String(50), nullable=False, default="new")
+    deep_dossier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    
     confidence: Mapped[str | None] = mapped_column(String(50), nullable=True)
     #: Legacy; prefer entity_json_kv scope contact_source. Kept {} after migration.
     source_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

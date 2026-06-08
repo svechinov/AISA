@@ -33,3 +33,25 @@ vite-dev.pid
 # Release snapshots (optional local backups)
 archives/*.tar.gz
 archives/*.zip
+
+# --- Debug / scratch artifacts (added 2026-06-08 baseline cleanup) ---
+/check_*.py
+/compare_test*.py
+/run_comparison.py
+/run_matches*.txt
+/runs_output.json
+/parse_body.py
+/parsed.txt
+/inject_contacts.py
+/test_local.py
+/test_vps.py
+/local_body.txt
+/local_dom.html
+/local_screenshot.png
+/openapi_dump.json
+/promptAnalyzer_lines.txt
+/remote_logs.txt
+*.log
+backend/dump_emails.py
+frontend/aibizos_html.txt
+frontend/constants_dump.txt

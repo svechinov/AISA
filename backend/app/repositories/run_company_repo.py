@@ -77,6 +77,11 @@ def _row_to_dict(
     for k, v in extra.items():
         if k not in d:
             d[k] = v
+    
+    # OSINT fields
+    d["osint_dossier"] = extra.get("osint_dossier")
+    d["osint_updated_at"] = extra.get("osint_updated_at")
+
     cs_col = getattr(r, "contact_status", None)
     if isinstance(cs_col, str) and cs_col in PERSISTED_CONTACT_STATUSES:
         d["contact_status"] = cs_col

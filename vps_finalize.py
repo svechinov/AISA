@@ -50,10 +50,11 @@ def main():
         print("Connected successfully!")
         
         # 1. Initialize Database
-        execute_command(ssh, "cd /var/www/AI-Biz-OS/backend && ./venv/bin/python app/init_db.py")
+        print("[VPS] Executing: Initializing Database...")
+        execute_command(ssh, "export PYTHONPATH=/var/www/AI-Biz-OS/backend && cd /var/www/AI-Biz-OS/backend && ./venv/bin/python app/init_db.py")
         
         # 2. Upload Frontend Dist
-        execute_command(ssh, f"mkdir -p {REMOTE_DIST}")
+        execute_command(ssh, f"rm -rf {REMOTE_DIST} && mkdir -p {REMOTE_DIST}")
         sftp = ssh.open_sftp()
         print("Starting frontend upload...")
         upload_dir(sftp, LOCAL_DIST, REMOTE_DIST)
@@ -71,6 +72,7 @@ server {
 
     location / {
         try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-store, no-cache, must-revalidate";
     }
 
     location /api/ {

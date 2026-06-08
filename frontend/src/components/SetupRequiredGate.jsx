@@ -85,7 +85,7 @@ function labelForCdn(providerId) {
  * Blocks the app until GET /setup/status reports llm_configured && cdn_configured.
  * After a successful status: masked rows for secrets in .env, then green checks one-by-one; only configured LLM slots are listed.
  */
-export default function SetupRequiredGate({ children }) {
+export default function SetupRequiredGate({ children, forceOpen, onClose }) {
   const [status, setStatus] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [submitErr, setSubmitErr] = useState("");
@@ -250,7 +250,7 @@ export default function SetupRequiredGate({ children }) {
     [llmRows, cdnProvider, cdnKey],
   );
 
-  if (canEnterApp) return children;
+  if (canEnterApp && !forceOpen) return children;
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background p-4">
@@ -394,7 +394,7 @@ export default function SetupRequiredGate({ children }) {
             ) : null}
 
             {/* Setup form when incomplete */}
-            {status && (!status.llm_configured || !status.cdn_configured) ? (
+            {status && (!status.llm_configured || !status.cdn_configured || forceOpen) ? (
               <>
                 <section className="space-y-3">
                   <h2 className="text-sm font-medium">1. Large language models</h2>
@@ -508,7 +508,7 @@ export default function SetupRequiredGate({ children }) {
             <Download className="h-4 w-4" />
             Download .env snippet
           </Button>
-          {canTryServerSave && status && (!status.llm_configured || !status.cdn_configured) ? (
+          {canTryServerSave && status && (!status.llm_configured || !status.cdn_configured || forceOpen) ? (
             <Button
               type="button"
               disabled={submitting || checking}
@@ -529,6 +529,11 @@ export default function SetupRequiredGate({ children }) {
             {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             Re-check status
           </Button>
+          {forceOpen ? (
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>

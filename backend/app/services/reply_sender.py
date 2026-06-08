@@ -29,7 +29,7 @@ from app.services.asset_packet_service import (
     lock_packet_after_send,
     render_assets_block_for_email,
 )
-from app.services.contact_gmail_history_service import mark_history_detected_after_outbound_send
+
 from app.services.email_provider import send_email_via_provider
 from app.services.outbound_email_body import (
     append_additional_assets_section_to_email_html,
@@ -330,14 +330,6 @@ def send_one_reply_draft(db: Session, draft_id: int) -> dict:
             draft.id,
         )
 
-    if (result.get("provider") or "").strip().lower() == "gmail":
-        try:
-            mark_history_detected_after_outbound_send(db, draft.run_id, draft.to_email)
-        except Exception:
-            logger.exception(
-                "post-send: mark_history_detected_after_outbound_send (reply_draft_id=%s)",
-                draft.id,
-            )
 
     return {
         "reply_draft_id": draft.id,

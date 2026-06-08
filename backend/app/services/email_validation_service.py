@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from app.services.outreach_personalize import normalize_text_for_dedup
 
@@ -135,6 +138,48 @@ def validate_outbound_email(
         i["code"] in ("banned_phrase", "duplicate_peer") for i in issues
     )
     is_valid = score >= 55 and not critical
+
+    # --- AGENTIC CRITIC (Self-QA) ---
+    from app.services.llm_gateway import complete_prompt_json_object, llm_configured
+    if is_valid and llm_configured():
+        try:
+            facts = personalization.get('company_facts') or personalization.get('osint_dossier')
+            critic_prompt = f"""
+You are an elite B2B SDR Critic. Evaluate this cold email draft strictly on 3 criteria (1-5 scale).
+Subject: {subject}
+Body: {body}
+
+Available evidence/facts: {facts}
+
+Criteria:
+1. relevance_score (1-5): How relevant is this to the company based on the facts? (1=generic, 5=highly tailored)
+2. specificity_score (1-5): Does it use concrete facts/numbers/names from the evidence instead of fluff? (1=no facts, 5=hard evidence used)
+3. non_spam_score (1-5): Does it avoid marketing jargon and sound like a personal 1-to-1 email? (1=spammy blast, 5=human and natural)
+
+Return strict JSON:
+{{
+  "relevance_score": int,
+  "specificity_score": int,
+  "non_spam_score": int,
+  "critique_issues": ["list of specific problems to fix, empty if all scores are 4+"]
+}}
+"""
+            critic_json = complete_prompt_json_object(critic_prompt)
+            total_critic = critic_json.get("relevance_score", 0) + critic_json.get("specificity_score", 0) + critic_json.get("non_spam_score", 0)
+            
+            logger.info("Email Critic scores: relevance=%s, specificity=%s, non_spam=%s (Total: %s/15)", 
+                        critic_json.get("relevance_score"), critic_json.get("specificity_score"), 
+                        critic_json.get("non_spam_score"), total_critic)
+
+            # Require at least 12/15 total, and no single score < 3
+            if total_critic < 12 or any(critic_json.get(k, 0) < 3 for k in ["relevance_score", "specificity_score", "non_spam_score"]):
+                is_valid = False
+                score -= 20
+                for ci in critic_json.get("critique_issues", []):
+                    issues.append({"code": "llm_critic_rejected", "detail": f"Critic Feedback: {ci}"})
+                    logger.warning("Critic Rejected: %s", ci)
+        except Exception as e:
+            logger.warning("Critic evaluation failed: %s", e)
 
     return {
         "is_valid": is_valid,

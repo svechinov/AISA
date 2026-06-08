@@ -117,12 +117,13 @@ def format_search_brief_from_inner(inner: dict[str, str]) -> str:
 
 
 def outreach_brief_has_minimum_content(inner: dict[str, str]) -> bool:
-    """True if at least one primary search field is filled (legacy Offer/Goal counts)."""
+    """True if at least one primary search field is filled (legacy Offer/Goal counts). Now accepts free-form notes too."""
     return bool(
         coalesce_str(inner.get("goal"))
         or coalesce_str(inner.get("target_entities"))
         or coalesce_str(inner.get("offer"))
         or coalesce_str(inner.get("target_roles"))
+        or coalesce_str(inner.get("notes"))
     )
 
 
@@ -314,6 +315,12 @@ def build_find_contacts_task(run) -> str:
     mp = coalesce_str(getattr(run, "master_prompt", None))
     ctx = get_effective_context(run)
     roles = ctx["target_roles"] or "—"
+    
+    run_setup = getattr(run, "run_setup", None)
+    if run_setup and getattr(run_setup, "reasoning_prompt", None) and run_setup.reasoning_prompt.strip():
+        user_prompt = run_setup.reasoning_prompt.strip()
+        return f"{mp}\n\nTask:\n{user_prompt}\n\nTarget roles:\n{roles}"
+
     return (
         f"{mp}\n\n"
         "Task:\n"

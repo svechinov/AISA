@@ -17,6 +17,8 @@ class ContactRead(BaseModel):
     linkedin: str | None
     status: str
     confidence: str | None
+    ai_pipeline_status: str = "new"
+    deep_dossier: str | None = None
     source_json: dict
     personalization_json: dict = Field(default_factory=dict)
     review_status: str
@@ -110,8 +112,10 @@ def contact_read_for_run_list(
         linkedin=contact.linkedin,
         status=contact.status,
         confidence=contact.confidence,
+        ai_pipeline_status=contact.ai_pipeline_status,
+        deep_dossier=contact.deep_dossier,
         source_json={},
-        personalization_json={},
+        personalization_json=contact.personalization_json if contact.personalization_json else {},
         review_status=contact.review_status,
         review_notes=contact.review_notes,
         reviewed_at=contact.reviewed_at,

@@ -235,25 +235,54 @@ def update_run_human_ui_preferences(
     return run
 
 
-def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: str) -> Run | None:
-    """Persist labeled outreach prompt text in ``run_setups`` only — does not touch ``runs.context_json``."""
+def update_run_prompt_setup(
+    db: Session,
+    run_id: int,
+    *,
+    prompt_setup_text: str | None = None,
+    osint_prompt: str | None = None,
+    reasoning_prompt: str | None = None,
+    draft_prompt: str | None = None,
+    company_search_prompt: str | None = None,
+    deep_osint_prompt: str | None = None,
+    osint_discovery_mode: str | None = None,
+    language: str | None = None,
+) -> Run | None:
+    """Persist labeled outreach prompt text and granular AI prompts in ``run_setups``."""
     run = get_run(db, run_id)
     if not run:
         return None
     row = db.query(RunSetup).filter(RunSetup.run_id == run_id).first()
-    if (prompt_setup_text or "").strip() == "":
-        if row:
-            row.prompt_setup_text = None
-            _prune_run_setup_if_empty(db, row)
-    else:
-        if row is None:
-            row = RunSetup(run_id=run_id)
-            db.add(row)
-        row.prompt_setup_text = prompt_setup_text
+    
+    if row is None:
+        row = RunSetup(run_id=run_id)
+        db.add(row)
+    
+    if prompt_setup_text is not None:
+        row.prompt_setup_text = prompt_setup_text.strip() or None
+    if osint_prompt is not None:
+        row.osint_prompt = osint_prompt.strip() or None
+    if reasoning_prompt is not None:
+        row.reasoning_prompt = reasoning_prompt.strip() or None
+    if draft_prompt is not None:
+        row.draft_prompt = draft_prompt.strip() or None
+    if company_search_prompt is not None:
+        row.company_search_prompt = company_search_prompt.strip() or None
+    if deep_osint_prompt is not None:
+        row.deep_osint_prompt = deep_osint_prompt.strip() or None
+    if osint_discovery_mode is not None:
+        row.osint_discovery_mode = osint_discovery_mode.strip() or "api_only"
+    if language is not None:
+        row.language = language.strip() or "Russian"
+
     db.add(run)
     db.commit()
     db.refresh(run)
     return run
+
+
+def update_run_prompt_setup_text(db: Session, run_id: int, prompt_setup_text: str) -> Run | None:
+    return update_run_prompt_setup(db, run_id, prompt_setup_text=prompt_setup_text)
 
 
 def update_run_status(db: Session, run: Run, status: str):

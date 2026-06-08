@@ -19,6 +19,8 @@ class RunCompanyRow(BaseModel):
     ai_fit_status: Literal["correct", "incorrect"] | None = None
     ai_fit_reason: str | None = None
     ai_fit_checked_at: str | None = None
+    osint_dossier: str | None = None
+    osint_updated_at: str | None = None
 
 
 class RunCompaniesRead(BaseModel):
@@ -76,12 +78,18 @@ class RunStart(BaseModel):
     segment: str | None = None
     # Primary: labeled textarea (Offer:/Target:/…); merged with legacy flat fields if empty.
     outreach_brief: str = ""
+    prompt_setup_text: str | None = None
+    osint_prompt: str | None = None
+    deep_osint_prompt: str | None = None
+    osint_discovery_mode: str = "api_only"
+    reasoning_prompt: str | None = None
     product: str = ""
     target_entities: str = ""
     target_roles: str = ""
     outreach_goal: str = ""
     tone: str = "Professional"
     extra_context: str = ""
+    prompt_setup_text: str = ""
 
 
 class RunEditFormRead(BaseModel):
@@ -93,6 +101,11 @@ class RunEditFormRead(BaseModel):
     segment: str | None = None
     email_style_mode: str | None = None
     outreach_brief: str = ""
+    prompt_setup_text: str = ""
+    osint_prompt: str | None = None
+    deep_osint_prompt: str | None = None
+    osint_discovery_mode: str | None = None
+    reasoning_prompt: str | None = None
 
 
 class RunTrackingStripRead(BaseModel):
@@ -123,6 +136,7 @@ class RunRead(BaseModel):
     #: Canonical prompt textarea (run_setups); empty when unset.
     prompt_setup_text: str | None = None
     email_style_mode: str | None = None
+    osint_discovery_mode: str | None = None
 
     class Config:
         from_attributes = True
@@ -169,6 +183,7 @@ def run_read_from_orm(run: Any) -> RunRead:
             sender_signature_html=get_sender_signature_html(run),
             prompt_setup_text=pt if pt else None,
             email_style_mode=run.email_style_mode,
+            osint_discovery_mode=getattr(run.run_setup, "osint_discovery_mode", "api_only") if run.run_setup else "api_only",
         )
     return RunRead(
         id=run.id,
@@ -190,6 +205,7 @@ def run_read_from_orm(run: Any) -> RunRead:
         sender_signature_html=get_sender_signature_html(run),
         prompt_setup_text=pt if pt else None,
         email_style_mode=run.email_style_mode,
+        osint_discovery_mode=getattr(run.run_setup, "osint_discovery_mode", "api_only") if run.run_setup else "api_only",
     )
 
 
@@ -199,7 +215,14 @@ class RunSignaturePatch(BaseModel):
 
 class RunPromptSetupPatch(BaseModel):
     """Labeled brief textarea; stored in run_setups.prompt_setup_text."""
-    prompt_setup_text: str = ""
+    prompt_setup_text: str | None = None
+    osint_prompt: str | None = None
+    reasoning_prompt: str | None = None
+    draft_prompt: str | None = None
+    company_search_prompt: str | None = None
+    deep_osint_prompt: str | None = None
+    osint_discovery_mode: str | None = None
+    language: str = "Russian"
 
 
 class RunPromptSetupPatchResult(BaseModel):
@@ -220,6 +243,11 @@ class RunReviewSetupFieldsRead(BaseModel):
     """Tiny GET for Prompt setup + Signature dialogs — no full Run / context_json blob."""
 
     prompt_setup_editor_text: str
+    osint_prompt: str | None = None
+    reasoning_prompt: str | None = None
+    draft_prompt: str | None = None
+    osint_discovery_mode: str = "api_only"
+    language: str = "Russian"
     sender_signature_html: str = ""
     prompt_setup_saved: bool
     sender_signature_configured: bool
@@ -244,6 +272,11 @@ class RunOutreachPatch(BaseModel):
     notes: str | None = None
     segment: str = ""
     outreach_brief: str = ""
+    prompt_setup_text: str = ""
+    osint_prompt: str | None = None
+    deep_osint_prompt: str | None = None
+    osint_discovery_mode: str | None = None
+    reasoning_prompt: str | None = None
     #: Optional: set in same request as brief (Edit run — one PATCH instead of two).
     email_style_mode: str | None = None
 

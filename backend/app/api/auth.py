@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from app.config import settings
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 class LoginRequest(BaseModel):
     password: str
@@ -19,3 +19,8 @@ def login(req: LoginRequest):
         return LoginResponse(token=req.password)
     
     raise HTTPException(status_code=401, detail="Invalid password")
+
+# Alias for compatibility with old cached frontend
+@router.post("/api/auth/login", include_in_schema=False)
+def login_alias(req: LoginRequest):
+    return login(req)

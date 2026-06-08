@@ -58,6 +58,7 @@ import {
 } from "@/lib/runPanelLite";
 import { fetchAllPagedItems } from "@/lib/paginatedApi";
 import { formatDateTimeYmdHms, formatDateYmd } from "@/lib/formatDate";
+import { t } from "@/lib/i18n";
 
 /** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
 function threadMessageBodyLooksLikeHtml(s) {
@@ -165,7 +166,7 @@ function TrackingCardsPlaceholder({ mode, kind }) {
   if (mode === "empty") {
     return (
       <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
-        No {kind} data for this run.
+        {t("No")} {kind} {t("data for this run.")}
       </div>
     );
   }
@@ -176,7 +177,7 @@ function TrackingCardsPlaceholder({ mode, kind }) {
       aria-live="polite"
     >
       <Clock className="h-8 w-8 shrink-0 animate-spin text-primary" aria-hidden />
-      <p>{kind} data is loading…</p>
+      <p>{kind} {t("data is loading…")}</p>
     </div>
   );
 }
@@ -205,72 +206,72 @@ function ThreadCardFromLite({ row }) {
           ) : isThreadBounced ? (
             <MailWarning className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
           ) : null}
-          <div className="font-medium">{row.company || `Contact #${row.contact_id}`}</div>
+          <div className="font-medium">{row.company || `${t("Contact")} #${row.contact_id}`}</div>
           {isThreadBounced && !isThreadDeadMailbox ? (
             <Badge
               variant="outline"
               className="gap-1 border-amber-600/55 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/35 dark:text-amber-100"
-              title="Outbound delivery failed (bounce)"
+              title={t("Outbound delivery failed (bounce)")}
             >
               <MailWarning className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
-              Bounced
+              {t("Bounced")}
             </Badge>
           ) : null}
           {showInboundBadge ? (
             <Badge
               variant="outline"
               className="gap-1 border-green-600/50 bg-green-600/15 font-normal text-green-800 dark:border-green-600/45 dark:bg-green-950/45 dark:text-green-300"
-              title="Last message in this thread is inbound — needs your attention"
+              title={t("Last message in this thread is inbound — needs your attention")}
             >
               <AlertCircle className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-400" aria-hidden />
-              Inbound
+              {t("Inbound")}
             </Badge>
           ) : null}
           {hasRem ? (
             <Badge
               variant="outline"
               className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
-              title={`Reminder: ${formatDateTimeYmdHms(row.remind_at)}`}
+              title={`${t("Reminder")}: ${formatDateTimeYmdHms(row.remind_at)}`}
             >
               <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
-              Remind later
+              {t("Remind later")}
             </Badge>
           ) : null}
           {isThreadDeadMailbox ? (
             <Badge variant="destructive" className="font-normal text-xs">
-              Dead mailbox
+              {t("Dead mailbox")}
             </Badge>
           ) : null}
           {label ? (
             <Badge variant="default" className={`font-normal ${threadClassificationBadgeClass(label)}`}>
-              {THREAD_CLASS_LABELS[label] || label}
+              {t(THREAD_CLASS_LABELS[label] || label)}
             </Badge>
           ) : null}
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
-          {row.contact_name || "—"} · {row.subject || "No subject"}
+          {row.contact_name || "—"} · {row.subject || t("No subject")}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <Badge variant="secondary">{row.status}</Badge>
+          <Badge variant="secondary">{t(row.status)}</Badge>
           {threadOpenStaleSevenPlusDays(row.status, row.msg_in, row.last_message_at) ? (
             <Badge
               variant="outline"
               className="gap-1 border-orange-400/55 bg-orange-500/20 font-normal text-orange-950 dark:border-orange-500/45 dark:bg-orange-950/35 dark:text-orange-100"
-              title="No reply yet — last activity 7+ days ago"
+              title={t("No reply yet — last activity 7+ days ago")}
             >
-              7+ days
+              {t("7+ days")}
             </Badge>
           ) : null}
           <span>
-            Out {row.msg_out} · In {row.msg_in}
+            {t("Out")} {row.msg_out} · {t("In")} {row.msg_in}
           </span>
           {row.last_message_at ? (
-            <span>Last: {formatDateYmd(row.last_message_at)}</span>
+            <span>{t("Last")}: {formatDateYmd(row.last_message_at)}</span>
           ) : null}
         </div>
       </div>
-      <Button type="button" variant="outline" disabled title="Open thread after data sync completes">
-        Open thread
+      <Button type="button" variant="outline" disabled title={t("Open thread after data sync completes")}>
+        {t("Open thread")}
       </Button>
     </div>
   );
@@ -1755,7 +1756,7 @@ export default function TrackingView({
       {!singleTabMode ? (
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-2xl font-semibold tracking-tight">Tracking</h2>
+            <span className="text-xl font-semibold tracking-tight">{t("Tracking")}</span>
             <p className="text-sm text-muted-foreground">
               Run #{runId} · sending, events, dead mailboxes, replacement-search queue · auto-refresh 3s
             </p>
@@ -1837,9 +1838,9 @@ export default function TrackingView({
           </Card>
           <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground">Repl. drafts</div>
+              <div className="text-xs text-muted-foreground">{t("Repl. drafts")}</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_drafts_generated ?? 0}</div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground">By replacement contacts</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">{t("By replacement contacts")}</div>
             </CardContent>
           </Card>
           <Card className="rounded-2xl border-2 border-border bg-card shadow-none">

@@ -82,11 +82,33 @@ DATABASE_URL=postgresql://aibizos:aibizospassword@localhost:5432/aibizos_db
 REDIS_URL=redis://localhost:6379/0
 SECRET_KEY=supersecretkey_change_me_later
 DEBUG=True
+
+# LLM Config
+LLM_PROVIDER_PRIORITY=openai
+OPENAI_API_KEY=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
+TAVILY_API_KEY=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
+
+# CDN Config (Cloudflare R2)
+CDN_PROVIDER=cloudflare
+CDN_ACCOUNT_ID=9f1e4613d60b54ef4d90af7689407c45
+CDN_API_KEY=d39f554f35da7b2dda15c638fec96c519658da1ff549d477823036d4e0462244
+CDN_R2_BUCKET=fgc
+CDN_R2_ACCESS_KEY_ID=fd645e65c61b210cac6e3d5f87eff77a
+CDN_R2_SECRET_ACCESS_KEY=d39f554f35da7b2dda15c638fec96c519658da1ff549d477823036d4e0462244
+CDN_R2_PUBLIC_BASE_URL=https://9f1e4613d60b54ef4d90af7689407c45.r2.cloudflarestorage.com/fgc
+GLOBAL_PASSWORD=ccae627d5f6a2f89ce49bc24f9d773b9
+HTTP_PROXY=http://gaGN4f:0og1Gt@91.233.54.62:8000
 """
         execute_command(ssh, f"cat << 'EOF' > /var/www/AI-Biz-OS/backend/.env\n{env_content}\nEOF")
         
-        # 5. Run Migrations
-        execute_command(ssh, "cd /var/www/AI-Biz-OS/backend && ./venv/bin/alembic upgrade head")
+        # 5. Run Migrations (Manual Column Additions for GSD 2.1)
+        migration_sql = """
+        ALTER TABLE run_setups ADD COLUMN IF NOT EXISTS osint_prompt TEXT;
+        ALTER TABLE run_setups ADD COLUMN IF NOT EXISTS reasoning_prompt TEXT;
+        ALTER TABLE run_setups ADD COLUMN IF NOT EXISTS draft_prompt TEXT;
+        ALTER TABLE run_setups ADD COLUMN IF NOT EXISTS language VARCHAR(50) DEFAULT 'Russian';
+        """
+        execute_command(ssh, f'sudo -u postgres psql -d aibizos_db -c "{migration_sql}"')
         
         # 6. Setup systemd service for backend
         service_content = """[Unit]
@@ -98,13 +120,14 @@ User=root
 Group=root
 WorkingDirectory=/var/www/AI-Biz-OS/backend
 Environment="PATH=/var/www/AI-Biz-OS/backend/venv/bin"
+Environment="PYTHONPATH=/var/www/AI-Biz-OS/backend"
 ExecStart=/var/www/AI-Biz-OS/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 [Install]
 WantedBy=multi-user.target
 """
         execute_command(ssh, f"cat << 'EOF' > /etc/systemd/system/aibizos.service\n{service_content}\nEOF")
-        execute_command(ssh, "systemctl daemon-reload && systemctl enable aibizos && systemctl start aibizos")
+        execute_command(ssh, "systemctl daemon-reload && systemctl enable aibizos && systemctl restart aibizos")
         
         print("\nBackend setup completed!")
         

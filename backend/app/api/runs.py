@@ -20,6 +20,7 @@ from app.repositories.run_repo import (
     update_run_human_ui_preferences,
     update_run_outreach_fields,
     update_run_project,
+    update_run_prompt_setup,
     update_run_prompt_setup_text,
     update_run_signature,
 )
@@ -156,6 +157,7 @@ def get_run_edit_form_route(run_id: int, db: Session = Depends(get_db)):
         segment=run.segment,
         email_style_mode=run.email_style_mode,
         outreach_brief=format_search_brief_from_inner(inner),
+        prompt_setup_text=get_prompt_setup_text(run),
     )
 
 
@@ -364,13 +366,13 @@ def patch_run_outreach_route(
     )
     if not inner.get("notes") and payload.notes:
         inner["notes"] = payload.notes.strip()
-    if not outreach_brief_has_minimum_content(inner):
+    if not payload.prompt_setup_text and not outreach_brief_has_minimum_content(inner):
         legacy = ""
         if getattr(run, "input_goal", None):
             legacy = str(run.input_goal).strip()
         if legacy:
             inner["goal"] = legacy
-    if not outreach_brief_has_minimum_content(inner):
+    if not payload.prompt_setup_text and not outreach_brief_has_minimum_content(inner):
         raise HTTPException(
             status_code=400,
             detail="Outreach brief must include searchable content (reason for search, field of activity, "
@@ -392,7 +394,20 @@ def patch_run_outreach_route(
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not updated:
         raise HTTPException(status_code=404, detail="Run not found")
+        
+    if payload.prompt_setup_text is not None or payload.osint_prompt is not None or payload.deep_osint_prompt is not None or payload.reasoning_prompt is not None:
+        update_run_prompt_setup(
+            db, 
+            updated.id, 
+            prompt_setup_text=payload.prompt_setup_text,
+            osint_prompt=payload.osint_prompt,
+            deep_osint_prompt=payload.deep_osint_prompt,
+            osint_discovery_mode=payload.osint_discovery_mode,
+            reasoning_prompt=payload.reasoning_prompt
+        )
+        
     inner_saved = get_inner_for_edit_form_relational_only(updated)
+    run_setup = getattr(updated, "run_setup", None)
     return RunEditFormRead(
         id=updated.id,
         name=updated.name,
@@ -400,6 +415,11 @@ def patch_run_outreach_route(
         segment=updated.segment,
         email_style_mode=updated.email_style_mode,
         outreach_brief=format_search_brief_from_inner(inner_saved),
+        prompt_setup_text=get_prompt_setup_text(updated),
+        osint_prompt=run_setup.osint_prompt if run_setup else None,
+        deep_osint_prompt=run_setup.deep_osint_prompt if run_setup else None,
+        osint_discovery_mode=run_setup.osint_discovery_mode if run_setup else None,
+        reasoning_prompt=run_setup.reasoning_prompt if run_setup else None,
     )
 
 
@@ -426,6 +446,7 @@ def patch_run_email_style_route(
     if not updated:
         raise HTTPException(status_code=404, detail="Run not found")
     inner = get_inner_for_edit_form_relational_only(updated)
+    run_setup = getattr(updated, "run_setup", None)
     return RunEditFormRead(
         id=updated.id,
         name=updated.name,
@@ -433,6 +454,11 @@ def patch_run_email_style_route(
         segment=updated.segment,
         email_style_mode=updated.email_style_mode,
         outreach_brief=format_search_brief_from_inner(inner),
+        prompt_setup_text=get_prompt_setup_text(updated),
+        osint_prompt=run_setup.osint_prompt if run_setup else None,
+        deep_osint_prompt=run_setup.deep_osint_prompt if run_setup else None,
+        osint_discovery_mode=run_setup.osint_discovery_mode if run_setup else None,
+        reasoning_prompt=run_setup.reasoning_prompt if run_setup else None,
     )
 
 
@@ -498,14 +524,14 @@ def start_run_route(payload: RunStart, db: Session = Depends(get_db)):
         tone=payload.tone,
         extra_context=payload.extra_context,
     )
-    if not outreach_brief_has_minimum_content(inner):
+    if not payload.prompt_setup_text and not outreach_brief_has_minimum_content(inner):
         legacy = (payload.input_json or {}).get("goal") if isinstance(payload.input_json, dict) else ""
         if legacy:
             inner["goal"] = str(legacy).strip()
     if not inner.get("notes") and payload.notes:
         inner["notes"] = payload.notes.strip()
 
-    if not outreach_brief_has_minimum_content(inner):
+    if not payload.prompt_setup_text and not outreach_brief_has_minimum_content(inner):
         raise HTTPException(
             status_code=400,
             detail="Outreach brief must include searchable content (reason for search, field of activity, "
@@ -528,6 +554,17 @@ def start_run_route(payload: RunStart, db: Session = Depends(get_db)):
         context_json=wrap_context(inner),
         master_prompt=master,
     )
+
+    if payload.prompt_setup_text is not None or payload.osint_prompt is not None or payload.deep_osint_prompt is not None or payload.reasoning_prompt is not None:
+        update_run_prompt_setup(
+            db, 
+            run.id, 
+            prompt_setup_text=payload.prompt_setup_text,
+            osint_prompt=payload.osint_prompt,
+            deep_osint_prompt=payload.deep_osint_prompt,
+            osint_discovery_mode=payload.osint_discovery_mode,
+            reasoning_prompt=payload.reasoning_prompt
+        )
 
     run_workflow(db, run.id)
     r = get_run(db, run.id)
@@ -592,7 +629,19 @@ def patch_run_signature_route(run_id: int, payload: RunSignaturePatch, db: Sessi
 
 @router.patch("/{run_id}/prompt-setup", response_model=RunPromptSetupPatchResult)
 def patch_run_prompt_setup_route(run_id: int, payload: RunPromptSetupPatch, db: Session = Depends(get_db)):
-    run = update_run_prompt_setup_text(db, run_id, payload.prompt_setup_text)
+    from app.repositories.run_repo import update_run_prompt_setup
+    run = update_run_prompt_setup(
+        db,
+        run_id,
+        prompt_setup_text=payload.prompt_setup_text,
+        osint_prompt=payload.osint_prompt,
+        reasoning_prompt=payload.reasoning_prompt,
+        draft_prompt=payload.draft_prompt,
+        company_search_prompt=payload.company_search_prompt,
+        deep_osint_prompt=payload.deep_osint_prompt,
+        osint_discovery_mode=payload.osint_discovery_mode,
+        language=payload.language,
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return RunPromptSetupPatchResult(

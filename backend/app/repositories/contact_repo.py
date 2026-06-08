@@ -191,7 +191,7 @@ def hydrate_contacts_for_list_read(db: Session, ordered_ids: list[int]) -> list[
         return []
     q = (
         db.query(Contact)
-        .options(defer(Contact.source_json), defer(Contact.personalization_json))
+        .options(defer(Contact.source_json))
         .filter(Contact.id.in_(ordered_ids))
     )
     by_id = {c.id: c for c in q.all()}
@@ -206,7 +206,7 @@ def list_contacts_by_run(db: Session, run_id: int, *, load_json: bool = True) ->
     """
     q = db.query(Contact).filter(Contact.run_id == run_id).order_by(Contact.id.asc())
     if not load_json:
-        q = q.options(defer(Contact.source_json), defer(Contact.personalization_json))
+        q = q.options(defer(Contact.source_json))
     rows = q.all()
     if not rows:
         return []

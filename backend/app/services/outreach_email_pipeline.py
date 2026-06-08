@@ -79,8 +79,10 @@ def _serialize_personalization(db: Session, contact: Contact) -> dict[str, Any]:
     osint_dossier = ""
     if contact.company:
         rc = db.query(RunCompany).filter(RunCompany.run_id == contact.run_id, RunCompany.name == contact.company).first()
-        if rc and rc.json_kv:
-            osint_dossier = rc.json_kv.get("osint_dossier", "")
+        if rc:
+            from app.utils.run_company_extra import effective_run_company_extra
+            kv = effective_run_company_extra(db, rc)
+            osint_dossier = kv.get("osint_dossier", "")
 
     return {
         "company_facts": pj.get("company_facts") or [],
@@ -89,6 +91,7 @@ def _serialize_personalization(db: Session, contact: Contact) -> dict[str, Any]:
         "offer_fit": (pj.get("offer_fit") or "").strip(),
         "risks_or_constraints": (pj.get("risks_or_constraints") or "").strip(),
         "osint_dossier": osint_dossier,
+        "person_osint": pj.get("person_osint"),
     }
 
 
@@ -118,6 +121,9 @@ def generate_email_reasoning(
     pers = _serialize_personalization(db, contact)
     rules = _rules(db, run.id)
     style_block = style_prompt_fragment(style_mode)
+    
+    rs = getattr(run, "run_setup", None)
+    lang = getattr(rs, "language", "Russian")
 
     variant_note = ""
     if master_variant:
@@ -127,19 +133,24 @@ def generate_email_reasoning(
             f"Reference subject (do not copy): {master_variant.get('subject', '')[:200]}\n"
         )
 
-    task = (
+    task = rs.reasoning_prompt if rs and rs.reasoning_prompt else (
         f"{style_block}\n\n"
         "You are a Senior SDR at FG Consulting. Plan one outbound email for this recipient based on their OSINT dossier.\n\n"
         f"{variant_note}"
         "Return a short internal plan (not the email).\n"
         "Requirements:\n"
-        "- hook: one concrete reason this message fits this company/person based on personalization.osint_dossier.\n"
+        "- hook: one concrete reason this message fits this company/person based on personalization.osint_dossier or personalization.person_osint.\n"
         "- angle: how we frame the ask (Focus on Quick Wins in management/sales).\n"
         "- cta_type: what we ask for (e.g. 15-minute call).\n"
         "- key_point: the single idea or 'Quick Win' to land.\n\n"
         "Ground the hook in personalization.osint_dossier and company_facts when present; "
         "do not invent companies, metrics, or awards not present in INPUT DATA.\n"
+        "CRITICAL: If personalization.person_osint is present, you MUST prioritize facts about the person (quotes, articles, career history) over the general company dossier.\n"
     )
+    
+    # Language enforcement
+    task = f"ALWAYS WRITE THE RESPONSE (hook, angle, key_point, cta_type) IN {lang}.\n\n{task}"
+
     if (prompt_setup_text or "").strip():
         task = (
             f"Campaign / prompt setup (primary):\n{(prompt_setup_text or '').strip()}\n\n" + task
@@ -192,6 +203,9 @@ def generate_email_draft(
     rules = _rules(db, run.id)
     brief = _run_brief_blocks(run)
     style_block = style_prompt_fragment(style_mode)
+    
+    rs = getattr(run, "run_setup", None)
+    lang = getattr(rs, "language", "Russian")
 
     master_block = ""
     if master_variant:
@@ -210,7 +224,7 @@ def generate_email_draft(
             + "\n\n"
         )
 
-    task = (
+    task = rs.draft_prompt if rs and rs.draft_prompt else (
         f"{style_block}\n\n"
         + fix_block
         + "You are a Senior SDR and Business Strategist at 'FG Consulting'. "
@@ -219,7 +233,8 @@ def generate_email_draft(
         "Write one outbound B2B cold email (subject + body) for this recipient.\n\n"
         + master_block
         + "Hard requirements:\n"
-        "- If personalization.osint_dossier is non-empty, you MUST use a concrete fact from it to create a powerful 'Product Hook' (an offer they cannot refuse, based on their 2026 plans or current HR challenges).\n"
+        "- If personalization.person_osint is non-empty, you MUST start the email with a hook referencing their personal background, article, or quote.\n"
+        "- If personalization.osint_dossier is non-empty (and no person_osint), use a concrete fact from it to create a powerful 'Product Hook'.\n"
         "- Address their management hunger (lack of strong leaders, mergers, scaling issues) or sales problems if apparent from the dossier.\n"
         "- Offer ONE specific, fast Quick Win step (e.g., training, facilitation session, workshop, express audit).\n"
         "- The CTA (Call to Action) must be a short 15-minute call.\n"
@@ -231,6 +246,10 @@ def generate_email_draft(
         "Internal reasoning (use, do not quote verbatim):\n"
         f"{json.dumps(reasoning, ensure_ascii=False)}\n"
     )
+    
+    # Language enforcement
+    task = f"ALWAYS WRITE THE RESPONSE (subject, body) IN {lang}.\n\n{task}"
+
     if (prompt_setup_text or "").strip():
         task = f"Campaign / prompt setup (primary):\n{(prompt_setup_text or '').strip()}\n\n" + task
     if regenerate_hint:

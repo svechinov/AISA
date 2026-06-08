@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { readStoredTheme, setTheme } from "@/lib/theme";
+import { t } from "@/lib/i18n";
 
 export function ThemeToggle() {
   const [mode, setMode] = useState(() => readStoredTheme());
@@ -24,8 +25,8 @@ export function ThemeToggle() {
       variant="outline"
       className="h-10 w-10 shrink-0 p-0"
       onClick={toggle}
-      aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
-      title={isDark ? "Light theme" : "Dark theme"}
+      aria-label={isDark ? t("Switch to light theme") : t("Switch to dark theme")}
+      title={isDark ? t("Light theme") : t("Dark theme")}
     >
       {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
     </Button>

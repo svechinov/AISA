@@ -42,7 +42,7 @@ export default function LoginGate({ children }) {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
+      const res = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
@@ -98,7 +98,10 @@ export default function LoginGate({ children }) {
             onChange={(e) => setPassword(e.target.value)}
             autoFocus
           />
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <p className="text-sm text-destructive font-medium">{error}</p>}
+          <div className="text-[10px] text-muted-foreground text-center opacity-50">
+            Auth Path: {API_BASE}/auth/login
+          </div>
           <Button type="submit" className="w-full" disabled={loading || !password}>
             {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             Sign In

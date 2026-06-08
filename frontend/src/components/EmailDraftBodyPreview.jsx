@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import DOMPurify from "dompurify";
 import { FileAssetBadge } from "@/components/FileAssetBadge";
 import { isProbablyHtmlEmailBody } from "@/lib/emailDraftBody";
+import { t } from "@/lib/i18n";
 
 function primaryAssetHref(asset) {
   if (!asset) return "";
@@ -18,7 +19,7 @@ function assetLabelsForPreview(attachedAssetIds, assetLibrary) {
     const a = byId.get(id);
     const name = (a?.name || "").trim();
     const href = primaryAssetHref(a);
-    return { id, label: name || `Asset #${id}`, href, asset: a };
+    return { id, label: name || `${t("Asset")} #${id}`, href, asset: a };
   });
 }
 
@@ -32,7 +33,7 @@ function trailingPreviewBlock({ showSignaturePlaceholder, attachedAssetIds, asse
       {hasAssets ? (
         <div className="space-y-2">
           <div className="border-t border-border/60" />
-          <p className="m-0 font-semibold">Additional assets</p>
+          <p className="m-0 font-semibold">{t("Additional assets")}</p>
           <ul className="m-0 mb-0 list-disc space-y-0.5 pl-5">
             {assetItems.map(({ id, label, href, asset }) => (
               <li key={id} className="[&::marker]:text-foreground">
@@ -54,7 +55,7 @@ function trailingPreviewBlock({ showSignaturePlaceholder, attachedAssetIds, asse
       ) : null}
       {hasSig ? (
         <div className={hasAssets ? "mt-3 border-t border-dashed border-border/60 pt-2" : "border-t border-dashed border-border/60 pt-2"}>
-          <span className="block font-mono text-muted-foreground">[Signature]</span>
+          <span className="block font-mono text-muted-foreground">[{t("Signature")}]</span>
         </div>
       ) : null}
     </div>

@@ -1,4 +1,5 @@
 import React from "react";
+import { t } from "@/lib/i18n";
 
 /** Normalize API payload to 24 non-negative integers. */
 function normalizeHourlyCounts(counts) {
@@ -21,9 +22,9 @@ export function RunSetupHourlySendsChart({ counts }) {
   return (
     <div className="w-full rounded-2xl border-2 border-border bg-card px-3 py-2 shadow-none">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
-        <span className="text-sm font-medium leading-tight text-foreground">Sends — last 24 hours</span>
+        <span className="text-sm font-medium leading-tight text-foreground">{t("Sends — last 24 hours")}</span>
         <span className="text-[11px] text-muted-foreground">
-          UTC · {total} total · outreach + replies
+          {t("UTC")} · {total} {t("total")} · {t("outreach + replies")}
         </span>
       </div>
       <div

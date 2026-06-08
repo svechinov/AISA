@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import SetupRequiredGate from "@/components/SetupRequiredGate";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -28,12 +29,12 @@ import appPkg from "../../package.json";
 import TrackingView from "@/components/TrackingView";
 import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
-import {
-  DraftAssetAttachmentsField,
-  normalizeAttachedAssetIds,
-} from "@/components/DraftAssetAttachmentsField";
+import { DraftAssetAttachmentsField, normalizeAttachedAssetIds } from "@/components/DraftAssetAttachmentsField";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { AiModelSelector } from "@/components/AiModelSelector";
+import { SmtpFarmModal } from "@/components/SmtpFarmModal";
 import { RunSetupHourlySendsChart } from "@/components/RunSetupHourlySendsChart";
+import { ManualLeadGenModal } from "@/components/ManualLeadGenModal";
 import { cn } from "@/lib/utils";
 import {
   snapshotMergeRunSetupBodiesFromRun,
@@ -85,7 +86,9 @@ import {
   Settings,
   Users,
   X,
+  Zap,
 } from "lucide-react";
+import { t } from "@/lib/i18n";
 
 /**
  * In dev without VITE_API_BASE: requests go to the same host as the UI (`/api/...`), and Vite proxies to :8000.
@@ -93,6 +96,7 @@ import {
  * In a production build without env, the default is a direct URL (with nginx, configure your own proxy).
  */
 const ENV_API = import.meta.env.VITE_API_BASE?.trim();
+
 const API_BASE =
   ENV_API && ENV_API.length > 0
     ? ENV_API.replace(/\/$/, "")
@@ -126,6 +130,52 @@ const DEFAULT_OUTREACH_BRIEF =
   "Reason for search (licensing, sales, partnership):\n\n" +
   "How long has the respondent company been in the market:\n\n" +
   "Additional information:\n\n";
+
+const DEFAULT_FG_PROFILER_PROMPT = `Мы — B2B консалтинговая компания (FG Consulting).
+Наш продукт — глубокая аналитика и управленческий консалтинг для оптимизации бизнес-процессов.
+Наша цель — назначить ознакомительный звонок с руководителем (ЛПР) для предложения бесплатного первичного аудита.
+Тон общения: экспертный, лаконичный, без навязчивости и типичных сейлзовых клише. Фокус на выгоде для клиента.`;
+
+const DEFAULT_OSINT_PROMPT =
+  "Find deep business intelligence on {{company}} (website: {{website}}). " +
+  "Focus on: 1. Recent news and 2026 strategy. 2. Management and HR challenges (e.g., expansion, restructuring, leadership training needs). 3. Key decision makers (CEO, HR Director).";
+
+const DEFAULT_DEEP_OSINT_PROMPT =
+  "Анализ корпоративных данных для {company_name}.\n" +
+  "Домен компании: {domain}\n\n" +
+  "Данные из ЕГРЮЛ (CEO): {ceo_name if ceo_name else 'Не найдено'}\n\n" +
+  "Поисковая выдача по должностям:\n{roles_corpus}\n\n" +
+  "Поисковая выдача по email-адресам:\n{email_corpus}\n\n" +
+  "ЗАДАЧА:\n" +
+  "1. Извлеки все имена ЛПР и свяжи их с ролями (CEO, Коммерческий директор, HR-директор, Директор по обучению). Если роль из ЕГРЮЛ, укажи CEO.\n" +
+  "2. Найди любые email-адреса с доменом @{domain} в выдаче. Попробуй угадать \"маску\" (формат) корпоративной почты (например: [имя].[фамилия]@{domain} или [первая_буква_имени][фамилия]@{domain}).\n\n" +
+  "Ответь СТРОГО в формате JSON:\n" +
+  "{\n" +
+  '    "leaders": [\n' +
+  '        {"role": "CEO", "name": "Иван Иванов"},\n' +
+  '        {"role": "HR Director", "name": "Анна Смирнова"}\n' +
+  "    ],\n" +
+  '    "email_mask_guess": "предполагаемая маска или null"\n' +
+  "}";
+
+const DEFAULT_REASONING_PROMPT = `You are a Senior B2B SDR Strategist.
+Your goal is to analyze the company dossier and the recipient's role, and formulate a strategy for the cold email.
+
+Based on the provided Master Prompt, OSINT data, and the recipient's profile, generate the following elements for the email:
+1. hook: An engaging opening hook that grabs attention.
+2. angle: The main value proposition angle tailored to their business.
+3. key_point: The core problem we solve for them.
+4. cta_type: The recommended Call to Action (e.g., "Ask for 15 min call", "Send case study").
+
+Output strictly valid JSON with these keys: "hook", "angle", "key_point", "cta_type".`;
+
+const DEFAULT_DRAFT_PROMPT =
+  "You are an expert B2B copywriter.\n" +
+  "Draft a highly personalized, concise cold email using the Master Prompt context, the company dossier, and the recipient's role.\n" +
+  "Focus on their specific pain points and keep the tone professional but conversational.";
+
+const DEFAULT_COMPANY_SEARCH_PROMPT =
+  "Specific sources to prioritize (e.g., vedomosti.ru, kommersant.ru, rbc.ru) or custom search instructions.";
 
 /** Stored in `email_drafts.review_notes` when reviewer uses the clock (defer send). */
 const OUTBOUND_REVIEW_SEND_LATER = "send_later";
@@ -466,12 +516,11 @@ function runSetupPrefsRollbackPartial(prefsBefore, prevRun) {
 }
 
 function getPromptSetupEditorInitialText(run) {
-  if (!run) return DEFAULT_OUTREACH_BRIEF;
+  if (!run) return DEFAULT_FG_PROFILER_PROMPT;
   if (typeof run.prompt_setup_text === "string" && run.prompt_setup_text.length > 0) {
     return run.prompt_setup_text;
   }
-  const ctx = contextFromRun(run);
-  return contextToOutreachBriefText(ctx);
+  return DEFAULT_FG_PROFILER_PROMPT;
 }
 
 /** Instant dialog text: cached bodies (localStorage) beat card-only selectedRun (no context_json). */
@@ -499,6 +548,12 @@ function seedNewRunFormFromRun(run) {
       notes: "",
       segment: "",
       outreach_brief: DEFAULT_OUTREACH_BRIEF,
+      prompt_setup_text: DEFAULT_FG_PROFILER_PROMPT,
+      osint_prompt: DEFAULT_OSINT_PROMPT,
+      deep_osint_prompt: DEFAULT_DEEP_OSINT_PROMPT,
+      reasoning_prompt: DEFAULT_REASONING_PROMPT,
+      draft_prompt: DEFAULT_DRAFT_PROMPT,
+      company_search_prompt: DEFAULT_COMPANY_SEARCH_PROMPT,
       email_style_mode: "auto",
     };
   }
@@ -517,6 +572,12 @@ function seedNewRunFormFromRun(run) {
     notes: String(run.notes ?? "").trim(),
     segment: seg,
     outreach_brief: brief,
+    prompt_setup_text: String(run.prompt_setup_text ?? "").trim() || DEFAULT_FG_PROFILER_PROMPT,
+    osint_prompt: String(run.osint_prompt ?? "").trim() || DEFAULT_OSINT_PROMPT,
+    deep_osint_prompt: String(run.deep_osint_prompt ?? "").trim() || DEFAULT_DEEP_OSINT_PROMPT,
+    reasoning_prompt: String(run.reasoning_prompt ?? "").trim() || DEFAULT_REASONING_PROMPT,
+    draft_prompt: String(run.draft_prompt ?? "").trim() || DEFAULT_DRAFT_PROMPT,
+    company_search_prompt: String(run.company_search_prompt ?? "").trim() || DEFAULT_COMPANY_SEARCH_PROMPT,
     email_style_mode: normalizeProfessionalProfileFromApi(run?.email_style_mode),
   };
 }
@@ -535,6 +596,12 @@ function seedNewRunFormFromEditFormRead(payload) {
     notes: String(payload.notes ?? "").trim(),
     segment: seg,
     outreach_brief: String(payload.outreach_brief ?? "").trim() || DEFAULT_OUTREACH_BRIEF,
+    prompt_setup_text: String(payload.prompt_setup_text ?? "").trim() || DEFAULT_FG_PROFILER_PROMPT,
+    osint_prompt: String(payload.osint_prompt ?? "").trim() || DEFAULT_OSINT_PROMPT,
+    deep_osint_prompt: String(payload.deep_osint_prompt ?? "").trim() || DEFAULT_DEEP_OSINT_PROMPT,
+    reasoning_prompt: String(payload.reasoning_prompt ?? "").trim() || DEFAULT_REASONING_PROMPT,
+    draft_prompt: String(payload.draft_prompt ?? "").trim() || DEFAULT_DRAFT_PROMPT,
+    company_search_prompt: String(payload.company_search_prompt ?? "").trim() || DEFAULT_COMPANY_SEARCH_PROMPT,
     email_style_mode: normalizeProfessionalProfileFromApi(payload.email_style_mode),
   };
 }
@@ -735,7 +802,7 @@ function mergeWorkspaceLiteInto(prevWorkspace, lite) {
   return next;
 }
 
-/** Dashboard `workspace` state from GET /runs/:id/workspace-lite — avoids heavy GET /workspace (full Run row + same metrics). */
+/** Dashboard `workspace` state from GET /runs/:id/workspace-lite — avoids heavy GET /workspace (full Кампания row + same metrics). */
 function workspaceFromLiteApi(lite, runId) {
   const rid = Number(runId);
   const merged = mergeWorkspaceLiteInto(null, lite);
@@ -792,6 +859,27 @@ function contactRowFromPanelLitePreview(p, runId) {
   };
 }
 
+function AiPipelineBadge({ value }) {
+  if (!value || value === "new") return null;
+  const labels = {
+    needs_osint: "⏳ Needs OSINT",
+    osint_running: "🔍 OSINT Running",
+    needs_profiling: "🧠 Needs Profiling",
+    profiled: "✅ Profiled"
+  };
+  const colors = {
+    needs_osint: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300",
+    osint_running: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300 animate-pulse",
+    needs_profiling: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300",
+    profiled: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300"
+  };
+  return (
+    <Badge variant="outline" className={`font-normal ${colors[value] || ""}`}>
+      {labels[value] || value}
+    </Badge>
+  );
+}
+
 function StatusBadge({ value }) {
   return <Badge variant={statusTone[value] || "secondary"}>{pretty(value)}</Badge>;
 }
@@ -836,7 +924,7 @@ function detailFromApiErrorMessage(msg) {
   return m;
 }
 
-/** True when Gmail refresh failed (expired/revoked token) — UI should offer Connect Gmail even if setup still showed «ready». */
+/** True when Gmail refresh failed (expired/revoked token) — UI should offer Connect Yandex even if setup still showed «ready». */
 function isGmailAuthReconnectErrorMessage(raw) {
   const m = String(detailFromApiErrorMessage(raw) || raw || "").toLowerCase();
   return (
@@ -923,6 +1011,12 @@ function setUiError(setError, err) {
 async function api(path, { method = "GET", body, headers: hdr = {}, signal, timeoutMs = API_TIMEOUT_MS } = {}) {
   const headers = { ...hdr };
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  
+  const token = localStorage.getItem("aibizos_auth_token");
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const timeoutCtl = new AbortController();
   const tid = setTimeout(() => timeoutCtl.abort(), timeoutMs);
   const combined = signal ? combineAbortSignals(signal, timeoutCtl.signal) : timeoutCtl.signal;
@@ -1089,19 +1183,19 @@ function validationScoreToneClass(score) {
 }
 
 const MAIN_NAV = [
-  { value: "runs", label: "Runs" },
-  { value: "companies", label: "Companies" },
-  { value: "contacts", label: "Contacts" },
-  { value: "drafts", label: "Drafts" },
-  { value: "events", label: "Events" },
-  { value: "threads", label: "Threads" },
-  { value: "reply-drafts", label: "Reply drafts" },
-  { value: "reminders", label: "Reminders" },
-  { value: "assets", label: "Assets" },
-  { value: "packets", label: "Packets" },
-  { value: "dead", label: "Dead mailboxes" },
-  { value: "queue", label: "Re-search queue" },
-  { value: "contact-analyzer", label: "Contact analyzer" },
+  { value: "runs", label: t("Кампании") },
+  { value: "companies", label: t("Companies") },
+  { value: "contacts", label: t("Contacts") },
+  { value: "drafts", label: t("Drafts") },
+  { value: "events", label: t("Events") },
+  { value: "threads", label: t("Threads") },
+  { value: "reply-drafts", label: t("Reply drafts") },
+  { value: "reminders", label: t("Reminders") },
+  { value: "assets", label: t("Assets") },
+  { value: "packets", label: t("Packets") },
+  { value: "dead", label: t("Dead mailboxes") },
+  { value: "queue", label: t("Re-search queue") },
+  { value: "contact-analyzer", label: t("Contact analyzer") },
 ];
 
 /** Nav values that show TrackingView — load minimal strip (signature + event_chain) only here. */
@@ -1167,12 +1261,20 @@ function listInclusionsForMainNav(_nav) {
 }
 
 export default function AiBizOsHumanUI() {
+  const toast = ({ title, description, variant }) => {
+    if (variant === "destructive") {
+      console.error(`[TOAST Error] ${title}: ${description}`);
+    } else {
+      console.log(`[TOAST] ${title}: ${description}`);
+    }
+  };
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
   const [contacts, setContacts] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [manualLeadGenOpen, setManualLeadGenOpen] = useState(false);
   /** True while loadRunDetails bundle is in flight (parallel GETs for run). */
   const [runDetailsLoading, setRunDetailsLoading] = useState(false);
   /** Drafts/Contacts tab: separate GET lists (not part of workspace-only loadRunDetails). */
@@ -1189,7 +1291,7 @@ export default function AiBizOsHumanUI() {
   const [dismissedOutboundDraftErrorKeys, setDismissedOutboundDraftErrorKeys] = useState(
     () => new Set(),
   );
-  const [projectName, setProjectName] = useState("New campaign");
+  const [projectName, setProjectName] = useState("Новая кампания");
   const [search, setSearch] = useState("");
   /** Review email drafts: same idea as contact review tabs — only two buckets. */
   const [draftReviewTab, setDraftReviewTab] = useState("pending");
@@ -1199,7 +1301,7 @@ export default function AiBizOsHumanUI() {
     return typeof lc?.mainNav === "string" ? lc.mainNav : "runs";
   });
   const [runsList, setRunsList] = useState([]);
-  /** GET /runs/:id/tracking-strip while on Tracking nav — never full Run row. */
+  /** GET /runs/:id/tracking-strip while on Tracking nav — never full Кампания row. */
   const [trackingStrip, setTrackingStrip] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   /** When === selectedRun.id, Review contacts / Drafts sub-tab counts use live data; else localStorage snapshot. */
@@ -1218,7 +1320,9 @@ export default function AiBizOsHumanUI() {
   const [runSetupPrefsRev, setRunSetupPrefsRev] = useState(0);
   /** All runs / all projects — from GET /sending/global-performance. */
   const [totalPerformance, setTotalPerformance] = useState(() => snapshotReadTotalPerformance());
-  const [newRunOpen, setNewRunOpen] = useState(false);
+    const [isCreatingNewRun, setIsCreatingNewRun] = useState(false);
+  const [globalSetupOpen, setGlobalSetupOpen] = useState(false);
+
   /** Snapshot when the dialog opened from an existing run: trimmed fields + optional runId for Update vs Create. */
   const [newRunBaseline, setNewRunBaseline] = useState(null);
   const [newRunCreateInFlight, setNewRunCreateInFlight] = useState(false);
@@ -1239,15 +1343,60 @@ export default function AiBizOsHumanUI() {
     notes: "",
     segment: "",
     outreach_brief: DEFAULT_OUTREACH_BRIEF,
+    prompt_setup_text: DEFAULT_FG_PROFILER_PROMPT,
     email_style_mode: "auto",
+    osint_discovery_mode: "api_only",
   });
 
+  /** AmoCRM Import State */
+  const [amoCrmImportOpen, setAmoCrmImportOpen] = useState(false);
+  const [amoCrmFile, setAmoCrmImportFile] = useState(null);
+  const [amoCrmRunName, setAmoCrmRunName] = useState("");
+  const [amoCrmProjectId, setAmoCrmProjectId] = useState("");
+  const [amoCrmImportInFlight, setAmoCrmImportInFlight] = useState(false);
+
+  const handleAmoCrmImport = async () => {
+    if (!amoCrmFile || !amoCrmRunName || !amoCrmProjectId) return;
+    setAmoCrmImportInFlight(true);
+    setError("");
+    const formData = new FormData();
+    formData.append("file", amoCrmFile);
+    formData.append("run_name", amoCrmRunName);
+    formData.append("project_id", amoCrmProjectId);
+
+    try {
+      const res = await fetch(`${API_BASE}/runs/import-amocrm`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${selectedRun?.id ? "ccae627d5f6a2f89ce49bc24f9d773b9" : "ccae627d5f6a2f89ce49bc24f9d773b9"}` // Using global password as placeholder for token
+        },
+        body: formData
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const run = await res.json();
+      setAmoCrmImportOpen(false);
+      setAmoCrmImportFile(null);
+      setAmoCrmRunName("");
+      appendActivityLog(`AmoCRM Import: Success. Created Кампания #${run.id}`);
+      await loadProjects();
+      await loadRunDetails(run.id);
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setAmoCrmImportInFlight(false);
+    }
+  };
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
   /** POST PATCH /contacts/:id/edit in flight (Review contacts Save). */
   const [contactEditSavingId, setContactEditSavingId] = useState(null);
   /** PATCH /contacts/:id/review (approve) in flight. */
   const [contactApproveBusyId, setContactApproveBusyId] = useState(null);
+  const [deepOsintBusyId, setDeepOsintBusyId] = useState(null);
+  const [osintDossierView, setOsintDossierView] = useState(null);
+  const [manualContactDialogOpen, setManualContactDialogOpen] = useState(false);
+  const [manualContactLoading, setManualContactLoading] = useState(false);
+  const [manualContactForm, setManualContactForm] = useState({ company: "", name: "", role: "", email: "", linkedin: "" });
   /** Outbound draft is being generated in background after Approve — Drafts tab shows placeholder. */
   const [pendingOutboundDraftByContactId, setPendingOutboundDraftByContactId] = useState(() => ({}));
   const outboundDraftGenTimeoutRef = useRef({});
@@ -1328,7 +1477,15 @@ export default function AiBizOsHumanUI() {
   const [signatureEditorMount, setSignatureEditorMount] = useState(false);
   const [signatureSetupSaving, setSignatureSetupSaving] = useState(false);
   const [promptSetupOpen, setPromptSetupOpen] = useState(false);
-  const [promptSetupText, setPromptSetupText] = useState("");
+  const [promptSetupText, setPromptSetupText] = useState(DEFAULT_FG_PROFILER_PROMPT);
+  const [promptOsintText, setPromptOsintText] = useState(DEFAULT_OSINT_PROMPT);
+  const [promptCompanySearchText, setPromptCompanySearchText] = useState(DEFAULT_COMPANY_SEARCH_PROMPT);
+  const [promptDeepOsintText, setPromptDeepOsintText] = useState(DEFAULT_DEEP_OSINT_PROMPT);
+  const [promptReasoningText, setPromptReasoningText] = useState(DEFAULT_REASONING_PROMPT);
+  const [promptDraftText, setPromptDraftText] = useState(DEFAULT_DRAFT_PROMPT);
+  const [promptLanguage, setPromptLanguage] = useState("Russian");
+  const [promptOsintDiscoveryMode, setPromptOsintDiscoveryMode] = useState("api_only");
+  const [promptTab, setPromptTab] = useState("general");
   const [promptSetupSaving, setPromptSetupSaving] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restartDialogRun, setRestartDialogRun] = useState(null);
@@ -1354,16 +1511,22 @@ export default function AiBizOsHumanUI() {
   const [companyBulkFindProgress, setCompanyBulkFindProgress] = useState(null);
   const [removeCompanyDialog, setRemoveCompanyDialog] = useState(null);
   const [removeCompanyInFlight, setRemoveCompanyInFlight] = useState(false);
+  
+  /** OSINT Dossier State */
+  const [osintDossierOpen, setOsintDossierOpen] = useState(false);
+  const [selectedDossier, setSelectedDossier] = useState({ name: "", text: "" });
+
+  const openDossier = (name, text) => {
+    setSelectedDossier({ name, text });
+    setOsintDossierOpen(true);
+  };
+
   const [companyAiFitBatchLoading, setCompanyAiFitBatchLoading] = useState(false);
   const [setupIntegration, setSetupIntegration] = useState(null);
-  const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
-  const [gmailForm, setGmailForm] = useState({
-    clientId: "",
-    clientSecret: "",
-    redirectUri: "",
-  });
-  const [gmailSetupBusy, setGmailSetupBusy] = useState(false);
-  const [gmailSetupErr, setGmailSetupErr] = useState("");
+  const [yandexSetupOpen, setYandexSetupOpen] = useState(false);
+  const [yandexForm, setYandexForm] = useState({ yandexEmail: "", yandexPassword: "" });
+  const [yandexSetupBusy, setYandexSetupBusy] = useState(false);
+  const [yandexSetupErr, setYandexSetupErr] = useState("");
   const [testSendBusy, setTestSendBusy] = useState(false);
   const [analyzerRows, setAnalyzerRows] = useState([]);
   const [analyzerLoading, setAnalyzerLoading] = useState(false);
@@ -1434,7 +1597,7 @@ export default function AiBizOsHumanUI() {
     if (!runProjectMismatch || selectedRun?.project_id == null) return null;
     const rid = Number(selectedRun.project_id);
     const row = projects.find((p) => Number(p.id) === rid || Number(p.project_id) === rid);
-    return row?.name?.trim() || `Project #${selectedRun.project_id}`;
+    return row?.name?.trim() || `Проект #${selectedRun.project_id}`;
   }, [runProjectMismatch, selectedRun?.project_id, projects]);
 
   const analyzerRowsSorted = useMemo(() => {
@@ -1474,8 +1637,32 @@ export default function AiBizOsHumanUI() {
 
   const openGmailSetup = useCallback(() => {
     setGmailSetupErr("");
-    setGmailSetupOpen(true);
+    setYandexSetupOpen(true);
   }, []);
+
+  const connectYandex = async () => {
+    setYandexSetupBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/setup/yandex`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          yandex_email: yandexForm.yandexEmail?.trim(),
+          yandex_password: yandexForm.yandexPassword?.trim(),
+        }),
+      });
+      if (res.ok) {
+        setYandexSetupOpen(false);
+        void loadSetupIntegration();
+      } else {
+        console.error("Yandex setup failed");
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setYandexSetupBusy(false);
+    }
+  };
 
   const loadSetupIntegration = useCallback(async () => {
     try {
@@ -1509,14 +1696,14 @@ export default function AiBizOsHumanUI() {
     };
   }, [appendActivityLog]);
 
-  /** Run switch + assets/packets pipeline — same channel as the rest of the UI (Activity panel). */
+  /** Кампания switch + assets/packets pipeline — same channel as the rest of the UI (Activity panel). */
   const appendRunTraceLog = useCallback((message, detail) => {
-    appendActivityLog(`Run trace: ${message}`, detail);
+    appendActivityLog(`Кампания trace: ${message}`, detail);
   }, [appendActivityLog]);
 
   const appendTrackingRunTraceLog = useCallback(
     (message, detail) => {
-      appendActivityLog(`Run trace: [Tracking] ${message}`, detail);
+      appendActivityLog(`Кампания trace: [Tracking] ${message}`, detail);
     },
     [appendActivityLog],
   );
@@ -1609,10 +1796,12 @@ export default function AiBizOsHumanUI() {
       if (signal?.aborted) return;
       snapshotWriteProjects(v, data);
       setProjects(data);
-      setSelectedProject((prev) => {
-        if (!data.length) return null;
-        return snapshotPickSelectedProject(data, prev, v);
-      });
+      if (!data.length) {
+        setSelectedProject(null);
+        setSelectedRun(null);
+      } else {
+        setSelectedProject((prev) => snapshotPickSelectedProject(data, prev, v));
+      }
       appendActivityLog(`Projects loaded (${Array.isArray(data) ? data.length : 0}).`);
     } catch (e) {
       if (signal?.aborted) return;
@@ -2003,8 +2192,8 @@ export default function AiBizOsHumanUI() {
     if (includeDrafts) listParts.push(`/email-drafts/run/${rid} (list, compact)`);
     appendActivityLog(
       listParts.length
-        ? `Run run_id=${rid}: GET /runs/${rid}/workspace-lite, ${listParts.join(", ")}`
-        : `Run run_id=${rid}: GET /runs/${rid}/workspace-lite (no section lists; no GET /runs/:id)`,
+        ? `Кампания run_id=${rid}: GET /runs/${rid}/workspace-lite, ${listParts.join(", ")}`
+        : `Кампания run_id=${rid}: GET /runs/${rid}/workspace-lite (no section lists; no GET /runs/:id)`,
     );
     const prevTarget = runLoadTargetRef.current;
     runLoadTargetRef.current = rid;
@@ -2127,8 +2316,8 @@ export default function AiBizOsHumanUI() {
         const cArr = Array.isArray(contactsData) ? contactsData : normalizeContactsRunPayload(contactsData);
         appendActivityLog(`→ Contacts: ${cArr.length}`);
         setContacts(cArr);
-        contactsListReadyRunIdRef.current = rid;
-        setContactsListReadyRunId(rid);
+        contactsListReadyRunIdRef.current = Number(rid);
+        setContactsListReadyRunId(Number(rid));
         setContactsListFailedRunId(null);
       }
       if (includeDrafts) {
@@ -2195,7 +2384,7 @@ export default function AiBizOsHumanUI() {
     } finally {
       if (runDetailsLoadGenRef.current === myGen) {
         setRunDetailsLoading(false);
-        appendActivityLog("Run load done.");
+        appendActivityLog("Кампания load done.");
       }
     }
   };
@@ -2234,19 +2423,19 @@ export default function AiBizOsHumanUI() {
       setRunProjectMoveInFlight(true);
       setError("");
       appendActivityLog(
-        `Run ${rid}: PATCH /runs/${rid}/project { project_id: ${Number(pid)} } (move to current project)`,
+        `Кампания ${rid}: PATCH /runs/${rid}/project { project_id: ${Number(pid)} } (move to current project)`,
       );
       const updated = await api(`/runs/${rid}/project`, {
         method: "PATCH",
         body: { project_id: Number(pid) },
       });
-      appendActivityLog(`Run ${rid}: PATCH OK — GET /runs/project/${pid} (refresh sidebar list)`);
+      appendActivityLog(`Кампания ${rid}: PATCH OK — GET /runs/project/${pid} (refresh sidebar list)`);
       setSelectedRun(updated);
       const runs = await api(`/runs/project/${pid}`);
       const ordered = orderRunsOpenFirst(runs);
       setRunsList(ordered);
       snapshotWriteRuns(pid, ordered);
-      appendActivityLog(`Run ${rid} attached to project ${pid} (${selectedProject.name ?? "—"}).`);
+      appendActivityLog(`Кампания ${rid} attached to project ${pid} (${selectedProject.name ?? "—"}).`);
       const rowHint = ordered.find((r) => r.id === rid);
       /** Merge card row + PATCH body so loadRunDetails’ first paint keeps correct project_id (avoids stale mismatch banner). */
       const hintForLoad =
@@ -2256,7 +2445,7 @@ export default function AiBizOsHumanUI() {
       void loadRunDetails(rid, hintForLoad);
     } catch (e) {
       const msg = detailFromApiErrorMessage(e?.message || e) || String(e);
-      appendActivityLog(`Run ${rid}: move to project ${pid} failed — ${msg}`, {
+      appendActivityLog(`Кампания ${rid}: move to project ${pid} failed — ${msg}`, {
         name: e?.name,
         message: String(e?.message || e).slice(0, 2000),
       });
@@ -2267,7 +2456,7 @@ export default function AiBizOsHumanUI() {
   };
 
   /**
-   * Workspace-tick + Total performance — updates Run setup (summary + hourly chart), performance, sidebar cards.
+   * Workspace-tick + Total performance — updates Кампания setup (summary + hourly chart), performance, sidebar cards.
    * Conversation/reminder rollups still refresh on loadRunDetails or full workspace-lite.
    * Returns a Promise so callers (e.g. bulk-send poll) can await and avoid stacking skipped refreshes.
    */
@@ -2365,7 +2554,7 @@ export default function AiBizOsHumanUI() {
           const now = Date.now();
           if (now - metricsSilentFailureLastLogAtRef.current >= METRICS_SILENT_FAILURE_LOG_INTERVAL_MS) {
             metricsSilentFailureLastLogAtRef.current = now;
-            appendActivityLog(`Run metrics: silent error — ${msg}`, {
+            appendActivityLog(`Кампания metrics: silent error — ${msg}`, {
               runId,
               source: "refreshRunMetricsOnly",
               note: "Same failure logged at most once per 45s; parallel polls disabled.",
@@ -2718,7 +2907,7 @@ export default function AiBizOsHumanUI() {
         runId,
         source: "reconcileAfterBulkSend",
       });
-      // Graph + Run setup strip first (light GETs); heavy contacts/drafts paged load must not block the chart.
+      // Graph + Кампания setup strip first (light GETs); heavy contacts/drafts paged load must not block the chart.
       await refreshRunMetricsOnly(runId);
       await refreshRunContactsAndDrafts(runId);
     },
@@ -3431,40 +3620,24 @@ export default function AiBizOsHumanUI() {
   );
 
   useEffect(() => {
-    if (!newRunOpen) {
+    if (!promptSetupOpen) {
       editFormFetchSeqRef.current += 1;
       setNewRunBaseline(null);
       setNewRunCreateInFlight(false);
       setNewRunUpdateInFlight(false);
     }
-  }, [newRunOpen]);
+  }, [promptSetupOpen]);
 
   const createNewRun = async () => {
-    if (newRunBaseline && !newRunNameDirty) return;
     if (!selectedProject) {
-      setError("Select a project first.");
+      setError("Сначала выберите проект.");
       return;
     }
-    if (!newRunForm.name.trim() || !newRunForm.segment.trim()) {
-      setError("Run name and Region / Country / State are required.");
-      return;
-    }
-    if (!newRunForm.outreach_brief.trim()) {
-      setError("Outreach brief (search description) is required.");
-      return;
-    }
-    if (!outreachBriefHasOfferOrGoal(newRunForm.outreach_brief)) {
-      setError(
-        "Fill at least one search section (e.g. reason for search or field of activity). " +
-          "Legacy Offer:/Goal: lines still count.",
-      );
-      return;
-    }
+    const n = runDraftName.trim() || "Новая кампания";
     try {
-      setNewRunCreateInFlight(true);
+      setNewRunBusy(true);
       setError("");
       const pid = projectPk(selectedProject);
-      const styleToSave = normalizeProfessionalProfileFromApi(newRunForm.email_style_mode);
       const run = await api("/runs/start", {
         method: "POST",
         timeoutMs: START_RUN_TIMEOUT_MS,
@@ -3472,33 +3645,22 @@ export default function AiBizOsHumanUI() {
           project_id: pid,
           workflow_name: "generic_outreach",
           input_json: {},
-          name: newRunForm.name.trim(),
-          notes: newRunForm.notes.trim() || undefined,
-          segment: newRunForm.segment.trim(),
-          outreach_brief: newRunForm.outreach_brief.trim(),
+          name: n,
+          notes: "",
+          segment: "",
+          outreach_brief: "",
+          prompt_setup_text: promptSetupText,
+          osint_prompt: promptOsintText,
+          deep_osint_prompt: promptDeepOsintText,
+          reasoning_prompt: promptReasoningText,
         },
       });
-      setNewRunOpen(false);
+      setPromptSetupOpen(false);
+      setIsCreatingNewRun(false);
       const runs = await api(`/runs/project/${pid}`);
       setRunsList(orderRunsOpenFirst(runs));
-      try {
-        await api(`/runs/${run.id}/email-style`, {
-          method: "PATCH",
-          timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
-          body: { email_style_mode: styleToSave },
-        });
-      } catch (e) {
-        setUiError(setError, e);
-      }
       await loadRunDetails(run.id, undefined, { ...listInclusionsForMainNav(mainNav) });
       void refreshRunContactsAndDrafts(run.id);
-      setNewRunForm({
-        name: "",
-        notes: "",
-        segment: "",
-        outreach_brief: DEFAULT_OUTREACH_BRIEF,
-        email_style_mode: "auto",
-      });
     } catch (e) {
       const raw = String(e?.message ?? e ?? "");
       const timedOutOrAborted =
@@ -3513,7 +3675,7 @@ export default function AiBizOsHumanUI() {
         setUiError(setError, e);
       }
     } finally {
-      setNewRunCreateInFlight(false);
+      setNewRunBusy(false);
     }
   };
 
@@ -3530,10 +3692,12 @@ export default function AiBizOsHumanUI() {
           notes: newRunForm.notes.trim() || undefined,
           segment: newRunForm.segment.trim(),
           outreach_brief: newRunForm.outreach_brief.trim(),
+          prompt_setup_text: newRunForm.prompt_setup_text.trim(),
           email_style_mode: normalizeProfessionalProfileFromApi(newRunForm.email_style_mode),
         },
       });
-      setNewRunOpen(false);
+      setPromptSetupOpen(false);
+        setIsCreatingNewRun(false);
       setRunsList((prev) => {
         if (!Array.isArray(prev)) return prev;
         return prev.map((r) =>
@@ -3556,6 +3720,7 @@ export default function AiBizOsHumanUI() {
         segment: "",
         outreach_brief: DEFAULT_OUTREACH_BRIEF,
         email_style_mode: "auto",
+        osint_discovery_mode: "api_only",
       });
     } catch (e) {
       setUiError(setError, e);
@@ -3578,7 +3743,7 @@ export default function AiBizOsHumanUI() {
       outreach_brief: seeded.outreach_brief.trim(),
       email_style_mode: normalizeProfessionalProfileFromApi(seeded.email_style_mode),
     });
-    setNewRunOpen(true);
+    setPromptSetupOpen(true);
     const seq = ++editFormFetchSeqRef.current;
     appendActivityLog(`Edit run: opened — GET /runs/${rid}/edit-form (background)`);
     void (async () => {
@@ -3625,8 +3790,17 @@ export default function AiBizOsHumanUI() {
     } else {
       setNewRunForm(seedNewRunFormFromRun(null));
       setNewRunBaseline(null);
+      setPromptSetupText(DEFAULT_FG_PROFILER_PROMPT);
+      setPromptOsintText(DEFAULT_OSINT_PROMPT);
+      setPromptReasoningText(DEFAULT_REASONING_PROMPT);
+      setPromptDraftText(DEFAULT_DRAFT_PROMPT);
+      setPromptDeepOsintText(DEFAULT_DEEP_OSINT_PROMPT);
+      setPromptCompanySearchText(DEFAULT_COMPANY_SEARCH_PROMPT);
+      setPromptOsintDiscoveryMode("api_only");
+      setPromptLanguage("Russian");
     }
-    setNewRunOpen(true);
+    setIsCreatingNewRun(true);
+    setPromptSetupOpen(true);
   }, [selectedRun]);
 
   const confirmCloseRun = async () => {
@@ -3655,7 +3829,7 @@ export default function AiBizOsHumanUI() {
   const openRestartDialog = (run) => {
     setRestartDialogRun({
       id: run.id,
-      name: (run.name && String(run.name).trim()) || `Run #${run.id}`,
+      name: (run.name && String(run.name).trim()) || `Кампания #${run.id}`,
     });
     setRestartDialogOpen(true);
   };
@@ -3755,6 +3929,68 @@ export default function AiBizOsHumanUI() {
       }).catch((err) => setUiError(setError, err));
     } catch (e) {
       setUiError(setError, e);
+    }
+  };
+
+  const [manualStepInFlight, setManualStepInFlight] = useState({});
+
+  const executeManualStep = async (runId, stepName) => {
+    setError("");
+    setManualStepInFlight((prev) => ({ ...prev, [stepName]: true }));
+    appendActivityLog(`Manual Step: Starting ${stepName} for Кампания ${runId}`);
+    try {
+      await api(`/steps/run/${runId}/execute/${stepName}`, {
+        method: "POST",
+        timeoutMs: 300000,
+      });
+      appendActivityLog(`Manual Step: ${stepName} completed.`);
+      refreshRunMetricsOnly(runId);
+      if (stepName === "generate_emails") {
+        void refreshRunDraftsOnly(runId);
+      }
+    } catch (e) {
+      setUiError(setError, e);
+    } finally {
+      setManualStepInFlight((prev) => ({ ...prev, [stepName]: false }));
+    }
+  };
+
+  const runDeepOsint = async (contactId) => {
+    setDeepOsintBusyId(contactId);
+    try {
+      await api(`/contacts/${contactId}/deep_osint`, { method: "POST" });
+      toast({ title: "OSINT Collected", description: "Deep OSINT data gathered successfully." });
+      if (selectedRun?.id) {
+        loadRunDetails(selectedRun.id, {
+          includeContacts: true,
+          includeDrafts: true,
+          rowGuess: selectedRun
+        });
+      }
+    } catch (err) {
+      toast({ title: "OSINT Error", description: err.message || String(err), variant: "destructive" });
+    } finally {
+      setDeepOsintBusyId(null);
+    }
+  };
+
+  const saveManualContact = async () => {
+    if (!selectedRun?.id) return;
+    setManualContactLoading(true);
+    try {
+      const newContact = await api(`/contacts/run/${selectedRun.id}/manual`, {
+        method: "POST",
+        body: manualContactForm,
+      });
+      toast({ title: "Contact Added", description: "The contact was successfully added to the run." });
+      setContactsLive(prev => [newContact, ...prev]);
+      setManualContactDialogOpen(false);
+      setManualContactForm({ company: "", name: "", role: "", email: "", linkedin: "" });
+      void refreshRunContactsOnly(selectedRun.id);
+    } catch (err) {
+      toast({ title: "Error", description: err.message || String(err), variant: "destructive" });
+    } finally {
+      setManualContactLoading(false);
     }
   };
 
@@ -4176,7 +4412,7 @@ export default function AiBizOsHumanUI() {
         if (!setupIntegration?.allow_env_write) {
           throw new Error(
             "Saving credentials from the browser is disabled. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to backend/.env, " +
-              "restart the API, then use Connect Gmail (or enable ALLOW_SETUP_ENV_WRITE for local dev).",
+              "restart the API, then use Connect Yandex (or enable ALLOW_SETUP_ENV_WRITE for local dev).",
           );
         }
         await api("/setup/gmail-credentials", {
@@ -4414,6 +4650,11 @@ export default function AiBizOsHumanUI() {
           signature_html: d.sender_signature_html,
           prompt_setup_saved: Boolean(d.prompt_setup_saved),
           sender_signature_configured: Boolean(d.sender_signature_configured),
+          osint_prompt: d.osint_prompt,
+          reasoning_prompt: d.reasoning_prompt,
+          draft_prompt: d.draft_prompt,
+          osint_discovery_mode: d.osint_discovery_mode,
+          language: d.language,
         });
       } catch {
         /* ignore — open dialog will call fetchReviewSetupFieldsLite */
@@ -4446,12 +4687,20 @@ export default function AiBizOsHumanUI() {
   const openPromptSetup = async () => {
     if (!selectedRun?.id) return;
     setPromptSetupSaving(false);
+    setPromptTab("general");
     setPromptSetupText(getPromptSetupDialogSeed(selectedRun.id, selectedRun));
     setPromptSetupOpen(true);
     try {
       const d = await fetchReviewSetupFieldsLite(selectedRun.id);
-      if (typeof d?.prompt_setup_editor_text === "string") {
-        setPromptSetupText(d.prompt_setup_editor_text);
+      if (d) {
+        setPromptSetupText(d.prompt_setup_editor_text || DEFAULT_FG_PROFILER_PROMPT);
+        setPromptOsintText(d.osint_prompt || DEFAULT_OSINT_PROMPT);
+        setPromptReasoningText(d.reasoning_prompt || DEFAULT_REASONING_PROMPT);
+        setPromptDraftText(d.draft_prompt || DEFAULT_DRAFT_PROMPT);
+        setPromptDeepOsintText(d.deep_osint_prompt || DEFAULT_DEEP_OSINT_PROMPT);
+        setPromptCompanySearchText(d.company_search_prompt || DEFAULT_COMPANY_SEARCH_PROMPT);
+        setPromptOsintDiscoveryMode(d.osint_discovery_mode || "api_only");
+        setPromptLanguage(d.language || "Russian");
       }
     } catch (e) {
       setUiError(setError, e);
@@ -4459,58 +4708,43 @@ export default function AiBizOsHumanUI() {
   };
 
   const savePromptSetup = () => {
+    if (isCreatingNewRun) {
+      void createNewRun();
+      return;
+    }
     if (!selectedRun?.id) return;
     const rid = selectedRun.id;
-    const textSnapshot = promptSetupText;
-    const prefsBefore = snapshotReadRunSetupPrefs(rid);
-    const prevPromptSaved = selectedRun?.prompt_setup_saved;
-    const prevPromptText = selectedRun?.prompt_setup_text;
-    const prevRunRef = selectedRun;
-
+    setPromptSetupSaving(true);
     setError("");
-    snapshotWriteRunSetupPrefs(rid, {
-      prompt_setup_saved: textSnapshot.trim().length > 0,
-      prompt_setup_text: textSnapshot,
-    });
-    setRunSetupPrefsRev((x) => x + 1);
-    setSelectedRun((prev) => {
-      if (!prev || prev.id !== rid) return prev;
-      return {
-        ...prev,
-        prompt_setup_text: textSnapshot.trim().length > 0 ? textSnapshot : "",
-        prompt_setup_saved: textSnapshot.trim().length > 0,
-      };
-    });
-    setPromptSetupOpen(false);
-    setPromptSetupSaving(false);
 
     void (async () => {
       try {
-        const updated = await api(`/runs/${rid}/prompt-setup`, {
+        await api(`/runs/${rid}/prompt-setup`, {
           method: "PATCH",
-          body: { prompt_setup_text: textSnapshot },
+          body: {
+            prompt_setup_text: promptSetupText,
+            osint_prompt: promptOsintText,
+            company_search_prompt: promptCompanySearchText,
+            deep_osint_prompt: promptDeepOsintText,
+            reasoning_prompt: promptReasoningText,
+            draft_prompt: promptDraftText,
+            osint_discovery_mode: promptOsintDiscoveryMode,
+            language: promptLanguage
+          },
           timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
         });
-        setSelectedRun((prev) => {
-          if (!prev || prev.id !== rid) return prev;
-          return {
-            ...prev,
-            prompt_setup_saved: Boolean(updated?.prompt_setup_saved),
-            prompt_setup_text: textSnapshot,
-          };
+        
+        snapshotWriteRunSetupPrefs(rid, {
+          prompt_setup_saved: promptSetupText.trim().length > 0,
+          prompt_setup_text: promptSetupText,
         });
+        
+        setPromptSetupOpen(false);
+        setPromptSetupSaving(false);
+        appendActivityLog(`Prompt setup saved for Кампания #${rid}`);
         refreshRunMetricsOnly(rid);
       } catch (e) {
-        setSelectedRun((prev) => {
-          if (!prev || prev.id !== rid) return prev;
-          return {
-            ...prev,
-            prompt_setup_text: prevPromptText,
-            prompt_setup_saved: prevPromptSaved,
-          };
-        });
-        snapshotWriteRunSetupPrefs(rid, runSetupPrefsRollbackPartial(prefsBefore, prevRunRef));
-        setRunSetupPrefsRev((x) => x + 1);
+        setPromptSetupSaving(false);
         setUiError(setError, e);
       }
     })();
@@ -4815,7 +5049,7 @@ export default function AiBizOsHumanUI() {
     contactsListFailedRunId !== Number(selectedRun.id) &&
     contactsVisible.length === 0;
 
-  const contactsActionsReady = contactsListReadyRunId === Number(selectedRun?.id);
+  const contactsActionsReady = Number(contactsListReadyRunId) === Number(selectedRun?.id);
 
   /** Tab strip was gated on contactsVisible.length only, so snapshot counts could not show the row until fetch finished. */
   const showContactReviewTabStrip =
@@ -4977,7 +5211,7 @@ export default function AiBizOsHumanUI() {
     runSetupPrefsRev,
   ]);
 
-  /** Shown in Review workspace (Contacts) above “N contacts left to review”, not in Run setup. */
+  /** Shown in Review workspace (Contacts) above “N contacts left to review”, not in Кампания setup. */
   const approveContactsContinueCta = useMemo(() => {
     if (!selectedRun?.id) return null;
     if (workspace?.display_phase !== "Preparing") return null;
@@ -4995,7 +5229,7 @@ export default function AiBizOsHumanUI() {
     return {
       label: "Approve contacts to continue",
       disabled: true,
-      hint: "Run setup is in progress.",
+      hint: "Кампания setup is in progress.",
       onClick: null,
     };
   }, [selectedRun?.id, selectedRun?.status, workspace?.display_phase, approvedContactsReachable, continueRun]);
@@ -5097,6 +5331,7 @@ export default function AiBizOsHumanUI() {
                   Replacement
                 </Badge>
               ) : null}
+              <AiPipelineBadge value={contact.ai_pipeline_status} />
               {!badEmailHealth ? <StatusBadge value={contact.status} /> : null}
               {!badEmailHealth ? <StatusBadge value={contact.review_status} /> : null}
               {badEmailHealth ? (
@@ -5120,6 +5355,11 @@ export default function AiBizOsHumanUI() {
             </div>
             <div className="text-sm text-muted-foreground">
               {contact.name || "No name"} · {contactRoleFromPayload(contact) || "No role"}
+              {contact.source_json?.freshness_score ? (
+                <span className="ml-2 inline-flex items-center rounded-md bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20 dark:bg-green-900/20 dark:text-green-400 dark:ring-green-800/40" title="Freshness Score">
+                  🔋 {contact.source_json.freshness_score}
+                </span>
+              ) : null}
             </div>
             <div className="text-sm">{contact.email || "No email"}</div>
             <div className="text-xs text-muted-foreground">{contact.website || "No website"}</div>
@@ -5159,6 +5399,32 @@ export default function AiBizOsHumanUI() {
                     Approve
                   </Button>
                 ) : null}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="bg-indigo-50/50 hover:bg-indigo-100/50 text-indigo-700 border-indigo-200"
+                  disabled={deepOsintBusyId === contact.id || !contactsActionsReady}
+                  onClick={() => void runDeepOsint(contact.id)}
+                  title="Кампания Deep OSINT on this specific person"
+                >
+                  {deepOsintBusyId === contact.id ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  ) : (
+                    <span className="mr-1">🕵️‍♂️</span>
+                  )}
+                  Deep OSINT
+                </Button>
+                {contact.personalization_json?.person_osint && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="bg-purple-50/50 hover:bg-purple-100/50 text-purple-700 border-purple-200"
+                    onClick={() => setOsintDossierView({ title: contact.name, content: JSON.stringify(contact.personalization_json.person_osint, null, 2) })}
+                    title="View Deep OSINT summary"
+                  >
+                    <span className="mr-1">📄</span>
+                  </Button>
+                )}
                 {!isDeadMailbox ? (
                   <Button
                     size="sm"
@@ -5451,6 +5717,9 @@ export default function AiBizOsHumanUI() {
       genMeta && typeof genMeta === "object"
         ? Object.fromEntries(Object.entries(genMeta).filter(([k]) => k !== "prompt_setup_text_used"))
         : null;
+
+    const reasoning = genMeta?.reasoning;
+
     return (
     <Card key={draft.id} className={draftCardClass(draft)}>
       <CardContent className="p-5">
@@ -5497,6 +5766,28 @@ export default function AiBizOsHumanUI() {
                   </Badge>
                 ) : null}
               </div>
+
+              {reasoning && (
+                <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 p-3 text-[11px] leading-relaxed">
+                  <div className="mb-1.5 flex items-center gap-1.5 font-semibold text-primary uppercase tracking-wider">
+                    <Zap className="h-3 w-3" /> AI Strategy (Reasoning)
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="space-y-0.5">
+                      <div className="font-medium text-muted-foreground opacity-70">Hook</div>
+                      <div className="text-foreground">{reasoning.hook}</div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="font-medium text-muted-foreground opacity-70">Angle</div>
+                      <div className="text-foreground">{reasoning.angle}</div>
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="font-medium text-muted-foreground opacity-70">Key Point</div>
+                      <div className="text-foreground">{reasoning.key_point}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex min-w-0 flex-nowrap items-center justify-start gap-1.5 overflow-x-auto pt-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] sm:gap-2 lg:justify-end [&::-webkit-scrollbar]:h-1 [&_button]:shrink-0 [&_button]:whitespace-nowrap">
               {isDeadMailboxDraft ? (
@@ -5820,12 +6111,12 @@ export default function AiBizOsHumanUI() {
                 <span>AI Biz OS</span>
                 <span className="text-xs font-normal tabular-nums text-primary/80">v{appPkg.version}</span>
               </div>
-              <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Business outreach dashboard</h1>
+              <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Дашборд аутрича</h1>
             </div>
             <div className="flex flex-wrap gap-2">
               <Dialog>
                 <DialogTrigger asChild>
-                  <Button variant="outline">New project</Button>
+                  <Button variant="outline">Новый проект</Button>
                 </DialogTrigger>
                 <DialogContent className="sm:max-w-lg">
                   <DialogHeader>
@@ -5835,12 +6126,18 @@ export default function AiBizOsHumanUI() {
                     <Input
                       value={projectName}
                       onChange={(e) => setProjectName(e.target.value)}
-                      placeholder="Project name"
+                      placeholder="Проект name"
                     />
                   </div>
                   <NewProjectFooter projectName={projectName} onCreated={createProject} />
                 </DialogContent>
               </Dialog>
+                            <Button variant="outline" onClick={() => setGlobalSetupOpen(true)}>
+                <Settings className="h-4 w-4 mr-2" />
+                Integrations
+              </Button>
+              <AiModelSelector />
+              <SmtpFarmModal apiBase={API_BASE} />
               <ThemeToggle />
               <Button
                 type="button"
@@ -5929,20 +6226,20 @@ export default function AiBizOsHumanUI() {
             <div className="flex min-w-0 flex-1 flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
               <div className="space-y-2">
                 <div className="text-lg font-medium leading-snug md:text-xl">
-                  <span className="text-muted-foreground font-normal">Project</span>{" "}
+                  <span className="text-muted-foreground font-normal">Проект</span>{" "}
                   <span>{selectedProject?.name ?? "—"}</span>
                 </div>
                 <div className="text-lg font-medium leading-snug md:text-xl">
-                  <span className="text-muted-foreground font-normal">Run</span>{" "}
+                  <span className="text-muted-foreground font-normal">Кампания</span>{" "}
                   <span>
                     {selectedRun
-                      ? selectedRun.name?.trim() || `Run #${selectedRun.id}`
+                      ? selectedRun.name?.trim() || `Кампания #${selectedRun.id}`
                       : "Select a run"}
                   </span>
                 </div>
                 <div className="space-y-1 pt-1 text-sm">
                   <div>
-                    <span className="text-muted-foreground">Status</span>{" "}
+                    <span className="text-muted-foreground">Статус</span>{" "}
                     <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
                   </div>
                   <div className="text-foreground/90">
@@ -5991,7 +6288,7 @@ export default function AiBizOsHumanUI() {
               )}
             >
               <CardHeader className="pb-3">
-                <CardTitle>Total performance</CardTitle>
+                <CardTitle>Общая эффективность</CardTitle>
                 <p className={cn("mt-1 text-xs font-medium leading-snug", totalPerformance24hUi.captionClass)}>
                   {totalPerformance24hUi.label}
                 </p>
@@ -6035,8 +6332,8 @@ export default function AiBizOsHumanUI() {
         <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
           <Card className="rounded-2xl border-2 border-border shadow-none">
             <CardHeader>
-              <CardTitle>Projects</CardTitle>
-              <CardDescription>Choose a project, then create or open a run</CardDescription>
+              <CardTitle>Проекты</CardTitle>
+              <CardDescription>Выберите проект, затем создайте или откройте кампанию</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               <NativeFilterSelect
@@ -6073,9 +6370,9 @@ export default function AiBizOsHumanUI() {
                                 <>
                                   <div
                                     className="mt-0.5 truncate font-medium text-foreground"
-                                    title={selectedRun.name?.trim() || `Run #${selectedRun.id}`}
+                                    title={selectedRun.name?.trim() || `Кампания #${selectedRun.id}`}
                                   >
-                                    {selectedRun.name?.trim() || `Run #${selectedRun.id}`}
+                                    {selectedRun.name?.trim() || `Кампания #${selectedRun.id}`}
                                   </div>
                                   {workspace?.display_phase && workspace?.id === selectedRun.id ? (
                                     <div className="mt-0.5 text-muted-foreground">{workspace.display_phase}</div>
@@ -6163,9 +6460,9 @@ export default function AiBizOsHumanUI() {
                   <CardHeader className="min-w-0 space-y-0">
                     <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0">
-                        <CardTitle>Run setup</CardTitle>
+                        <CardTitle>Настройка кампании</CardTitle>
                         {!selectedRun.closed_at ? (
-                          <CardDescription>Prepare this run before starting outreach</CardDescription>
+                          <CardDescription>Настройте кампанию перед запуском аутрича</CardDescription>
                         ) : null}
                       </div>
                       {primaryCta ? (
@@ -6190,57 +6487,107 @@ export default function AiBizOsHumanUI() {
                   <CardContent className="min-w-0 space-y-4">
                     <RunSetupHourlySendsChart counts={workspace.hourly_sends_24h} />
                     <div className="rounded-2xl border-2 border-border bg-muted/30 p-3 text-sm">
-                      <div className="font-medium">Setup summary</div>
+                      <div className="font-medium">{t("Setup summary")}</div>
                       <ul className="mt-2 space-y-1 text-muted-foreground">
                         <li>
-                          Companies collected:{" "}
+                          {t("Companies collected")}:{" "}
                           <span className="font-medium text-foreground">
                             {workspace.setup_summary?.companies_collected ?? "—"}
                           </span>
                         </li>
                         <li className="text-muted-foreground">
-                          Contacts found:{" "}
+                          {t("Contacts found")}:{" "}
                           <span className="font-semibold text-foreground">
                             {workspace.setup_summary?.contacts_found ?? "—"}
                           </span>
                         </li>
                         <li>
-                          Contacts validated:{" "}
+                          {t("Contacts validated")}:{" "}
                           <span className="font-medium text-foreground">
                             {workspace.setup_summary?.contacts_validated ?? "—"}
                           </span>
                           {typeof workspace.setup_summary?.contacts_validated_distinct_companies === "number" ? (
                             <>
                               {" "}
-                              [{workspace.setup_summary.contacts_validated_distinct_companies} companies]
+                              [{workspace.setup_summary.contacts_validated_distinct_companies} {t("companies")}]
                             </>
                           ) : null}
                         </li>
-                        <li>
-                          Contacts with no email:{" "}
-                          <span className="font-medium text-foreground">
-                            {workspace.setup_summary?.contacts_with_no_email ?? "—"}
-                          </span>
-                        </li>
-                        <li>
-                          Contacts approved:{" "}
-                          <span className="font-medium text-foreground">
-                            {workspace.setup_summary?.contacts_approved ?? "—"}
-                          </span>
-                        </li>
                       </ul>
-                      {selectedRun.closed_at ? (
-                        <p className="mt-3 font-medium text-destructive">Run closed</p>
-                      ) : (
-                        <p className="mt-3 text-foreground">{workspace.setup_state_message}</p>
-                      )}
+
+                      <div className="mt-4 pt-4 border-t border-border">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-1.5 font-bold text-primary uppercase tracking-wider text-[11px] bg-primary/10 px-2 py-1 rounded">
+                            <Zap className="h-3.5 w-3.5" /> {t("Manual Overrides (Testing)")}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { name: "enrich_crm_data", label: t("OSINT Search") },
+                            { name: "validate_contacts", label: t("Validate Contacts") },
+                            { name: "generate_master_email_draft", label: t("Master Template") },
+                            { name: "generate_emails", label: t("Create Drafts") }
+                          ].map(step => (
+                            <Button 
+                              key={step.name} 
+                              type="button"
+                              size="sm" 
+                              variant="default" 
+                              className="h-8 text-[10px] px-2 font-bold shadow-md bg-primary hover:bg-primary/90 text-primary-foreground transition-all active:scale-95"
+                              disabled={manualStepInFlight[step.name]}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (selectedRun?.id) {
+                                  executeManualStep(selectedRun.id, step.name);
+                                }
+                              }}
+                            >
+                              {manualStepInFlight[step.name] ? <Loader2 className="h-3 w-3 animate-spin" /> : step.label}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="mt-4 pt-4 border-t border-border space-y-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full justify-start gap-2 text-xs border-primary/30 hover:border-primary font-bold bg-background shadow-sm"
+                          onClick={() => void openPromptSetup()}
+                          disabled={!selectedRun}
+                        >
+                          {promptSetupSavedFilled ? (
+                            <CircleCheck className="h-4 w-4 shrink-0 text-green-600" />
+                          ) : (
+                            <CircleX className="h-4 w-4 shrink-0 text-red-600" />
+                          )}
+                          {t("Настройка промптов")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full justify-start gap-2 text-xs border-primary/30 hover:border-primary font-bold bg-background shadow-sm"
+                          onClick={() => void openSignatureSetup()}
+                          disabled={!selectedRun}
+                        >
+                          {signatureSetupFilled ? (
+                            <CircleCheck className="h-4 w-4 shrink-0 text-green-600" />
+                          ) : (
+                            <CircleX className="h-4 w-4 shrink-0 text-red-600" />
+                          )}
+                          {t("Signature Setup")}
+                        </Button>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
 
                 <Card className="min-w-0 w-full rounded-2xl border-2 border-border shadow-none">
                   <CardHeader className="pb-3">
-                    <CardTitle>Run performance</CardTitle>
+                    <CardTitle>Эффективность кампании</CardTitle>
                   </CardHeader>
                   <CardContent className="min-w-0">
                     <ul className="space-y-2 break-words text-sm">
@@ -6328,7 +6675,7 @@ export default function AiBizOsHumanUI() {
                 <CardHeader>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                      <CardTitle>Runs</CardTitle>
+                      <CardTitle>Кампании</CardTitle>
                       <CardDescription>Manage outreach waves inside this project</CardDescription>
                     </div>
                     <Button
@@ -6336,7 +6683,20 @@ export default function AiBizOsHumanUI() {
                       disabled={!selectedProject || selectedProject.is_archived}
                       onClick={() => openNewRunDialog()}
                     >
-                      New run
+                      {t("Новая кампания")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!selectedProject || selectedProject.is_archived}
+                      onClick={() => {
+                        setAmoCrmProjectId(projectPk(selectedProject));
+                        setAmoCrmRunName(`Import ${formatDateYmd(new Date())}`);
+                        setAmoCrmImportOpen(true);
+                      }}
+                      className="flex items-center gap-1.5 font-semibold border-primary/40 hover:border-primary text-primary"
+                    >
+                      <Zap className="h-4 w-4" /> {t("Import AmoCRM")}
                     </Button>
                   </div>
                 </CardHeader>
@@ -6345,7 +6705,7 @@ export default function AiBizOsHumanUI() {
                     <p className="text-sm text-muted-foreground">Select a project first.</p>
                   ) : runsList.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
-                      No runs yet — create one with <strong>New run</strong>.
+                      No runs yet — create one with <strong>Новая кампания</strong>.
                     </p>
                   ) : (
                     runsList.map((r) => (
@@ -6431,7 +6791,7 @@ export default function AiBizOsHumanUI() {
                 <CardHeader>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                     <div className="min-w-0 space-y-1.5">
-                      <CardTitle>Companies</CardTitle>
+                      <CardTitle>Компании</CardTitle>
                       <CardDescription>
                         List from the collect step. Contact search status is stored on each company row after find /
                         retry runs (this screen does not load the contacts table).
@@ -6560,7 +6920,7 @@ export default function AiBizOsHumanUI() {
                   ) : companiesListFailedRunId === Number(selectedRun.id) ? (
                     <div className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 p-4 text-sm">
                       <p className="text-muted-foreground">
-                        Could not load the companies table (network or server error). Run setup numbers may still show
+                        Could not load the companies table (network or server error). Кампания setup numbers may still show
                         from the last successful metrics refresh.
                       </p>
                       <Button
@@ -6649,6 +7009,7 @@ export default function AiBizOsHumanUI() {
                               <th className="px-3 py-2">Website</th>
                               <th className="whitespace-nowrap px-3 py-2 align-bottom">Contact search</th>
                               <th className="whitespace-nowrap px-3 py-2 align-bottom">Campaign fit</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Strategy</th>
                               <th className="whitespace-nowrap px-3 py-2 align-bottom">Actions</th>
                             </tr>
                           </thead>
@@ -6659,6 +7020,7 @@ export default function AiBizOsHumanUI() {
                               const unavailable = ci != null && !!companyFindUnavailable[ci];
                               const onlyBouncedOrDead =
                                 st === "found" && companyHasOnlyBouncedOrDeadContacts(contacts, row);
+                              const dossier = row.osint_dossier;
                               const badge =
                                 st === "llm_error" ? (
                                   <Badge
@@ -6743,6 +7105,22 @@ export default function AiBizOsHumanUI() {
                                   <td className="align-middle whitespace-nowrap px-3 py-2.5">
                                     <div className="inline-flex min-w-max max-w-none flex-nowrap items-center gap-2">
                                       <span className="inline-flex shrink-0 whitespace-nowrap">{badge}</span>
+                                      {(() => {
+                                        let eJson = null;
+                                        try { eJson = typeof row.extra_json === 'string' && row.extra_json.trim() ? JSON.parse(row.extra_json) : row.extra_json; } catch(e) {}
+                                        const cOsint = eJson?.osint_dossier || eJson?.company_osint;
+                                        if (!cOsint) return null;
+                                        return (
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setOsintDossierView({ title: row.name, content: cOsint })}
+                                            title="View Company OSINT"
+                                          >
+                                            📄
+                                          </Button>
+                                        );
+                                      })()}
                                       {canRetryCompanyFind ? (
                                         <Button
                                           type="button"
@@ -6789,6 +7167,21 @@ export default function AiBizOsHumanUI() {
                                       >
                                         OK
                                       </Badge>
+                                    ) : (
+                                      <span className="text-muted-foreground">—</span>
+                                    )}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 align-middle">
+                                    {dossier ? (
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-6 shrink-0 whitespace-nowrap rounded-full px-2.5 text-xs font-medium"
+                                        onClick={() => openDossier(row.name, dossier)}
+                                      >
+                                        View Strategy
+                                      </Button>
                                     ) : (
                                       <span className="text-muted-foreground">—</span>
                                     )}
@@ -6874,7 +7267,7 @@ export default function AiBizOsHumanUI() {
                     Number(workspace?.setup_summary?.companies_collected) > 0 ? (
                     <div className="space-y-2 text-sm text-muted-foreground">
                       <p>
-                        Run setup reports{" "}
+                        Кампания setup reports{" "}
                         <span className="font-medium text-foreground">
                           {workspace.setup_summary.companies_collected}
                         </span>{" "}
@@ -6925,7 +7318,7 @@ export default function AiBizOsHumanUI() {
                             ) : (
                               <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
                             )}
-                            Connect Gmail
+                            Connect Yandex
                           </Button>
                           <Button
                             type="button"
@@ -6989,6 +7382,31 @@ export default function AiBizOsHumanUI() {
                         )}
                         Signature setup
                       </Button>
+                      {mainNav === "contacts" ? (
+                        <>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={() => setManualLeadGenOpen(true)}
+                            disabled={!selectedRun}
+                          >
+                            {t("Find LPR (OSINT)")}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="default"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={() => setManualContactDialogOpen(true)}
+                            disabled={!selectedRun}
+                          >
+                            <span className="mr-1">➕</span>
+                            {t("Add Contact (Manual)")}
+                          </Button>
+                        </>
+                      ) : null}
                     </div>
                     <Input
                       value={search}
@@ -7588,7 +8006,7 @@ export default function AiBizOsHumanUI() {
                 <CardContent className="space-y-3">
                   {!gmailSendReady ? (
                     <p className="text-sm text-muted-foreground">
-                      Connect Gmail first — this tool checks your connected mailbox.
+                      Connect Yandex first — this tool checks your connected mailbox.
                     </p>
                   ) : analyzerLoading ? (
                     <p className="text-sm text-muted-foreground">Loading…</p>
@@ -7766,760 +8184,307 @@ export default function AiBizOsHumanUI() {
         </div>
       </div>
 
-      <Dialog open={newRunOpen} onOpenChange={setNewRunOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+      <Dialog open={osintDossierOpen} onOpenChange={setOsintDossierOpen}>
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{newRunBaseline ? "Edit run" : "New run"}</DialogTitle>
+            <DialogTitle>OSINT Strategy: {selectedDossier.name}</DialogTitle>
+            <CardDescription>
+              Business dossier and facts found for this company via Tavily OSINT.
+            </CardDescription>
           </DialogHeader>
-          <div className="space-y-3 py-2">
-            <p className="text-xs text-muted-foreground">
-              Search description and geography drive company discovery; the same context feeds the master email for this
-              run.
-              {newRunBaseline
-                ? " Keep the same run name and use Update run for notes, region, or brief. Change the run name to use Create run (new wave)."
-                : null}
-            </p>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">
-                Run name <span className="text-destructive">*</span>
-              </div>
-              <Input
-                value={newRunForm.name}
-                onChange={(e) => setNewRunForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="US distributors — April batch"
-                aria-required
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Notes (optional)</div>
-              <Textarea
-                value={newRunForm.notes}
-                onChange={(e) => setNewRunForm((f) => ({ ...f, notes: e.target.value }))}
-                placeholder="Internal notes for this wave (not sent to contacts)"
-                rows={2}
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">
-                Region / Country / State <span className="text-destructive">*</span>
-              </div>
-              <Input
-                value={newRunForm.segment}
-                onChange={(e) => setNewRunForm((f) => ({ ...f, segment: e.target.value }))}
-                placeholder="Geography for this search (e.g. United States — California)"
-                aria-required
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Professional profile</div>
-              <NativeFilterSelect
-                className="w-full"
-                value={newRunForm.email_style_mode ?? "auto"}
-                onValueChange={(v) => setNewRunForm((f) => ({ ...f, email_style_mode: v }))}
-                options={PROFESSIONAL_PROFILE_OPTIONS}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Target decision-maker profile for outbound tone. <strong>Auto</strong> infers style from each
-                contact&apos;s role when possible.
-              </p>
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">
-                Outreach brief (search description) <span className="text-destructive">*</span>
-              </div>
-              <Textarea
-                value={newRunForm.outreach_brief}
-                onChange={(e) => setNewRunForm((f) => ({ ...f, outreach_brief: e.target.value }))}
-                placeholder={
-                  "Respondent's field of activity:\n\n" +
-                  "Narrowly focused areas of activity:\n\n" +
-                  "Reason for search (licensing, sales, partnership):\n\n" +
-                  "How long has the respondent company been in the market:\n\n" +
-                  "Additional information:\n"
-                }
-                rows={14}
-                className="font-mono text-sm"
-                aria-required
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Use the section labels shown in the placeholder (each block may continue on the following lines until
-                the next label). Fill at least one substantive section — typically reason for search and/or field of
-                activity.
-              </p>
-            </div>
-          </div>
-          <DialogFooter className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={newRunDialogBusy}
-              onClick={() => setNewRunOpen(false)}
-            >
-              Cancel
-            </Button>
-            {newRunBaseline ? (
-              <>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={!canUpdateRun || newRunDialogBusy}
-                  onClick={() => void updateExistingRun()}
-                >
-                  {newRunUpdateInFlight ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                  ) : null}
-                  Update run
-                </Button>
-                <Button
-                  type="button"
-                  disabled={!canCreateRunInDialog || newRunDialogBusy}
-                  onClick={() => void createNewRun()}
-                >
-                  {newRunCreateInFlight ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                  ) : null}
-                  Create run
-                </Button>
-              </>
-            ) : (
-              <Button
-                type="button"
-                disabled={!canSubmitNewRun || newRunDialogBusy}
-                onClick={() => void createNewRun()}
-              >
-                {newRunCreateInFlight ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                ) : null}
-                Create run
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={renameProjectOpen}
-        onOpenChange={(open) => {
-          setRenameProjectOpen(open);
-          if (!open) {
-            setRenameProjectId(null);
-            setRenameProjectNameField("");
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Rename project</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-2 py-1">
-            <label className="text-sm font-medium text-foreground" htmlFor="rename-project-name">
-              Project name
-            </label>
-            <Input
-              id="rename-project-name"
-              value={renameProjectNameField}
-              onChange={(e) => setRenameProjectNameField(e.target.value)}
-              placeholder="Project name"
-              disabled={renameProjectSaving}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void submitRenameProject();
-                }
-              }}
-            />
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={renameProjectSaving}
-              onClick={() => {
-                setRenameProjectOpen(false);
-                setRenameProjectId(null);
-                setRenameProjectNameField("");
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              disabled={renameProjectSaving || !renameProjectNameField.trim()}
-              onClick={() => void submitRenameProject()}
-            >
-              {renameProjectSaving ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                  Renaming…
-                </>
-              ) : (
-                "Rename"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={switchRunOpen} onOpenChange={setSwitchRunOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Switch run</DialogTitle>
-          </DialogHeader>
-          <ScrollArea className="max-h-[360px] pr-3">
-            <div className="space-y-2 py-2">
-              {switchRunOpenList.map((r) => (
-                <SwitchRunListRow key={r.id} run={r} selectedRun={selectedRun} onSelect={openRunById} />
-              ))}
-              {switchRunClosedList.length > 0 ? (
-                <div className="space-y-2 pt-2">
-                  <div
-                    className="rounded-xl border border-border/80 bg-muted/30 px-3 py-2.5"
-                    role="group"
-                    aria-label="Closed runs"
-                  >
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Closed runs
-                    </p>
-                    <p className="mt-1 text-sm text-muted-foreground leading-snug">
-                      These runs are closed — no new outreach sending. Threads, replies, and history stay available.
-                    </p>
-                  </div>
-                  {switchRunClosedList.map((r) => (
-                    <SwitchRunListRow key={r.id} run={r} selectedRun={selectedRun} onSelect={openRunById} />
-                  ))}
-                </div>
-              ) : null}
-              {!runsList.length ? (
-                <p className="text-sm text-muted-foreground">No runs in this project.</p>
-              ) : null}
+          <ScrollArea className="max-h-[60vh] mt-4 rounded-md border border-border bg-muted/20 p-4">
+            <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+              {selectedDossier.text || "No dossier data available yet. Кампания OSINT enrichment step."}
             </div>
           </ScrollArea>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setSwitchRunOpen(false)}>
-              Cancel
+            <Button variant="outline" onClick={() => setOsintDossierOpen(false)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={removeCompanyDialog != null}
-        onOpenChange={(open) => {
-          if (!open && !removeCompanyInFlight) setRemoveCompanyDialog(null);
-        }}
-      >
+      <Dialog open={amoCrmImportOpen} onOpenChange={setAmoCrmImportOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Remove this company?</DialogTitle>
+            <DialogTitle>Import from AmoCRM (Excel)</DialogTitle>
+            <CardDescription>
+              Upload an Excel file with columns: Компания, Web, Имя, Фамилия, Рабочий email, Должность.
+            </CardDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            {removeCompanyDialog ? (
-              <>
-                Are you sure you want to remove{" "}
-                <span className="font-medium text-foreground">«{removeCompanyDialog.name}»</span> from this run? Matching
-                contacts stored for this company will be removed. This does not affect other runs.
-              </>
-            ) : (
-              "—"
-            )}
-          </p>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={removeCompanyInFlight}
-              onClick={() => setRemoveCompanyDialog(null)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={removeCompanyInFlight}
-              onClick={() => void confirmRemoveCompanyFromRun()}
-            >
-              {removeCompanyInFlight ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                  Removing…
-                </>
-              ) : (
-                "Yes, remove"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={closeRunOpen} onOpenChange={setCloseRunOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Close run?</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            This run will no longer be used for new outreach sending. Existing threads, replies,
-            reminders, and packets will remain available.
-          </p>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button type="button" variant="outline" onClick={() => setCloseRunOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="button" variant="destructive" onClick={() => void confirmCloseRun()}>
-              Close run
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {editDraft || editDraftLoading ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <button
-            type="button"
-            className="fixed inset-0 bg-black/50"
-            aria-label="Close"
-            disabled={editDraftSaving}
-            onClick={() => {
-              if (!editDraftSaving) closeEditDraftModal();
-            }}
-          />
-          <div
-            className="relative z-50 flex h-[80vh] max-h-[80vh] w-full max-w-[63rem] flex-col overflow-hidden rounded-xl border-2 border-border bg-card shadow-lg"
-            role="dialog"
-            aria-labelledby="edit-email-draft-title"
-            aria-busy={editDraftLoading}
-          >
-            <h2 id="edit-email-draft-title" className="shrink-0 px-6 pt-6 text-lg font-semibold">
-              Edit email draft
-            </h2>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
-              {editDraftLoading && !editDraft ? (
-                <div
-                  className="flex min-h-[min(40vh,320px)] flex-col items-center justify-center gap-3 py-12 text-center"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <Loader2 className="h-10 w-10 shrink-0 animate-spin text-primary" aria-hidden />
-                  <p className="text-sm text-muted-foreground">Loading draft from server…</p>
-                  <p className="max-w-sm text-xs text-muted-foreground">
-                    Usually under a few seconds. If it hangs, click Cancel — or wait; the request stops
-                    automatically after about {Math.round(EMAIL_DRAFT_GET_FOR_EDIT_TIMEOUT_MS / 1000)}s.
-                  </p>
-                </div>
-              ) : editDraft ? (
-                <div className="grid gap-3">
-                  <Input
-                    placeholder="Subject"
-                    value={draftForm.subject}
-                    onChange={(e) => setDraftForm((f) => ({ ...f, subject: e.target.value }))}
-                  />
-                  <EmailDraftRichTextEditor
-                    key={editDraft.id}
-                    initialBody={draftForm.body}
-                    onChange={(body) => setDraftForm((f) => ({ ...f, body }))}
-                  />
-                  <DraftAssetAttachmentsField
-                    assets={assetsLibrary}
-                    assetPackets={runAssetPackets}
-                    selectedIds={draftForm.attached_asset_ids}
-                    onSelectedIdsChange={(attached_asset_ids) =>
-                      setDraftForm((f) => ({ ...f, attached_asset_ids }))
-                    }
-                  />
-                </div>
-              ) : null}
-            </div>
-            <div className="shrink-0 border-t border-border px-6 py-4">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                <label className="flex max-w-[min(100%,20rem)] cursor-pointer items-start gap-2.5 text-sm leading-snug text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-2 border-border accent-primary"
-                    checked={
-                      draftReviewTab === "approved"
-                        ? applyAssetsEditScope === "approved"
-                        : applyAssetsEditScope === "pending"
-                    }
-                    disabled={editDraftSaving || editDraftLoading || !editDraft}
-                    onChange={(e) => {
-                      if (!e.target.checked) setApplyAssetsEditScope("none");
-                      else
-                        setApplyAssetsEditScope(draftReviewTab === "approved" ? "approved" : "pending");
-                    }}
-                  />
-                  <span>
-                    <span className="font-medium text-foreground">Apply assets to all drafts</span>
-                    <span className="mt-0.5 block text-xs">
-                      {draftReviewTab === "approved"
-                        ? "Approved only — same attachments as here after Save."
-                        : "Pending review only — same attachments as here after Save."}
-                    </span>
-                  </span>
-                </label>
-                <div className="flex shrink-0 justify-end gap-2">
-                  <Button variant="outline" disabled={editDraftSaving} onClick={() => closeEditDraftModal()}>
-                    Cancel
-                  </Button>
-                  <Button
-                    type="button"
-                    disabled={editDraftSaving || editDraftLoading || !editDraft}
-                    aria-busy={editDraftSaving}
-                    onClick={() => void saveEditDraft()}
-                  >
-                    {editDraftSaving ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                    ) : null}
-                    Save
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {restartDialogOpen && restartDialogRun ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <button
-            type="button"
-            className="fixed inset-0 bg-black/50"
-            aria-label="Close"
-            onClick={closeRestartDialog}
-          />
-          <div className="relative z-50 w-full max-w-lg rounded-xl border-2 border-border bg-card p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Continue outreach</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">{restartDialogRun.name}</span>
-              {" — "}
-              company search and contact validation run in the <strong>background</strong> on the server — you can switch
-              to other runs and start Continue outreach there too; only runs with an active job keep this button
-              disabled. Same brief, extra rounds to grow the list. Existing contacts, drafts, and tracking stay in place;
-              new rows are merged in. After you confirm, this window closes; a banner under the title lists in-flight
-              runs.
-            </p>
-            <div className="mt-6 flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={closeRestartDialog}>
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                onClick={() => void confirmRestartRun()}
-                disabled={Boolean(restartDialogRun && restartsInFlight[restartDialogRun.id])}
-              >
-                Continue...
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {promptSetupOpen ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <button
-            type="button"
-            className="fixed inset-0 bg-black/50"
-            aria-label="Close"
-            disabled={promptSetupSaving}
-            onClick={() => {
-              if (!promptSetupSaving) setPromptSetupOpen(false);
-            }}
-          />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Prompt setup</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Labeled outreach brief (same shape as when the run was created). If nothing was saved yet, this opens with
-              the current run values. When a non-empty prompt is saved, each new approved contact gets a draft via the
-              LLM from this brief plus recipient details; Regenerate uses the same. If the prompt is empty, drafts use
-              the standard master variants from run setup. Saving updates the stored text only — use Regenerate or new
-              approvals to refresh existing drafts.
-            </p>
-            <div className="mt-4">
-              <Textarea
-                value={promptSetupText}
-                onChange={(e) => setPromptSetupText(e.target.value)}
-                className="min-h-[280px] font-mono text-sm"
-                spellCheck={false}
+          <div className="space-y-4 py-2">
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">Название кампании</div>
+              <Input
+                value={amoCrmRunName}
+                onChange={(e) => setAmoCrmRunName(e.target.value)}
+                placeholder="e.g. AmoCRM Import 29.05"
               />
             </div>
-            <div className="mt-6 flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                disabled={promptSetupSaving}
-                onClick={() => setPromptSetupOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="button" disabled={promptSetupSaving} onClick={() => void savePromptSetup()}>
-                {promptSetupSaving ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                ) : null}
-                Save
-              </Button>
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">Target Project</div>
+              <NativeFilterSelect
+                className="w-full"
+                value={amoCrmProjectId}
+                onValueChange={setAmoCrmProjectId}
+                options={projects.map(p => ({ value: String(projectPk(p)), label: p.name }))}
+              />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">Excel File</div>
+              <Input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={(e) => setAmoCrmImportFile(e.target.files[0])}
+              />
             </div>
           </div>
-        </div>
-      ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAmoCrmImportOpen(false)} disabled={amoCrmImportInFlight}>
+              Cancel
+            </Button>
+            <Button onClick={handleAmoCrmImport} disabled={amoCrmImportInFlight || !amoCrmFile || !amoCrmRunName}>
+              {amoCrmImportInFlight ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Zap className="mr-2 h-4 w-4" />
+              )}
+              Import
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-      {gmailSetupOpen ? (
+      <Dialog open={promptSetupOpen} onOpenChange={setPromptSetupOpen}>
+        <DialogContent className="sm:max-w-2xl flex flex-col max-h-[90vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-primary" /> {t("Настройка промптов")}
+            </DialogTitle>
+            <CardDescription>
+              Fine-tune AI behavior and templates for this run. All fields support {"{{company}}"}, {"{{website}}"}, etc.
+            </CardDescription>
+          </DialogHeader>
+
+          <div className="mt-4 flex border-b border-border overflow-x-auto shrink-0">
+               {[
+                 { id: "general", label: t("Общие") },
+                 { id: "sources", label: t("OSINT Sources") },
+                 { id: "osint", label: t("OSINT Search") },
+                 { id: "reasoning", label: t("AI Logic (Hooks)") },
+                 { id: "draft", label: t("Email Drafting") }
+               ].map(t_tab => (
+                 <button
+                   key={t_tab.id}
+                   type="button"
+                   className={cn(
+                     "px-4 py-2 text-xs font-medium border-b-2 transition-colors whitespace-nowrap",
+                     promptTab === t_tab.id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+                   )}
+                   onClick={() => setPromptTab(t_tab.id)}
+                 >
+                   {t_tab.label}
+                 </button>
+               ))}
+             </div>
+
+             <div className="mt-4 flex-1 overflow-y-auto pr-2 space-y-4 min-h-[300px]">
+               {promptTab === "general" && (
+                 <div className="space-y-4">
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Язык аутрича")}</div>
+                      <NativeFilterSelect
+                        className="w-full"
+                        value={promptLanguage}
+                        onValueChange={setPromptLanguage}
+                        options={[
+                          { value: "Russian", label: "Russian (Русский)" },
+                          { value: "English", label: "English" }
+                        ]}
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Режим поиска")}</div>
+                      <NativeFilterSelect
+                        className="w-full"
+                        value={promptOsintDiscoveryMode}
+                        onValueChange={setPromptOsintDiscoveryMode}
+                        options={[
+                          { value: "api_only", label: "Cloud Safe (API Only)" },
+                          { value: "hardcore", label: "Hardcore (Local OSINT)" }
+                        ]}
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider text-primary">{t("Мастер-промпт (контекст)")}</div>
+                      <Textarea
+                        value={promptSetupText}
+                        onChange={(e) => setPromptSetupText(e.target.value)}
+                        className="min-h-[200px] font-mono text-xs"
+                        placeholder="Оффер, целевые должности, тон..."
+                        spellCheck={false}
+                      />
+                    </div>
+                 </div>
+               )}
+
+               {promptTab === "sources" && (
+                 <div>
+                    <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Пользовательские ссылки и источники для поиска")}</div>
+                    <Textarea
+                      value={promptCompanySearchText}
+                      onChange={(e) => setPromptCompanySearchText(e.target.value)}
+                      className="min-h-[250px] font-mono text-xs"
+                      placeholder="Например, найти рейтинги на hh.ru..."
+                      spellCheck={false}
+                    />
+                    <p className="mt-2 text-[10px] text-muted-foreground italic">
+                      Ссылки или инструкции для AI для поиска компаний.
+                    </p>
+                 </div>
+               )}
+
+               {promptTab === "osint" && (
+                 <div>
+                    <div className="mb-4">
+                      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Промпт для поиска информации о компании (Сыщик)")}</div>
+                      <Textarea
+                        value={promptOsintText}
+                        onChange={(e) => setPromptOsintText(e.target.value)}
+                        className="min-h-[150px] font-mono text-xs"
+                        placeholder="Например, найти новости о стратегии {{company}}..."
+                        spellCheck={false}
+                      />
+                      <p className="mt-2 text-[10px] text-muted-foreground italic">
+                        Используется для сбора фактов о компании из сети.
+                      </p>
+                    </div>
+
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Инструкция для глубокого OSINT ЛПР")}</div>
+                      <Textarea
+                        value={promptDeepOsintText}
+                        onChange={(e) => setPromptDeepOsintText(e.target.value)}
+                        className="min-h-[150px] font-mono text-xs"
+                        placeholder="Например: Вы эксперт по OSINT..."
+                        spellCheck={false}
+                      />
+                      <p className="mt-2 text-[10px] text-muted-foreground italic">
+                        Инструкция для AI по извлечению фактов из сети при нажатии кнопки 'Глубокий поиск'.
+                      </p>
+                    </div>
+                 </div>
+               )}
+
+               {promptTab === "reasoning" && (
+                 <div>
+                    <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Промпт для аналитики и стратегии (Сеньор SDR)")}</div>
+                    <Textarea
+                      value={promptReasoningText}
+                      onChange={(e) => setPromptReasoningText(e.target.value)}
+                      className="min-h-[250px] font-mono text-xs"
+                      placeholder="Инструкция для AI по планированию письма..."
+                      spellCheck={false}
+                    />
+                    <p className="mt-2 text-[10px] text-muted-foreground italic">
+                      Инструкция для AI по извлечению 'зацепок' и 'углов' из OSINT данных.
+                    </p>
+                 </div>
+               )}
+
+               {promptTab === "draft" && (
+                 <div>
+                    <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider text-primary">{t("Промпт для написания письма (Копирайтер)")}</div>
+                    <Textarea
+                      value={promptDraftText}
+                      onChange={(e) => setPromptDraftText(e.target.value)}
+                      className="min-h-[250px] font-mono text-xs"
+                      placeholder="Инструкция для AI по написанию темы и тела письма..."
+                      spellCheck={false}
+                    />
+                    <p className="mt-2 text-[10px] text-muted-foreground italic">
+                      Контролирует стиль, призыв к действию и структуру исходящего письма.
+                    </p>
+                 </div>
+               )}
+             </div>
+
+          <DialogFooter className="mt-6 border-t border-border pt-4">
+            <Button variant="outline" onClick={() => setPromptSetupOpen(false)} disabled={promptSetupSaving}>
+              {t("Отмена")}
+            </Button>
+            <Button onClick={savePromptSetup} disabled={promptSetupSaving}>
+              {promptSetupSaving ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Zap className="mr-2 h-4 w-4" />
+              )}
+              {t("Сохранить промпты")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {yandexSetupOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <button
             type="button"
             className="fixed inset-0 bg-black/50"
             aria-label="Close"
-            onClick={() => setGmailSetupOpen(false)}
+            onClick={() => setYandexSetupOpen(false)}
           />
-          <div className="relative z-50 max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-xl border-2 border-border bg-card p-6 shadow-lg sm:p-8">
-            <h2 className="text-lg font-semibold">Connect Gmail</h2>
+          <div className="relative z-50 max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border-2 border-border bg-card p-6 shadow-lg sm:p-8">
+            <h2 className="text-lg font-semibold">Connect Yandex</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              One Google mailbox sends all outreach from this deployment. Sending uses the real Gmail API — not a mock
-              — once the three variables at the bottom of this dialog are present in{" "}
-              <span className="font-mono text-foreground/90">backend/.env</span> for the API process that answers{" "}
-              <span className="font-mono text-foreground/90">/setup/status</span>.
+              Enter your Yandex Email and App Password. This account will be used to send all outreach emails via SMTP and read replies via IMAP.
             </p>
-            <div className="mt-3 rounded-lg border border-blue-500/35 bg-blue-500/10 px-3 py-2 text-xs leading-relaxed text-foreground">
-              <span className="font-medium text-foreground">Important — finish in this browser tab: </span>
-              Do <strong>not</strong> copy links from Google screens (
-              <span className="font-mono">oauth/warning</span>, <span className="font-mono">consentsummary</span>, etc.).
-              The app only receives tokens after Google <strong>redirects your browser</strong> to{" "}
-              <span className="font-mono break-all">…/api/oauth/google/callback?code=…</span>, then back here with{" "}
-              <span className="font-mono">?gmail_connected=1</span> or <span className="font-mono">?gmail_error=…</span>{" "}
-              in the address bar. If Google shows &quot;Google hasn&apos;t verified this app&quot;, open{" "}
-              <strong>Advanced</strong> / <strong>Continue</strong> (unsafe). Until that final redirect happens, nothing is
-              written to <span className="font-mono">.env</span>.
-            </div>
-            {setupIntegration && setupIntegration.gmail_send_ready !== true ? (
-              <div className="mt-3 rounded-lg border border-amber-500/45 bg-amber-500/10 px-3 py-2.5 text-sm leading-relaxed text-amber-950 dark:text-amber-50">
-                <p className="font-medium text-foreground">If you already edited backend/.env but the status still looks wrong</p>
-                <ul className="mt-2 list-disc space-y-1.5 pl-5 text-foreground/90">
-                  <li>
-                    The UI reflects what the <strong>running API</strong> sees — not only the file open in your editor.
-                    Below, check &quot;API loads variables from&quot; and compare with the file you saved.
-                  </li>
-                  <li>
-                    <strong>Docker:</strong> Compose <span className="font-mono text-xs">env_file</span> is applied when the
-                    container is <strong>created</strong>. After adding <span className="font-mono text-xs">GOOGLE_REFRESH_TOKEN</span>{" "}
-                    on the host, recreate the backend (for example{" "}
-                    <span className="font-mono text-xs">
-                      docker compose -f infra/docker-compose.yml up -d --force-recreate backend
-                    </span>
-                    ). Optional: bind-mount <span className="font-mono text-xs">backend/.env</span> →{" "}
-                    <span className="font-mono text-xs">/app/.env</span> so file edits are picked up without stale env (
-                    <span className="font-mono text-xs">infra/docker-compose.bind-env.yml</span>).
-                  </li>
-                  <li>
-                    Key name must be exactly <span className="font-mono text-xs">GOOGLE_REFRESH_TOKEN</span> (see{" "}
-                    <span className="font-mono text-xs">backend/.env.example</span>). If you have more than one{" "}
-                    <span className="font-mono text-xs">.env</span>, the <strong>later</strong> path in the list below wins for
-                    duplicate names.
-                  </li>
-                  <li>
-                    CLI fallback (no in-app redirect): from <span className="font-mono text-xs">ai-biz-os/backend</span> run{" "}
-                    <span className="font-mono text-xs">python3 scripts/fetch_google_refresh_token.py</span> — add its localhost
-                    callback URI in Google Cloud next to the web callback.
-                  </li>
-                </ul>
+            {yandexSetupErr ? (
+              <div className="mt-4 rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-500">
+                {yandexSetupErr}
               </div>
             ) : null}
-            {gmailSetupHintsFromApi.length ? (
-              <div
-                className="mt-3 rounded-lg border border-muted bg-muted/30 px-3 py-2 text-xs leading-relaxed text-foreground/90"
-                role="status"
-              >
-                <span className="font-medium text-foreground">API notes: </span>
-                <ul className="mt-1.5 list-disc space-y-1 pl-5">
-                  {gmailSetupHintsFromApi.map((h) => (
-                    <li key={h}>{h.replace(/^Gmail setup:\s*/, "")}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {gmailSetupErr ? (
-              <div
-                className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-                role="alert"
-              >
-                <p className="min-w-0 flex-1">{gmailSetupErr}</p>
-                <button
-                  type="button"
-                  className="shrink-0 rounded-md p-1 opacity-80 hover:bg-destructive/15 hover:opacity-100"
-                  aria-label="Dismiss"
-                  onClick={() => setGmailSetupErr("")}
-                >
-                  <X className="h-4 w-4" aria-hidden />
-                </button>
-              </div>
-            ) : null}
-            {setupIntegration?.env_write_blocked_reason ? (
-              <div
-                className="mt-3 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-950 dark:text-amber-100"
-                role="status"
-              >
-                <span className="font-medium">Saving to .env is disabled in the running API: </span>
-                {setupIntegration.env_write_blocked_reason}
-              </div>
-            ) : null}
-            {setupIntegration?.env_paths_found?.length ? (
-              <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                API loads variables from (later paths override earlier):{" "}
-                <span className="font-mono text-[11px] text-foreground/90">
-                  {setupIntegration.env_paths_found.join(" → ")}
-                </span>
-                . After a <strong>successful</strong> callback (see green note above),{" "}
-                <span className="font-medium text-foreground">GOOGLE_REFRESH_TOKEN</span> is written when saving is
-                allowed. In Docker without mounting host <span className="font-mono">backend/.env</span> to{" "}
-                <span className="font-mono">/app/.env</span>, the refresh token may exist only inside the container —
-                check <span className="font-mono">infra/docker-compose.yml</span> comments. Current: client{" "}
-                {setupIntegration.gmail_client_configured ? "✓" : "✗"}, refresh token{" "}
-                {setupIntegration.gmail_refresh_token_set ? "✓" : "✗"}.
-              </p>
-            ) : null}
-            <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-foreground">
-              <li>
-                In{" "}
-                <a
-                  className="font-medium text-accent underline"
-                  href="https://console.cloud.google.com/apis/credentials"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Google Cloud Console → Credentials
-                </a>
-                , create an OAuth 2.0 Client ID (Web application).
-              </li>
-              <li>
-                In that <strong>same</strong> project:{" "}
-                <a
-                  className="font-medium text-accent underline"
-                  href="https://console.cloud.google.com/apis/library/gmail.googleapis.com"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  APIs &amp; Services → Library
-                </a>{" "}
-                → open <strong>Gmail API</strong> → <strong>Enable</strong>. Without this, OAuth succeeds but sending
-                mail returns 403 (Gmail API disabled).
-              </li>
-              <li>
-                Under Authorized redirect URIs, add:
-                <div className="mt-1 rounded-lg border border-muted bg-muted/40 px-2 py-1.5 font-mono text-xs break-all">
-                  {`${typeof window !== "undefined" ? window.location.origin : ""}/api/oauth/google/callback`}
-                </div>
-                <span className="text-muted-foreground">
-                  (Must match this app&apos;s address bar origin. Optional: set GOOGLE_REDIRECT_URI in backend
-                  <span className="font-mono">.env</span> instead.)
-                </span>
-              </li>
-              <li>
-                If Google says the app is blocked or did not pass verification: open{" "}
-                <a
-                  className="font-medium text-accent underline"
-                  href="https://console.cloud.google.com/apis/credentials/consent"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  OAuth consent screen
-                </a>
-                , leave <span className="font-medium">Publishing status</span> as <strong>Testing</strong> for dev, and
-                add your Google account under <strong>Test users</strong>. Only those accounts can sign in until the app
-                passes Google&apos;s production verification (not required for a single mailbox you control).
-              </li>
-              <li>
-                Paste Client ID and Client Secret below and save into backend <span className="font-mono">.env</span>{" "}
-                {setupIntegration?.allow_env_write ? (
-                  <span className="text-muted-foreground">(allowed here in this environment).</span>
-                ) : (
-                  <span className="text-amber-800 dark:text-amber-200">
-                    — browser save is disabled; add them to <span className="font-mono">.env</span> manually and restart
-                    the API, then leave these fields empty and click Connect.
-                  </span>
-                )}
-              </li>
-              <li>
-                Click <span className="font-medium">Connect Gmail</span>, complete consent, then the API exchanges the
-                code, sends a test email to the same mailbox with subject{" "}
-                <span className="font-mono">Business outreach dashboard check</span>, reads it back, and stores a
-                refresh token in <span className="font-mono">.env</span> when saving is enabled.
-              </li>
-              <li>
-                Access tokens refresh automatically. If the refresh is revoked or expires and cannot be renewed, the red
-                indicator returns — open this dialog and connect again.
-              </li>
-            </ol>
             <div className="mt-4 space-y-3">
               <div>
-                <div className="mb-1 text-xs text-muted-foreground">OAuth Client ID</div>
+                <div className="mb-1 text-xs text-muted-foreground">Yandex Email</div>
                 <Input
-                  value={gmailForm.clientId}
-                  onChange={(e) => setGmailForm((f) => ({ ...f, clientId: e.target.value }))}
+                  value={yandexForm.yandexEmail}
+                  onChange={(e) => setYandexForm((f) => ({ ...f, yandexEmail: e.target.value }))}
                   autoComplete="off"
                   spellCheck={false}
                   className="font-mono text-sm"
-                  placeholder="xxxxx.apps.googleusercontent.com"
+                  placeholder="you@yandex.ru"
                 />
               </div>
               <div>
-                <div className="mb-1 text-xs text-muted-foreground">OAuth Client secret</div>
+                <div className="mb-1 text-xs text-muted-foreground">App Password</div>
                 <Input
                   type="password"
-                  value={gmailForm.clientSecret}
-                  onChange={(e) => setGmailForm((f) => ({ ...f, clientSecret: e.target.value }))}
+                  value={yandexForm.yandexPassword}
+                  onChange={(e) => setYandexForm((f) => ({ ...f, yandexPassword: e.target.value }))}
                   autoComplete="off"
                   spellCheck={false}
                   className="font-mono text-sm"
-                />
-              </div>
-              <div>
-                <div className="mb-1 text-xs text-muted-foreground">Optional: override redirect URI (else origin-based)</div>
-                <Input
-                  value={gmailForm.redirectUri}
-                  onChange={(e) => setGmailForm((f) => ({ ...f, redirectUri: e.target.value }))}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="font-mono text-sm"
-                  placeholder="https://your-host/api/oauth/google/callback"
                 />
               </div>
             </div>
             <div className="mt-6 flex flex-wrap justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setGmailSetupOpen(false)} disabled={gmailSetupBusy}>
+              <Button type="button" variant="outline" onClick={() => setYandexSetupOpen(false)} disabled={yandexSetupBusy}>
                 Cancel
               </Button>
-              <Button type="button" onClick={() => void connectGmailOAuth()} disabled={gmailSetupBusy}>
-                {gmailSetupBusy ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                    Redirecting…
-                  </>
-                ) : (
-                  <>
-                    <Mail className="mr-2 h-4 w-4" aria-hidden />
-                    Connect Gmail
-                  </>
-                )}
+              <Button type="button" onClick={() => void connectYandex()} disabled={yandexSetupBusy}>
+                {yandexSetupBusy ? "Saving..." : "Connect Yandex"}
               </Button>
-            </div>
-            <div className="mt-6 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-sm leading-relaxed">
-              <p className="font-medium text-foreground">What “ready to send” actually means</p>
-              <p className="mt-1 text-muted-foreground">
-                The dashboard turns green when this deployment&apos;s API loads all three values (non-empty) from the{" "}
-                <span className="font-mono text-[13px] text-foreground/90">.env</span> chain it lists above. Names must match
-                exactly:
-              </p>
-              <ul className="mt-2 space-y-1.5 font-mono text-[13px] text-foreground/95">
-                <li className="rounded-md bg-background/80 px-2 py-1.5">GOOGLE_CLIENT_ID</li>
-                <li className="rounded-md bg-background/80 px-2 py-1.5">GOOGLE_CLIENT_SECRET</li>
-                <li className="rounded-md bg-background/80 px-2 py-1.5">GOOGLE_REFRESH_TOKEN</li>
-              </ul>
-              <p className="mt-2 text-xs text-muted-foreground">
-                They belong in <span className="font-mono text-[12px] text-foreground/80">ai-biz-os/backend/.env</span> on the
-                host (or the paths your compose file / <span className="font-mono text-[12px]">AI_BIZ_OS_DOTENV</span> use).
-                Optional: <span className="font-mono text-[12px]">GOOGLE_REDIRECT_URI</span> if your public URL is not the
-                browser origin shown in step 2.
-              </p>
             </div>
           </div>
         </div>
       ) : null}
+      
+      {globalSetupOpen && (
+        <SetupRequiredGate forceOpen={true} onClose={() => setGlobalSetupOpen(false)}>
+          <div />
+        </SetupRequiredGate>
+      )}
 
       {signatureSetupOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
@@ -8573,6 +8538,118 @@ export default function AiBizOsHumanUI() {
           </div>
         </div>
       ) : null}
+      {selectedRun && (
+        <ManualLeadGenModal 
+          runId={selectedRun.id}
+          open={manualLeadGenOpen}
+          onOpenChange={setManualLeadGenOpen}
+          onContactsAdded={(newContacts) => {
+            // Refresh contacts data to show the newly added ones
+            void refreshRunContactsOnly(selectedRun.id);
+          }}
+        />
+      )}
+
+      {/* Manual Contact Add Modal */}
+      <Dialog open={manualContactDialogOpen} onOpenChange={setManualContactDialogOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>{t("Add Contact (Manual)")}</DialogTitle>
+            <p className="text-sm text-muted-foreground">
+              {t("Manually enter contact details to be added to the run's contact list.")}
+            </p>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="company" className="text-right text-sm font-medium">
+                {t("Company")}
+              </label>
+              <Input
+                id="company"
+                value={manualContactForm.company}
+                onChange={(e) => setManualContactForm({ ...manualContactForm, company: e.target.value })}
+                className="col-span-3"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="name" className="text-right text-sm font-medium">
+                {t("Name")}
+              </label>
+              <Input
+                id="name"
+                value={manualContactForm.name}
+                onChange={(e) => setManualContactForm({ ...manualContactForm, name: e.target.value })}
+                className="col-span-3"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="role" className="text-right text-sm font-medium">
+                {t("Role")}
+              </label>
+              <Input
+                id="role"
+                value={manualContactForm.role}
+                onChange={(e) => setManualContactForm({ ...manualContactForm, role: e.target.value })}
+                className="col-span-3"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="email" className="text-right text-sm font-medium">
+                {t("Email")}
+              </label>
+              <Input
+                id="email"
+                type="email"
+                value={manualContactForm.email}
+                onChange={(e) => setManualContactForm({ ...manualContactForm, email: e.target.value })}
+                className="col-span-3"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <label htmlFor="linkedin" className="text-right text-sm font-medium">
+                LinkedIn
+              </label>
+              <Input
+                id="linkedin"
+                value={manualContactForm.linkedin}
+                onChange={(e) => setManualContactForm({ ...manualContactForm, linkedin: e.target.value })}
+                className="col-span-3"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setManualContactDialogOpen(false)}
+              disabled={manualContactLoading}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={() => void saveManualContact()} disabled={manualContactLoading}>
+              {manualContactLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* OSINT Dossier Modal */}
+      <Dialog open={!!osintDossierView} onOpenChange={(open) => !open && setOsintDossierView(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>OSINT Dossier: {osintDossierView?.title}</DialogTitle>
+          </DialogHeader>
+          <div className="overflow-y-auto pr-4 text-sm whitespace-pre-wrap flex-1">
+            {typeof osintDossierView?.content === "object" 
+              ? JSON.stringify(osintDossierView.content, null, 2) 
+              : osintDossierView?.content}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setOsintDossierView(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

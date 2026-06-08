@@ -49,10 +49,10 @@ async def import_amocrm_route(
     run.status = "running"
 
     # mark steps completed
-    create_step(db, run.id, "collect_companies", {"source": "amocrm_import"})
-    mark_step_completed(db, run.id, "collect_companies", {})
-    create_step(db, run.id, "find_contacts", {"source": "amocrm_import"})
-    mark_step_completed(db, run.id, "find_contacts", {})
+    s1 = create_step(db, run.id, "collect_companies", {"source": "amocrm_import"})
+    mark_step_completed(db, s1, {})
+    s2 = create_step(db, run.id, "find_contacts", {"source": "amocrm_import"})
+    mark_step_completed(db, s2, {})
 
     companies_to_sync = []
 
