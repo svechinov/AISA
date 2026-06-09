@@ -2,11 +2,17 @@ import paramiko
 import os
 import sys
 
-HOST = "95.163.223.186"
-USER = "root"
-PASS = "sWJev7IFn6Jm2zg1"
-LOCAL_DIR = r"C:\Users\user\AI-Biz-OS"
-REMOTE_DIR = "/var/www/AI-Biz-OS"
+# Deploy target & all secrets come from environment — never hardcode them in this file
+# (hardcoded keys here were leaked on push and auto-revoked by the provider). Set before running,
+# e.g. via a gitignored .env.deploy loaded with python-dotenv, or plain env vars.
+HOST = os.environ.get("VDS_HOST", "")
+USER = os.environ.get("VDS_USER", "root")
+PASS = os.environ.get("VDS_PASS", "")
+LOCAL_DIR = os.environ.get("VDS_LOCAL_DIR", r"C:\Users\user\AI-Biz-OS")
+REMOTE_DIR = os.environ.get("VDS_REMOTE_DIR", "/var/www/AI-Biz-OS")
+
+if not HOST or not PASS:
+    sys.exit("Set VDS_HOST and VDS_PASS env vars (deploy secrets are not stored in this file).")
 
 def execute_command(ssh, command, hide_output=False):
     if not hide_output:
@@ -77,27 +83,28 @@ python3 -m venv venv
         execute_command(ssh, setup_backend_script)
         
         # 4. Create .env file for Backend
-        env_content = """
-DATABASE_URL=postgresql://aibizos:aibizospassword@localhost:5432/aibizos_db
+        # All secret values are read from the deployer's environment — none are stored in this file.
+        env_content = f"""
+DATABASE_URL={os.environ.get("DEPLOY_DATABASE_URL", "sqlite:///./ai_biz_os.db")}
 REDIS_URL=redis://localhost:6379/0
-SECRET_KEY=supersecretkey_change_me_later
+SECRET_KEY={os.environ.get("SECRET_KEY", "")}
 DEBUG=True
 
 # LLM Config
 LLM_PROVIDER_PRIORITY=openai
-OPENAI_API_KEY=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
-TAVILY_API_KEY=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
+OPENAI_API_KEY={os.environ.get("OPENAI_API_KEY", "")}
+TAVILY_API_KEY={os.environ.get("TAVILY_API_KEY", "")}
 
 # CDN Config (Cloudflare R2)
 CDN_PROVIDER=cloudflare
-CDN_ACCOUNT_ID=9f1e4613d60b54ef4d90af7689407c45
-CDN_API_KEY=d39f554f35da7b2dda15c638fec96c519658da1ff549d477823036d4e0462244
-CDN_R2_BUCKET=fgc
-CDN_R2_ACCESS_KEY_ID=fd645e65c61b210cac6e3d5f87eff77a
-CDN_R2_SECRET_ACCESS_KEY=d39f554f35da7b2dda15c638fec96c519658da1ff549d477823036d4e0462244
-CDN_R2_PUBLIC_BASE_URL=https://9f1e4613d60b54ef4d90af7689407c45.r2.cloudflarestorage.com/fgc
-GLOBAL_PASSWORD=ccae627d5f6a2f89ce49bc24f9d773b9
-HTTP_PROXY=http://gaGN4f:0og1Gt@91.233.54.62:8000
+CDN_ACCOUNT_ID={os.environ.get("CDN_ACCOUNT_ID", "")}
+CDN_API_KEY={os.environ.get("CDN_API_KEY", "")}
+CDN_R2_BUCKET={os.environ.get("CDN_R2_BUCKET", "fgc")}
+CDN_R2_ACCESS_KEY_ID={os.environ.get("CDN_R2_ACCESS_KEY_ID", "")}
+CDN_R2_SECRET_ACCESS_KEY={os.environ.get("CDN_R2_SECRET_ACCESS_KEY", "")}
+CDN_R2_PUBLIC_BASE_URL={os.environ.get("CDN_R2_PUBLIC_BASE_URL", "")}
+GLOBAL_PASSWORD={os.environ.get("GLOBAL_PASSWORD", "")}
+HTTP_PROXY={os.environ.get("HTTP_PROXY", "")}
 """
         execute_command(ssh, f"cat << 'EOF' > /var/www/AI-Biz-OS/backend/.env\n{env_content}\nEOF")
         

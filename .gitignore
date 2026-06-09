@@ -55,3 +55,6 @@ archives/*.zip
 backend/dump_emails.py
 frontend/aibizos_html.txt
 frontend/constants_dump.txt
+
+# Local deploy secrets (vps_deploy.py reads from env / this file)
+.env.deploy
