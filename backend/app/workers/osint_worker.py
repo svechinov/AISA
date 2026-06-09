@@ -1,4 +1,5 @@
 import logging
+import os
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -9,6 +10,22 @@ from app.services.hardcore_osint import gather_raw_entities, find_valid_email, g
 from app.utils.run_company_extra import effective_run_company_extra, persist_run_company_extra
 
 logger = logging.getLogger(__name__)
+
+
+def _osint_company_limit() -> int | None:
+    """Optional cap on companies enriched per call (cost control, Q19).
+
+    Set env OSINT_MAX_COMPANIES=N to process at most N companies that still lack a dossier.
+    Unset/<=0 means no limit. Useful for bounded test runs and to avoid runaway Tavily/LLM spend.
+    """
+    raw = os.environ.get("OSINT_MAX_COMPANIES", "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+        return n if n > 0 else None
+    except ValueError:
+        return None
 
 def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:
     """
@@ -24,15 +41,21 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
 
     companies = db.query(RunCompany).filter(RunCompany.run_id == run_id).all()
     contacts = db.query(Contact).filter(Contact.run_id == run_id).all()
-    
+
     companies_processed = 0
     emails_found = 0
-    
+    company_limit = _osint_company_limit()
+    if company_limit is not None:
+        logger.info(f"OSINT company limit active: at most {company_limit} companies this call")
+
     # 1. Enrich Companies
     for company in companies:
         # We store the dossier in the KV store
         kv = effective_run_company_extra(db, company)
         if not kv.get("osint_dossier"):
+            if company_limit is not None and companies_processed >= company_limit:
+                logger.info(f"OSINT company limit ({company_limit}) reached — stopping enrichment")
+                break
             name = company.name or ""
             website = company.website or ""
             if name:
