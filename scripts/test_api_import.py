@@ -9,7 +9,7 @@ def test_import():
     }
     file_path = "test_leads.xlsx"
     headers = {
-        "Authorization": "Bearer ccae627d5f6a2f89ce49bc24f9d773b9"
+        "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }
     
     with open(file_path, "rb") as f:

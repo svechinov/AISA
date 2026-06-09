@@ -1365,11 +1365,10 @@ export default function AiBizOsHumanUI() {
     formData.append("project_id", amoCrmProjectId);
 
     try {
+      const authToken = localStorage.getItem("aibizos_auth_token");
       const res = await fetch(`${API_BASE}/runs/import-amocrm`, {
         method: "POST",
-        headers: {
-          "Authorization": `Bearer ${selectedRun?.id ? "ccae627d5f6a2f89ce49bc24f9d773b9" : "ccae627d5f6a2f89ce49bc24f9d773b9"}` // Using global password as placeholder for token
-        },
+        headers: authToken ? { "Authorization": `Bearer ${authToken}` } : {},
         body: formData
       });
       if (!res.ok) throw new Error(await res.text());

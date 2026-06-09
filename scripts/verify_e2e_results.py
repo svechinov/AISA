@@ -1,8 +1,9 @@
+import os
 import requests
 
 def check_results(run_id):
     headers = {
-        "Authorization": "Bearer ccae627d5f6a2f89ce49bc24f9d773b9"
+        "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }
     
     # 1. Check Run Status

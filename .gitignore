@@ -58,3 +58,10 @@ frontend/constants_dump.txt
 
 # Local deploy secrets (vps_deploy.py reads from env / this file)
 .env.deploy
+
+# Diagnostic/one-off VDS scripts (untracked; contained hardcoded creds)
+/vds_check_sync.py
+/vps_debug_proxy.py
+/vps_nginx_timeout.py
+/vps_proxy_update.py
+/vps_test_py_proxy.py

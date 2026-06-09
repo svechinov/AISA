@@ -3,7 +3,7 @@ import os
 
 HOST = "95.163.223.186"
 USER = "root"
-PASS = "sWJev7IFn6Jm2zg1"
+PASS = os.environ.get("VDS_PASS", "")
 LOCAL_DIST = r"C:\Users\user\AI-Biz-OS\frontend\dist"
 REMOTE_DIST = "/var/www/AI-Biz-OS/frontend/dist"
 

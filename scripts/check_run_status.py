@@ -1,3 +1,4 @@
+import os
 import requests
 import time
 
@@ -5,7 +6,7 @@ def check_run_status(run_id):
     url = f"http://95.163.223.186/api/runs/{run_id}"
     steps_url = f"http://95.163.223.186/api/steps/run/{run_id}"
     headers = {
-        "Authorization": "Bearer ccae627d5f6a2f89ce49bc24f9d773b9"
+        "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }
     
     print(f"Checking Run {run_id}...")

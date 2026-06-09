@@ -1,10 +1,11 @@
+import os
 import paramiko
 import time
 import sys
 
 HOST = "95.163.223.186"
 USER = "root"
-PASS = "sWJev7IFn6Jm2zg1"
+PASS = os.environ.get("VDS_PASS", "")
 
 def execute_command(ssh, command, hide_output=False):
     if not hide_output:
