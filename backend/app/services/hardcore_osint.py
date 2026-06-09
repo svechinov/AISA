@@ -1,9 +1,6 @@
-import os
-import sys
 import re
 import time
 import json
-import sqlite3
 import requests
 import dns.resolver
 import smtplib
@@ -14,19 +11,9 @@ from urllib.parse import urlparse
 import logging
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# КОНФИГУРАЦИЯ
-# ==========================================
-# TODO(Phase 2): DB_PATH is a leftover absolute path to the standalone LeadGen project DB.
-# hardcore_osint must use the app DB/session, not this path. Do not rely on it.
-DB_PATH = r"C:\Users\user\Documents\Обсидиан\ИИ-автоматизация\LeadGen\leads.db"
-# TODO(Phase 2): route LLM calls through llm_gateway (OpenAI) instead of direct Gemini.
-# There is no GEMINI_API_KEY on prod -> deep LPR OSINT is unavailable until reconciled.
-API_KEY = os.environ.get("GEMINI_API_KEY")
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
-
-if not API_KEY:
-    logger.warning("GEMINI_API_KEY not set - hardcore (deep LPR) OSINT unavailable until configured.")
+# LLM access goes through app.services.llm_gateway (provider per LLM_PROVIDER_PRIORITY — OpenAI for
+# the partner). No direct Gemini/provider calls here, so the model/provider is a configuration
+# choice (multi-model later) rather than hardcoded. SMTP email verification below is local (no LLM).
 
 # ==========================================
 # УЗЕЛ 1: Entity-Scout & Pattern-Analyzer
@@ -83,23 +70,20 @@ def search_egrul_nalog(query):
         pass
     return None
 
-def call_gemini(prompt):
-    """Отправляет запрос в LLM"""
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json"
-        }
-    }
+def call_llm_json(prompt):
+    """Run a JSON-returning LLM call through the shared gateway and return it as a JSON string.
+
+    Routes through app.services.llm_gateway (provider per LLM_PROVIDER_PRIORITY — OpenAI for the
+    partner) instead of calling Gemini directly, so all LLM access lives in one place and the
+    model/provider becomes a config choice later (multi-model). Callers json.loads() the result;
+    returns None on failure (callers already handle None).
+    """
     try:
-        response = requests.post(f"{API_URL}?key={API_KEY}", headers=headers, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        return result['candidates'][0]['content']['parts'][0]['text']
+        from app.services.llm_gateway import complete_prompt_json_object
+        obj = complete_prompt_json_object(prompt)
+        return json.dumps(obj, ensure_ascii=False)
     except Exception as e:
-        print(f"    [!] Ошибка Gemini API: {e}")
+        logger.warning(f"hardcore_osint LLM call failed: {e}")
         return None
 
 def gather_raw_entities(company_name, domain, custom_prompt=None):
@@ -156,7 +140,7 @@ def gather_raw_entities(company_name, domain, custom_prompt=None):
     }}
     """
     
-    response = call_gemini(prompt)
+    response = call_llm_json(prompt)
     if response:
         try:
             return json.loads(response)
@@ -187,7 +171,7 @@ def generate_email_permutations(name, domain, mask_guess):
         "ivan.ivanov@{domain}"
     ]
     """
-    response = call_gemini(prompt)
+    response = call_llm_json(prompt)
     if response:
         try:
              return json.loads(response)
@@ -258,95 +242,3 @@ def find_valid_email(name, domain, mask_guess):
         
     print(f"    ❌ Валидный email не найден.")
     return None
-
-# ==========================================
-# ОРКЕСТРАТОР АГЕНТА
-# ==========================================
-
-def process_empty_contacts():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    # Ищем компании, у которых нет контактного лица (ФИО) ИЛИ нет email-а
-    c.execute("SELECT id, company_name, website, contact_name, email FROM fg_leads WHERE (contact_name = '' OR contact_name IS NULL OR email = '' OR email IS NULL) LIMIT 5")
-    leads = c.fetchall()
-    
-    if not leads:
-         print("✅ В базе нет лидов без контактов.")
-         conn.close()
-         return
-
-    print(f"🚀 Запуск OSINT-Агента: найдено {len(leads)} лидов для обогащения контактов.\n")
-
-    for lead in leads:
-        lead_id = lead['id']
-        company = lead['company_name']
-        website = lead['website']
-        existing_name = lead['contact_name']
-        
-        print(f"=== OSINT: {company} ===")
-        domain = get_domain(website)
-        
-        if not domain:
-            print("  ⚠️ Нет домена. OSINT невозможен.")
-            continue
-            
-        # Шаг 1: Разведка (Entity Scout)
-        raw_data = gather_raw_entities(company, domain)
-        leaders = raw_data.get('leaders', [])
-        mask = raw_data.get('email_mask_guess')
-        
-        # Если в базе не было имени, но мы его нашли - берем приоритетного ЛПР
-        target_name = existing_name
-        target_role = ""
-        
-        if not target_name and leaders:
-             # Ищем приоритет: CEO -> Комдир -> HRD
-             for role in ['CEO', 'Коммерческий директор', 'Директор по продажам', 'HR Director', 'Директор по персоналу']:
-                 found = next((l for l in leaders if role.lower() in l['role'].lower()), None)
-                 if found:
-                     target_name = found['name']
-                     target_role = found['role']
-                     print(f"  🎯 Выбран приоритетный ЛПР: {target_name} ({target_role})")
-                     break
-             # Если специфичных нет, берем первого попавшегося
-             if not target_name:
-                 target_name = leaders[0]['name']
-                 target_role = leaders[0]['role']
-                 print(f"  🎯 Выбран ЛПР: {target_name} ({target_role})")
-                 
-        if not target_name:
-            print("  ❌ Не удалось найти ФИО ЛПР. Пропускаем.")
-            continue
-            
-        # Шаг 2 & 3: Генерация гипотез и SMTP-верификация
-        valid_email = find_valid_email(target_name, domain, mask)
-        
-        # Шаг 4: Сохранение результатов
-        if target_name or valid_email:
-             update_fields = []
-             params = []
-             
-             if not existing_name and target_name:
-                  update_fields.extend(["contact_name = ?", "contact_role = ?"])
-                  params.extend([target_name, target_role])
-                  
-             if valid_email:
-                  update_fields.append("email = ?")
-                  params.append(valid_email)
-                  
-             if update_fields:
-                 update_query = "UPDATE fg_leads SET " + ", ".join(update_fields) + " WHERE id = ?"
-                 params.append(lead_id)
-                 
-                 c.execute(update_query, tuple(params))
-                 conn.commit()
-                 print("  💾 Данные обогащены в БД!")
-             
-        time.sleep(2)
-
-    conn.close()
-
-if __name__ == "__main__":
-    process_empty_contacts()
