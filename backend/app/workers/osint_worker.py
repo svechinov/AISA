@@ -61,9 +61,16 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
             if name:
                 logger.info(f"Gathering dossier for {name}")
                 dossier = get_company_dossier(name, website, run=run)
-                kv["osint_dossier"] = dossier
-                persist_run_company_extra(db, company, kv)
-                companies_processed += 1
+                # Persist only a real dossier. On transient failure get_company_dossier returns an
+                # error string ('{"error": ...}') or a "not configured" notice — persisting it would
+                # cache the failure as the dossier and permanently block retries. Skip → retry later.
+                bad = (not dossier) or ('"error"' in dossier) or dossier.startswith("Tavily API key not configured")
+                if bad:
+                    logger.warning(f"OSINT dossier for {name} failed/empty — not persisted (will retry next run)")
+                else:
+                    kv["osint_dossier"] = dossier
+                    persist_run_company_extra(db, company, kv)
+                    companies_processed += 1
 
     # 2. Enrich Contacts (missing emails)
     mode = "api_only"
