@@ -38,10 +38,13 @@ async def import_amocrm_route(
         db=db,
         project_id=project_id,
         workflow_name="generic_outreach",
-        input_json={"goal": "CRM Import"},
+        # Do NOT put "CRM Import" into goal/master_prompt: the email generator treated it as the
+        # product being sold (emails pitched "внедрение CRM" instead of FG consulting). The offer
+        # must come from the editable prompt_setup_text (FG persona), not from the import mechanics.
+        input_json={"goal": "Импортированная база контактов (AmoCRM)"},
         name=run_name,
         notes="Imported from AmoCRM",
-        master_prompt="CRM Import",
+        master_prompt="",
     )
 
     # ensure it starts directly at the right place.

@@ -49,27 +49,17 @@ def get_company_dossier(company_name: str, website: str, run=None) -> str:
         for result in response.get("results", []):
             context += f"Source ({result.get('url')}): {result.get('content')}\n"
             
-        # Compress the context using Headroom to save tokens and reduce hallucinations
-        try:
-            from headroom import compress
-            import logging
-            logger = logging.getLogger(__name__)
-            original_len = len(context)
-            # If the context is very large, Headroom will compress it.
-            context = compress(context)
-            logger.info(f"Headroom compressed OSINT context from {original_len} to {len(context)} characters")
-        except Exception as e:
-            # Fallback if headroom is not installed or fails
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Headroom compression skipped/failed: {e}")
-            
+        # (Removed Headroom compression: headroom.compress expects a list of chat messages,
+        # not a plain string, so it always failed here and only produced log noise.
+        # Tavily max_results is small, so the context is already compact.)
+
         from app.services.llm_gateway import complete_prompt_json_object
         import json
         
         prompt = f"""
 You are an expert OSINT analyst. Analyze the following OSINT data about {company_name} ({website}).
-Extract key facts, business triggers, and hypotheses for a B2B sales pitch. 
+Extract key facts, business triggers, and hypotheses for a B2B sales pitch.
+LANGUAGE: write ALL text values (facts, hypotheses, triggers) in RUSSIAN (keep the JSON keys in English).
 CRITICAL: You must provide strict evidence for each fact.
 Return ONLY a valid JSON object with this exact structure:
 {{
