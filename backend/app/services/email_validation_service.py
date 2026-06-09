@@ -25,6 +25,17 @@ BANNED_PHRASES: tuple[str, ...] = (
 # Jaccard similarity on normalized word sets above this → duplicate vs peer.
 PEER_SIMILARITY_THRESHOLD = 0.88
 
+# --- LLM critic rubric (Self-QA). Tunable; later movable to run_setup for per-campaign control. ---
+CRITIC_RUBRIC_KEYS = (
+    "relevance_score",
+    "specificity_score",
+    "non_spam_score",
+    "cta_score",
+    "clarity_score",
+)
+CRITIC_MIN_PER_CRITERION = 3  # any single criterion below this → reject
+CRITIC_MIN_TOTAL = 20  # out of len(CRITIC_RUBRIC_KEYS) * 5 = 25
+
 
 def _text_similarity(a: str, b: str) -> float:
     na = normalize_text_for_dedup(a)
@@ -139,43 +150,60 @@ def validate_outbound_email(
     )
     is_valid = score >= 55 and not critical
 
-    # --- AGENTIC CRITIC (Self-QA) ---
+    # --- AGENTIC CRITIC (Self-QA, rubric-based) ---
+    # Rubric scoring (5 criteria) + hook-grounding check. Bounded: the caller retries at most
+    # MAX_VALIDATION_RETRIES times, so this cannot loop indefinitely (cost control).
     from app.services.llm_gateway import complete_prompt_json_object, llm_configured
     if is_valid and llm_configured():
         try:
-            facts = personalization.get('company_facts') or personalization.get('osint_dossier')
+            company_ev = personalization.get("company_facts") or personalization.get("osint_dossier")
+            person_ev = personalization.get("person_osint")
+            has_evidence = bool(company_ev or person_ev)
             critic_prompt = f"""
-You are an elite B2B SDR Critic. Evaluate this cold email draft strictly on 3 criteria (1-5 scale).
+You are an elite B2B SDR Critic. Score this cold email on a strict rubric (each 1-5).
 Subject: {subject}
 Body: {body}
 
-Available evidence/facts: {facts}
+Company evidence/facts: {company_ev}
+Person evidence (person_osint, may be empty): {person_ev}
 
-Criteria:
-1. relevance_score (1-5): How relevant is this to the company based on the facts? (1=generic, 5=highly tailored)
-2. specificity_score (1-5): Does it use concrete facts/numbers/names from the evidence instead of fluff? (1=no facts, 5=hard evidence used)
-3. non_spam_score (1-5): Does it avoid marketing jargon and sound like a personal 1-to-1 email? (1=spammy blast, 5=human and natural)
+Criteria (1=poor, 5=excellent):
+1. relevance_score: fit to THIS company based on the evidence (1=generic, 5=highly tailored).
+2. specificity_score: uses concrete facts/names from the evidence, not fluff (1=no facts, 5=hard evidence used).
+3. non_spam_score: human 1-to-1 tone, no marketing jargon (1=spammy blast, 5=natural).
+4. cta_score: ONE clear low-friction CTA (short call), not vague or multiple (1=weak/none, 5=crisp).
+5. clarity_score: clear, concise, well-structured, appropriate length (1=rambling, 5=tight).
+
+Also judge:
+hook_grounded (true/false): does the OPENING reference a concrete fact/trigger from the evidence
+(prefer person_osint when present, else company evidence)? false if the opener is generic.
 
 Return strict JSON:
 {{
-  "relevance_score": int,
-  "specificity_score": int,
-  "non_spam_score": int,
-  "critique_issues": ["list of specific problems to fix, empty if all scores are 4+"]
+  "relevance_score": int, "specificity_score": int, "non_spam_score": int,
+  "cta_score": int, "clarity_score": int,
+  "hook_grounded": true,
+  "critique_issues": ["specific problems to fix; empty if all good"]
 }}
 """
-            critic_json = complete_prompt_json_object(critic_prompt)
-            total_critic = critic_json.get("relevance_score", 0) + critic_json.get("specificity_score", 0) + critic_json.get("non_spam_score", 0)
-            
-            logger.info("Email Critic scores: relevance=%s, specificity=%s, non_spam=%s (Total: %s/15)", 
-                        critic_json.get("relevance_score"), critic_json.get("specificity_score"), 
-                        critic_json.get("non_spam_score"), total_critic)
+            cj = complete_prompt_json_object(critic_prompt)
+            scores = {k: int(cj.get(k, 0) or 0) for k in CRITIC_RUBRIC_KEYS}
+            total = sum(scores.values())
+            hook_ok = bool(cj.get("hook_grounded", True))
+            logger.info("Email Critic rubric: %s total=%s/25 hook_grounded=%s", scores, total, hook_ok)
 
-            # Require at least 12/15 total, and no single score < 3
-            if total_critic < 12 or any(critic_json.get(k, 0) < 3 for k in ["relevance_score", "specificity_score", "non_spam_score"]):
+            below_floor = any(v < CRITIC_MIN_PER_CRITERION for v in scores.values())
+            hook_fail = has_evidence and not hook_ok
+            if total < CRITIC_MIN_TOTAL or below_floor or hook_fail:
                 is_valid = False
                 score -= 20
-                for ci in critic_json.get("critique_issues", []):
+                if hook_fail:
+                    issues.append({
+                        "code": "hook_not_grounded",
+                        "detail": "Open with a concrete fact/trigger from the evidence (person if available, else company) — not a generic opener.",
+                    })
+                    logger.warning("Critic: hook not grounded in evidence")
+                for ci in cj.get("critique_issues", []):
                     issues.append({"code": "llm_critic_rejected", "detail": f"Critic Feedback: {ci}"})
                     logger.warning("Critic Rejected: %s", ci)
         except Exception as e:
