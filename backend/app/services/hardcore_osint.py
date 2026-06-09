@@ -41,7 +41,7 @@ def search_ddg(query, max_res=5):
                 text_corpus += f"[{r.get('title', '')}] {r.get('body', '')}\n"
         return text_corpus
     except Exception as e:
-        print(f"    [!] Ошибка поиска DDG: {e}")
+        logger.warning(f"DDG search failed: {e}")
         return ""
 
 def search_egrul_nalog(query):
@@ -88,7 +88,7 @@ def call_llm_json(prompt):
 
 def gather_raw_entities(company_name, domain, custom_prompt=None):
     """Собирает имена ЛПР и примеры email с домена"""
-    print(f"  🔍 Шаг 1: Сбор сырых данных (Entity-Scout & Pattern-Analyzer)...")
+    logger.info("Entity scout: gathering raw data")
     
     # 1. Поиск CEO через ЕГРЮЛ
     ceo_name = search_egrul_nalog(company_name)
@@ -218,27 +218,27 @@ def verify_email_smtp(email, mx_record):
          return False
 
 def find_valid_email(name, domain, mask_guess):
-    print(f"  🧠 Шаг 2: Генерация гипотез для {name}...")
+    logger.info(f"Generating email hypotheses for {name}")
     permutations = generate_email_permutations(name, domain, mask_guess)
     
     if not permutations:
         return None
         
-    print(f"  ⚙️ Шаг 3: SMTP-верификация ({len(permutations)} вариантов)...")
+    logger.info(f"SMTP verification: {len(permutations)} candidate(s)")
     mx_record = get_mx_record(domain)
     
     if not mx_record:
-        print(f"    [!] MX запись для {domain} не найдена.")
+        logger.warning(f"No MX record for {domain}")
         return None
 
     for email in permutations:
         is_valid = verify_email_smtp(email, mx_record)
         if is_valid:
-            print(f"    ✅ ВАЛИДНЫЙ EMAIL НАЙДЕН: {email}")
+            logger.info(f"Valid email found: {email}")
             return email
             
         # Пауза между пингами, чтобы не улететь в бан по IP
         time.sleep(1)
         
-    print(f"    ❌ Валидный email не найден.")
+    logger.info("No valid email found")
     return None

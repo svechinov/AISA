@@ -15,8 +15,6 @@ _LEADING_SALUTATION = re.compile(
 
 MASTER_VARIANT_COUNT = 3
 
-_VARIANT_MIN_BODY_LENGTH_SPREAD = 50
-
 
 def normalize_text_for_dedup(t: str) -> str:
     """Collapse near-duplicate bodies (order/periphrasis) for similarity checks."""
@@ -85,9 +83,9 @@ def normalize_variants_payload(data: dict[str, Any]) -> list[dict[str, str]]:
     if len(set(pairs)) < len(pairs):
         raise ValueError("Variants too similar overall")
 
-    lengths = [len(v["body"]) for v in out]
-    if max(lengths) - min(lengths) < _VARIANT_MIN_BODY_LENGTH_SPREAD:
-        raise ValueError("Variants too similar in length")
+    # (Removed the body-length-spread heuristic: similar lengths != similar content, and it caused
+    # valid LLM variants to be rejected into the generic fallback. Distinctness is already enforced
+    # above via unique subjects, distinct normalized bodies, and distinct subject+body pairs.)
 
     if any(_LEADING_BODY_GREETING.match(v["body"].strip()) for v in out):
         raise ValueError("Greeting inside body")
