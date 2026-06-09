@@ -312,8 +312,10 @@ def generate_json(prompt: str, model: str = "stub", task_kind: str | None = None
                 "hook": (
                     "Concrete fit between the recipient’s stated role and the campaign’s target profile."
                 ),
-                "angle": "short, bounded next step with a clear success signal",
-                "cta_type": "reply",
+                "angle": "connect via their stated priority / recent activity",
+                "problem": "a likely bottleneck implied by their role and context",
+                "solution": "one bounded Quick Win step with a clear success signal",
+                "cta_type": "a short 15-minute call",
                 "key_point": "whether a brief scoping exchange is worth scheduling this week",
             }
         return {

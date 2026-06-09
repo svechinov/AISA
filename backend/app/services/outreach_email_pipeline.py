@@ -22,11 +22,15 @@ from app.services.run_context_service import build_master_prompt_text, get_effec
 
 logger = logging.getLogger(__name__)
 
+# Email skeleton = 5 evidence-backed slots (decision 09.06). Names reuse the legacy keys where they
+# map (hook=Зацепка/trigger, angle=Мэтчинг, cta_type=Призыв) and add explicit problem/solution.
+# key_point is kept (mirrors solution) for backward compat with meta/UI readers.
 REASONING_SCHEMA = {
-    "hook": "string",
-    "angle": "string",
-    "cta_type": "string",
-    "key_point": "string",
+    "hook": "string",       # Зацепка: конкретный инфоповод о компании/ЛПР (заземлён на факт)
+    "angle": "string",      # Мэтчинг: через проблему/ценности/подход/корп-событие
+    "problem": "string",    # Проблема, которую решаем (подтверждена фактом)
+    "solution": "string",   # Решение/Quick Win под этот кейс (оффер из prompt_setup_text; позже — программа из каталога)
+    "cta_type": "string",   # Призыв к действию
 }
 
 DRAFT_SCHEMA = {"subject": "string", "body": "string"}
@@ -135,21 +139,27 @@ def generate_email_reasoning(
 
     task = rs.reasoning_prompt if rs and rs.reasoning_prompt else (
         f"{style_block}\n\n"
-        "You are a Senior SDR at FG Consulting. Plan one outbound email for this recipient based on their OSINT dossier.\n\n"
+        "You are a Senior SDR at FG Consulting. Plan one outbound email as a 5-slot skeleton "
+        "based on this recipient's evidence (OSINT). Return a short internal plan (not the email).\n\n"
         f"{variant_note}"
-        "Return a short internal plan (not the email).\n"
-        "Requirements:\n"
-        "- hook: one concrete reason this message fits this company/person based on personalization.osint_dossier or personalization.person_osint.\n"
-        "- angle: how we frame the ask (Focus on Quick Wins in management/sales).\n"
-        "- cta_type: what we ask for (e.g. 15-minute call).\n"
-        "- key_point: the single idea or 'Quick Win' to land.\n\n"
-        "Ground the hook in personalization.osint_dossier and company_facts when present; "
-        "do not invent companies, metrics, or awards not present in INPUT DATA.\n"
-        "CRITICAL: If personalization.person_osint is present, you MUST prioritize facts about the person (quotes, articles, career history) over the general company dossier.\n"
+        "Fill these slots (each grounded in INPUT DATA, never invented):\n"
+        "- hook (Зацепка): ONE concrete trigger / inforpovod about this company or person, taken from "
+        "personalization.person_osint (preferred) or personalization.osint_dossier / company_facts.\n"
+        "- angle (Мэтчинг): how we connect to them — through their problem, values, approach, or a corporate event.\n"
+        "- problem (Проблема): the specific pain we address, supported by a fact from the evidence "
+        "(management hunger, scaling/restructuring, weak sales ops, etc.).\n"
+        "- solution (Решение): ONE fast Quick Win for THIS case. Draw the offer/who-we-are from the "
+        "Campaign / prompt setup (persona) above; pick the angle that fits their problem.\n"
+        "- cta_type (Призыв): what we ask for (e.g. a short 15-minute call).\n\n"
+        "Grounding rules: do not invent companies, metrics, people, or awards not present in INPUT DATA. "
+        "If personalization.person_osint is present, PRIORITIZE facts about the person (quotes, articles, "
+        "career) over the general company dossier.\n"
+        # NOTE (near-term): the `solution` slot will also accept a concrete program matched from the
+        # training-programs catalog (text/bullets/PDF). Keep it as the single offer slot.
     )
-    
+
     # Language enforcement
-    task = f"ALWAYS WRITE THE RESPONSE (hook, angle, key_point, cta_type) IN {lang}.\n\n{task}"
+    task = f"ALWAYS WRITE THE RESPONSE (hook, angle, problem, solution, cta_type) IN {lang}.\n\n{task}"
 
     if (prompt_setup_text or "").strip():
         task = (
@@ -177,11 +187,14 @@ def generate_email_reasoning(
         output_schema=REASONING_SCHEMA,
     )
     out = generate_json(prompt, task_kind="outreach_reasoning")
+    solution = (out.get("solution") or out.get("key_point") or "").strip()
     return {
         "hook": (out.get("hook") or "").strip(),
         "angle": (out.get("angle") or "").strip(),
+        "problem": (out.get("problem") or "").strip(),
+        "solution": solution,
         "cta_type": (out.get("cta_type") or "").strip(),
-        "key_point": (out.get("key_point") or "").strip(),
+        "key_point": solution,  # backward-compat mirror for meta/UI readers
     }
 
 
@@ -232,6 +245,10 @@ def generate_email_draft(
         "OUR CURRENT FOCUS: Selling fast, targeted solutions (Quick Wins) that give the client immediate value, 'unblock' bottlenecks, and open doors for long-term contracts.\n\n"
         "Write one outbound B2B cold email (subject + body) for this recipient.\n\n"
         + master_block
+        + "Follow the planned 5-slot skeleton from Internal reasoning, in order: "
+        "open with `hook` (the concrete trigger) → connect via `angle` → name the `problem` → "
+        "offer the `solution` (one Quick Win) → close with `cta_type`. Weave them into natural prose "
+        "(do NOT print slot labels).\n"
         + "Hard requirements:\n"
         "- If personalization.person_osint is non-empty, you MUST start the email with a hook referencing their personal background, article, or quote.\n"
         "- If personalization.osint_dossier is non-empty (and no person_osint), use a concrete fact from it to create a powerful 'Product Hook'.\n"
@@ -304,6 +321,8 @@ def _draft_without_reasoning(
         {
             "hook": "",
             "angle": "",
+            "problem": "",
+            "solution": "",
             "cta_type": "",
             "key_point": "",
         },
@@ -367,6 +386,8 @@ def compose_outreach_subject_body(
     reasoning: dict[str, str] = {
         "hook": "",
         "angle": "",
+        "problem": "",
+        "solution": "",
         "cta_type": "",
         "key_point": "",
     }
@@ -425,7 +446,7 @@ def compose_outreach_subject_body(
         if not prior:
             prior = ["Improve specificity and remove generic phrasing."]
         has_reasoning = any(
-            (reasoning or {}).get(k) for k in ("hook", "angle", "key_point", "cta_type")
+            (reasoning or {}).get(k) for k in ("hook", "angle", "problem", "solution", "cta_type")
         )
         try:
             if has_reasoning:
