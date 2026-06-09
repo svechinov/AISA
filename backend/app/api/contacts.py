@@ -239,15 +239,39 @@ def deep_osint_contact_route(
     contact_id: int,
     db: Session = Depends(get_db),
 ):
-    """Mark contact for deep OSINT processing by the background agent."""
+    """Run deep person-level OSINT (Agent B) for this contact and store the personal dossier.
+
+    Manual trigger (UI "Deep OSINT" button). Synchronous: gathers public info on the person via
+    Tavily, extracts a structured dossier via the LLM gateway (OpenAI), and saves it to
+    contact.personalization_json["person_osint"] — which the UI surfaces as "View Deep OSINT" and
+    the email generator uses as the personal hook. Uses the editable run_setup.deep_osint_prompt.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.services.deep_lpr_osint import perform_deep_lpr_osint
+
     contact = get_contact(db, contact_id)
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-        
-    contact.ai_pipeline_status = "needs_osint"
+
+    contact.ai_pipeline_status = "osint_running"
+    db.commit()
+
+    result = perform_deep_lpr_osint(db, contact)
+    if not isinstance(result, dict) or result.get("error"):
+        contact.ai_pipeline_status = "needs_osint"  # revert so it can be retried
+        db.commit()
+        db.refresh(contact)
+        detail = result.get("error") if isinstance(result, dict) else "unknown error"
+        raise HTTPException(status_code=502, detail=f"Deep OSINT failed: {detail}")
+
+    pj = dict(contact.personalization_json or {})
+    pj["person_osint"] = result
+    contact.personalization_json = pj
+    flag_modified(contact, "personalization_json")
+    contact.ai_pipeline_status = "profiled"
     db.commit()
     db.refresh(contact)
-    
+
     return contact_read_with_ai_fit(db, contact)
 
 

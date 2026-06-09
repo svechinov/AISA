@@ -88,7 +88,12 @@ async def import_amocrm_route(
         if pd.isna(website):
             website = None
 
-        contact_name = f"{row.get('Имя', '')} {row.get('Фамилия', '')}".strip()
+        # Build full name, skipping pandas NaN (otherwise "Имя nan" leaks into the contact name).
+        _first = row.get("Имя")
+        _last = row.get("Фамилия")
+        _first = "" if pd.isna(_first) else str(_first).strip()
+        _last = "" if pd.isna(_last) else str(_last).strip()
+        contact_name = f"{_first} {_last}".strip()
         role = row.get("Должность (контакт)")
         if pd.isna(role):
             role = None
