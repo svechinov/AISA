@@ -3305,6 +3305,29 @@ export default function AiBizOsHumanUI() {
     setCompaniesPanel(null);
   }, [selectedRun?.id]);
 
+  /** Pipeline step statuses for the Manual Overrides panel (progress markers). */
+  const [runStepStatuses, setRunStepStatuses] = useState({});
+  const refreshStepStatuses = async (runId) => {
+    if (!Number.isFinite(runId) || runId <= 0) {
+      setRunStepStatuses({});
+      return;
+    }
+    try {
+      const steps = await api(`/steps/run/${runId}`);
+      const map = {};
+      (Array.isArray(steps) ? steps : []).forEach((s) => {
+        if (s?.step_name) map[s.step_name] = s.status;
+      });
+      setRunStepStatuses(map);
+    } catch {
+      /* non-fatal: leave previous statuses */
+    }
+  };
+  useEffect(() => {
+    void refreshStepStatuses(selectedRun?.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRun?.id]);
+
   /** Stream A — switch run or main section: abort previous GET via effect cleanup only for these deps. */
   useEffect(() => {
     startCompaniesSnapshotFetch();
@@ -3958,6 +3981,7 @@ export default function AiBizOsHumanUI() {
       setUiError(setError, e);
     } finally {
       setManualStepInFlight((prev) => ({ ...prev, [stepName]: false }));
+      void refreshStepStatuses(runId);
     }
   };
 
@@ -6549,7 +6573,20 @@ export default function AiBizOsHumanUI() {
                                 }
                               }}
                             >
-                              {manualStepInFlight[step.name] ? <Loader2 className="h-3 w-3 animate-spin" /> : step.label}
+                              {manualStepInFlight[step.name] ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <span className="flex items-center gap-1">
+                                  {runStepStatuses[step.name] === "completed" ? (
+                                    <CircleCheck className="h-3 w-3 shrink-0" />
+                                  ) : runStepStatuses[step.name] === "failed" ? (
+                                    <CircleX className="h-3 w-3 shrink-0" />
+                                  ) : runStepStatuses[step.name] === "running" ? (
+                                    <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                                  ) : null}
+                                  {step.label}
+                                </span>
+                              )}
                             </Button>
                           ))}
                         </div>
