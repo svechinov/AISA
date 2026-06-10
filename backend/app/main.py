@@ -11,6 +11,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.api.setup_gate import router as setup_gate_router
 from app.config import settings
 from app.db import SessionLocal
+from app.services.env_bootstrap import load_env_from_file
+
+# Populate os.environ from .env at startup so os.environ-based consumers work reliably
+# (Tavily client, HTTP(S) proxy for httpx, OSINT_MAX_COMPANIES) — not just settings/pydantic readers.
+load_env_from_file()
 
 _log = logging.getLogger(__name__)
 
