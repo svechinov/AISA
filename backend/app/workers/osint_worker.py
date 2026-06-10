@@ -73,9 +73,13 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                     companies_processed += 1
 
     # 2. Enrich Contacts (missing emails)
-    mode = "api_only"
-    if run.run_setup and run.run_setup.osint_discovery_mode == "hardcore":
-        mode = "hardcore"
+    # Verified-LPR discovery (hardcore: ЕГРЮЛ/dorks + SMTP-verified email) is now the default path.
+    # The unverified Tavily email-guess path runs only when osint_discovery_mode is explicitly
+    # "api_only" (UI "Cloud Safe"). Runs without a run_setup (e.g. the live import) get the
+    # verified path. Either way this loop only touches contacts that lack an email.
+    mode = "hardcore"
+    if run.run_setup and run.run_setup.osint_discovery_mode == "api_only":
+        mode = "api_only"
 
     for contact in contacts:
         if contact.status == "needs_discovery" or not contact.email:
@@ -119,7 +123,13 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                                 contact.role = t_role
                                 contact.email = v_email
                                 contact.status = "valid"
-                                contact.source_json = {**contact.source_json, "freshness_score": leader.get('freshness_score', 0)}
+                                # v_email is SMTP-verified by find_valid_email (RCPT 250) → record it
+                                # so validate keeps it and the Agent B gate admits this contact.
+                                contact.source_json = {
+                                    **contact.source_json,
+                                    "freshness_score": leader.get('freshness_score', 0),
+                                    "email_verification": "verified",
+                                }
                             else:
                                 # Create new contact for parallel outreach
                                 new_contact = Contact(
@@ -131,7 +141,10 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                                     role=t_role,
                                     email=v_email,
                                     status="valid",
-                                    source_json={"freshness_score": leader.get('freshness_score', 0)}
+                                    source_json={
+                                        "freshness_score": leader.get('freshness_score', 0),
+                                        "email_verification": "verified",
+                                    }
                                 )
                                 db.add(new_contact)
                                 

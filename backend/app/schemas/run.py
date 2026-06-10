@@ -81,7 +81,7 @@ class RunStart(BaseModel):
     prompt_setup_text: str | None = None
     osint_prompt: str | None = None
     deep_osint_prompt: str | None = None
-    osint_discovery_mode: str = "api_only"
+    osint_discovery_mode: str = "hardcore"
     reasoning_prompt: str | None = None
     product: str = ""
     target_entities: str = ""
@@ -183,7 +183,7 @@ def run_read_from_orm(run: Any) -> RunRead:
             sender_signature_html=get_sender_signature_html(run),
             prompt_setup_text=pt if pt else None,
             email_style_mode=run.email_style_mode,
-            osint_discovery_mode=getattr(run.run_setup, "osint_discovery_mode", "api_only") if run.run_setup else "api_only",
+            osint_discovery_mode=getattr(run.run_setup, "osint_discovery_mode", "hardcore") if run.run_setup else "hardcore",
         )
     return RunRead(
         id=run.id,
@@ -205,7 +205,7 @@ def run_read_from_orm(run: Any) -> RunRead:
         sender_signature_html=get_sender_signature_html(run),
         prompt_setup_text=pt if pt else None,
         email_style_mode=run.email_style_mode,
-        osint_discovery_mode=getattr(run.run_setup, "osint_discovery_mode", "api_only") if run.run_setup else "api_only",
+        osint_discovery_mode=getattr(run.run_setup, "osint_discovery_mode", "hardcore") if run.run_setup else "hardcore",
     )
 
 
@@ -246,7 +246,7 @@ class RunReviewSetupFieldsRead(BaseModel):
     osint_prompt: str | None = None
     reasoning_prompt: str | None = None
     draft_prompt: str | None = None
-    osint_discovery_mode: str = "api_only"
+    osint_discovery_mode: str = "hardcore"
     language: str = "Russian"
     sender_signature_html: str = ""
     prompt_setup_saved: bool

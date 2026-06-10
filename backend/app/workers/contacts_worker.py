@@ -1,3 +1,6 @@
+import logging
+import os
+
 from sqlalchemy.orm import Session
 
 from app.repositories.run_repo import get_run
@@ -9,6 +12,55 @@ from app.utils.contact_identity import contact_identity_key_from_dict
 from app.services.prompt_builder import build_prompt
 from app.services.run_context_service import build_find_contacts_task
 from app.services.rules_service import get_effective_rules_from_run
+
+logger = logging.getLogger(__name__)
+
+
+def _truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _freshness_min() -> int:
+    """Leaders below this freshness_score are flagged stale (mirrors hardcore_osint threshold)."""
+    raw = os.environ.get("VALIDATE_FRESHNESS_MIN", "").strip()
+    try:
+        return int(raw) if raw else 30
+    except ValueError:
+        return 30
+
+
+def _smtp_probe_max() -> int:
+    """Cap on SMTP RCPT probes per validate call (cost/time/IP-reputation control)."""
+    raw = os.environ.get("VALIDATE_SMTP_MAX", "").strip()
+    try:
+        n = int(raw)
+        return n if n > 0 else 25
+    except ValueError:
+        return 25
+
+
+def _smtp_probe(email: str, mx_cache: dict[str, str | None]) -> str:
+    """Verify one email via SMTP RCPT. Returns 'verified' | 'rejected' | 'unverified'.
+
+    'unverified' when the domain has no MX or the probe could not reach a verdict (e.g. greylisting,
+    timeout) — verify_email_smtp is conservative (returns False on any non-250), so we only call a
+    failed probe 'rejected' after an actual SMTP exchange, not when MX lookup itself fails.
+    """
+    from app.services.hardcore_osint import get_mx_record, verify_email_smtp
+
+    domain = email.split("@", 1)[1] if "@" in email else ""
+    if not domain:
+        return "unverified"
+    if domain not in mx_cache:
+        mx_cache[domain] = get_mx_record(domain)
+    mx = mx_cache[domain]
+    if not mx:
+        return "unverified"
+    try:
+        return "verified" if verify_email_smtp(email, mx) else "rejected"
+    except Exception as e:  # never let a probe abort validation of the whole batch
+        logger.warning(f"validate SMTP probe failed for {email}: {e}")
+        return "unverified"
 
 
 def find_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:
@@ -104,7 +156,43 @@ def validate_contacts(db: Session, run_id: int, workflow_name: str, step_input: 
         contact["status"] = "valid"
         valid_contacts.append(contact)
 
+    # Verification pass over format-valid contacts: annotate freshness + email verification.
+    #  - freshness: leaders below the threshold are flagged stale (annotation only by default).
+    #  - email_verification: emails discovered via the hardcore path are already SMTP-verified
+    #    (carried in source_json). An optional SMTP probe (VALIDATE_SMTP_PROBE=1) verifies the rest,
+    #    cached per email and capped per call. Already-verified/rejected emails are never re-probed.
+    # Annotate-only by default — a provided/imported email is NOT downgraded to invalid on a failed
+    # probe (corporate MX often greylist RCPT). Set VALIDATE_STRICT=1 to gate hard (stale/rejected
+    # → invalid).
+    fresh_min = _freshness_min()
+    strict = _truthy("VALIDATE_STRICT")
+    probe_enabled = _truthy("VALIDATE_SMTP_PROBE")
+    probe_budget = _smtp_probe_max() if probe_enabled else 0
+    mx_cache: dict[str, str | None] = {}
+
+    kept_valid: list[dict] = []
+    for contact in valid_contacts:
+        fr = contact.get("freshness_score")
+        is_stale = isinstance(fr, (int, float)) and fr < fresh_min
+        if is_stale:
+            contact["freshness_stale"] = True
+
+        ver = contact.get("email_verification")
+        if ver not in ("verified", "rejected"):
+            if probe_enabled and probe_budget > 0:
+                ver = _smtp_probe((contact.get("email") or "").strip().lower(), mx_cache)
+                probe_budget -= 1
+            else:
+                ver = ver or "unverified"
+            contact["email_verification"] = ver
+
+        if strict and (is_stale or ver == "rejected"):
+            contact["status"] = "invalid"
+            invalid_contacts.append(contact)
+        else:
+            kept_valid.append(contact)
+
     return {
-        "valid_contacts": valid_contacts,
+        "valid_contacts": kept_valid,
         "invalid_contacts": invalid_contacts,
     }

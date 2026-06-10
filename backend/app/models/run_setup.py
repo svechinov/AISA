@@ -28,7 +28,7 @@ class RunSetup(Base):
     draft_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     company_search_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     deep_osint_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    osint_discovery_mode: Mapped[str] = mapped_column(String(50), default="api_only", nullable=False)
+    osint_discovery_mode: Mapped[str] = mapped_column(String(50), default="hardcore", nullable=False)
     language: Mapped[str] = mapped_column(String(50), default="Russian", nullable=False)
     sender_signature_html: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

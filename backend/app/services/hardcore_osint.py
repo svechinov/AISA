@@ -193,8 +193,13 @@ def get_mx_record(domain):
 
 def verify_email_smtp(email, mx_record):
     """Жесткий пинг почтового сервера через SMTP (до команды RCPT TO)"""
-    domain = email.split('@')[1]
-    
+    email = str(email or "").strip()
+    if "@" not in email:
+        # LLM permutation occasionally yields a bare username (no @domain) — treat as invalid
+        # rather than crashing the whole discovery loop.
+        return False
+    domain = email.split('@', 1)[1]
+
     try:
         # Пингуем MX сервер
         server = smtplib.SMTP(timeout=3)

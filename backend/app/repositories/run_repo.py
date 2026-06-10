@@ -271,7 +271,7 @@ def update_run_prompt_setup(
     if deep_osint_prompt is not None:
         row.deep_osint_prompt = deep_osint_prompt.strip() or None
     if osint_discovery_mode is not None:
-        row.osint_discovery_mode = osint_discovery_mode.strip() or "api_only"
+        row.osint_discovery_mode = osint_discovery_mode.strip() or "hardcore"
     if language is not None:
         row.language = language.strip() or "Russian"
 

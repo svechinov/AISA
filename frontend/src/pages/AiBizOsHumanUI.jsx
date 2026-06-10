@@ -1352,7 +1352,7 @@ export default function AiBizOsHumanUI() {
     outreach_brief: DEFAULT_OUTREACH_BRIEF,
     prompt_setup_text: DEFAULT_FG_PROFILER_PROMPT,
     email_style_mode: "auto",
-    osint_discovery_mode: "api_only",
+    osint_discovery_mode: "hardcore",
   });
 
   /** AmoCRM Import State */
@@ -1490,7 +1490,7 @@ export default function AiBizOsHumanUI() {
   const [promptReasoningText, setPromptReasoningText] = useState(DEFAULT_REASONING_PROMPT);
   const [promptDraftText, setPromptDraftText] = useState(DEFAULT_DRAFT_PROMPT);
   const [promptLanguage, setPromptLanguage] = useState("Russian");
-  const [promptOsintDiscoveryMode, setPromptOsintDiscoveryMode] = useState("api_only");
+  const [promptOsintDiscoveryMode, setPromptOsintDiscoveryMode] = useState("hardcore");
   const [promptTab, setPromptTab] = useState("general");
   const [promptSetupSaving, setPromptSetupSaving] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
@@ -3749,7 +3749,7 @@ export default function AiBizOsHumanUI() {
         segment: "",
         outreach_brief: DEFAULT_OUTREACH_BRIEF,
         email_style_mode: "auto",
-        osint_discovery_mode: "api_only",
+        osint_discovery_mode: "hardcore",
       });
     } catch (e) {
       setUiError(setError, e);
@@ -3825,7 +3825,7 @@ export default function AiBizOsHumanUI() {
       setPromptDraftText(DEFAULT_DRAFT_PROMPT);
       setPromptDeepOsintText(DEFAULT_DEEP_OSINT_PROMPT);
       setPromptCompanySearchText(DEFAULT_COMPANY_SEARCH_PROMPT);
-      setPromptOsintDiscoveryMode("api_only");
+      setPromptOsintDiscoveryMode("hardcore");
       setPromptLanguage("Russian");
     }
     setIsCreatingNewRun(true);
@@ -4729,7 +4729,7 @@ export default function AiBizOsHumanUI() {
         setPromptDraftText(d.draft_prompt || DEFAULT_DRAFT_PROMPT);
         setPromptDeepOsintText(d.deep_osint_prompt || DEFAULT_DEEP_OSINT_PROMPT);
         setPromptCompanySearchText(d.company_search_prompt || DEFAULT_COMPANY_SEARCH_PROMPT);
-        setPromptOsintDiscoveryMode(d.osint_discovery_mode || "api_only");
+        setPromptOsintDiscoveryMode(d.osint_discovery_mode || "hardcore");
         setPromptLanguage(d.language || "Russian");
       }
     } catch (e) {

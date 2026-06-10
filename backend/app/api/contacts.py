@@ -237,6 +237,7 @@ def edit_contact_route(
 @router.post("/{contact_id}/deep_osint")
 def deep_osint_contact_route(
     contact_id: int,
+    force: bool = Query(False, description="Bypass the verification gate and run Agent B anyway."),
     db: Session = Depends(get_db),
 ):
     """Run deep person-level OSINT (Agent B) for this contact and store the personal dossier.
@@ -245,6 +246,10 @@ def deep_osint_contact_route(
     Tavily, extracts a structured dossier via the LLM gateway (OpenAI), and saves it to
     contact.personalization_json["person_osint"] — which the UI surfaces as "View Deep OSINT" and
     the email generator uses as the personal hook. Uses the editable run_setup.deep_osint_prompt.
+
+    Gate (token economy): Agent B runs only on verified/target contacts — a usable email and
+    status "valid" (verified by discovery or validation). Unverified/invalid contacts are rejected
+    with 422 so we don't spend Deep Research tokens on dead leads. Pass force=true to override.
     """
     from sqlalchemy.orm.attributes import flag_modified
     from app.services.deep_lpr_osint import perform_deep_lpr_osint
@@ -252,6 +257,18 @@ def deep_osint_contact_route(
     contact = get_contact(db, contact_id)
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
+
+    if not force:
+        email = (contact.email or "").strip()
+        has_email = bool(email) and "@" in email
+        if not has_email or contact.status != "valid":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Agent B gate: contact needs a verified email (status='valid'). "
+                    "Run validation/enrichment first, or retry with force=true."
+                ),
+            )
 
     contact.ai_pipeline_status = "osint_running"
     db.commit()
