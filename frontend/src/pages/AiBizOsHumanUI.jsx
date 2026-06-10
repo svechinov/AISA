@@ -1050,6 +1050,77 @@ async function api(path, { method = "GET", body, headers: hdr = {}, signal, time
   return res.json();
 }
 
+/** Evidence Store view: render the dossier's facts (with sources + confidence), hypotheses and
+ *  triggers as sections; anything unparseable falls back to raw text (legacy dossiers). */
+function DossierStructuredView({ content }) {
+  let obj = content;
+  if (typeof content === "string") {
+    try { obj = JSON.parse(content); } catch { obj = null; }
+  }
+  const evidence = Array.isArray(obj?.evidence) ? obj.evidence.filter((e) => e && e.fact) : [];
+  const hypotheses = Array.isArray(obj?.hypotheses) ? obj.hypotheses.filter(Boolean) : [];
+  const triggers = Array.isArray(obj?.triggers) ? obj.triggers.filter(Boolean) : [];
+
+  if (!evidence.length && !hypotheses.length && !triggers.length) {
+    return (
+      <div className="whitespace-pre-wrap">
+        {typeof content === "object" ? JSON.stringify(content, null, 2) : content}
+      </div>
+    );
+  }
+
+  const confColor = (c) =>
+    c >= 80 ? "text-green-600 dark:text-green-400"
+    : c >= 50 ? "text-amber-600 dark:text-amber-400"
+    : "text-red-600 dark:text-red-400";
+
+  return (
+    <div className="space-y-4">
+      {evidence.length > 0 && (
+        <div>
+          <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Факты (Evidence)")}</div>
+          <div className="space-y-2">
+            {evidence.map((e, i) => (
+              <div key={i} className="border rounded-md p-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">{e.fact}</div>
+                  {(e.confidence_score ?? e.confidence) != null && (
+                    <span className={`shrink-0 text-xs font-mono font-semibold ${confColor(e.confidence_score ?? e.confidence)}`}>
+                      {e.confidence_score ?? e.confidence}%
+                    </span>
+                  )}
+                </div>
+                {e.source_url && (
+                  <a href={e.source_url} target="_blank" rel="noopener noreferrer"
+                     className="mt-1 block text-xs text-primary underline truncate">
+                    {e.source_url}
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {triggers.length > 0 && (
+        <div>
+          <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Триггеры")}</div>
+          <ul className="list-disc pl-5 space-y-1">
+            {triggers.map((x, i) => <li key={i}>{String(x)}</li>)}
+          </ul>
+        </div>
+      )}
+      {hypotheses.length > 0 && (
+        <div>
+          <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("Гипотезы")}</div>
+          <ul className="list-disc pl-5 space-y-1">
+            {hypotheses.map((x, i) => <li key={i}>{String(x)}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function projectPk(p) {
   return p?.project_id ?? p?.id;
 }
@@ -8685,10 +8756,8 @@ export default function AiBizOsHumanUI() {
           <DialogHeader>
             <DialogTitle>OSINT Dossier: {osintDossierView?.title}</DialogTitle>
           </DialogHeader>
-          <div className="overflow-y-auto pr-4 text-sm whitespace-pre-wrap flex-1">
-            {typeof osintDossierView?.content === "object" 
-              ? JSON.stringify(osintDossierView.content, null, 2) 
-              : osintDossierView?.content}
+          <div className="overflow-y-auto pr-4 text-sm flex-1">
+            <DossierStructuredView content={osintDossierView?.content} />
           </div>
           <DialogFooter>
             <Button onClick={() => setOsintDossierView(null)}>Close</Button>

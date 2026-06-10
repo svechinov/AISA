@@ -31,6 +31,7 @@ def import_api_routers():
     from app.api.tracking import router as tracking_router
     from app.api.smtp_accounts import router as smtp_accounts_router
     from app.api.training_programs import router as training_programs_router
+    from app.api.evidence import router as evidence_router
 
     return (
         auth_router,
@@ -39,6 +40,7 @@ def import_api_routers():
         assets_router,
         asset_packets_router,
         training_programs_router,
+        evidence_router,
         rules_router,
         templates_router,
         contacts_router,

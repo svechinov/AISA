@@ -71,6 +71,13 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                     kv["osint_dossier"] = dossier
                     persist_run_company_extra(db, company, kv)
                     companies_processed += 1
+                    # Evidence Store: index the dossier's evidence/hypotheses/triggers as rows
+                    # (queryable copy; KV dossier stays the source of truth). Never fatal.
+                    try:
+                        from app.services.evidence_store import sync_company_evidence_from_dossier
+                        sync_company_evidence_from_dossier(db, company, dossier)
+                    except Exception as ev_exc:
+                        logger.warning(f"Evidence sync failed for {name}: {ev_exc}")
 
     # 2. Enrich Contacts (missing emails)
     # Verified-LPR discovery (hardcore: ЕГРЮЛ/dorks + SMTP-verified email) is now the default path.
