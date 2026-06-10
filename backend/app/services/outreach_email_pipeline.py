@@ -29,7 +29,7 @@ REASONING_SCHEMA = {
     "hook": "string",       # Зацепка: конкретный инфоповод о компании/ЛПР (заземлён на факт)
     "angle": "string",      # Мэтчинг: через проблему/ценности/подход/корп-событие
     "problem": "string",    # Проблема, которую решаем (подтверждена фактом)
-    "solution": "string",   # Решение/Quick Win под этот кейс (оффер из prompt_setup_text; позже — программа из каталога)
+    "solution": "string",   # Решение/Quick Win под этот кейс (оффер из prompt_setup_text; при матче — программа из каталога, см. _apply_program_match)
     "cta_type": "string",   # Призыв к действию
 }
 
@@ -154,8 +154,8 @@ def generate_email_reasoning(
         "Grounding rules: do not invent companies, metrics, people, or awards not present in INPUT DATA. "
         "If personalization.person_osint is present, PRIORITIZE facts about the person (quotes, articles, "
         "career) over the general company dossier.\n"
-        # NOTE (near-term): the `solution` slot will also accept a concrete program matched from the
-        # training-programs catalog (text/bullets/PDF). Keep it as the single offer slot.
+        # The `solution` slot may be overwritten after reasoning by a concrete catalog program
+        # (_apply_program_match) — it stays the single offer slot either way.
     )
 
     # Language enforcement
@@ -254,6 +254,8 @@ def generate_email_draft(
         "- If personalization.osint_dossier is non-empty (and no person_osint), use a concrete fact from it to create a powerful 'Product Hook'.\n"
         "- Address their management hunger (lack of strong leaders, mergers, scaling issues) or sales problems if apparent from the dossier.\n"
         "- Offer ONE specific, fast Quick Win step (e.g., training, facilitation session, workshop, express audit).\n"
+        "- If Internal reasoning contains `matched_program`, the solution MUST name that program explicitly "
+        "and mention 1-2 of its bullets; if a brochure is attached, you may reference it (e.g. 'подробности во вложении').\n"
         "- The CTA (Call to Action) must be a short 15-minute call.\n"
         "- DO NOT use IT jargon. Use words like 'external partner', 'development of managerial competencies'.\n"
         "- Avoid generic openers: jump straight into the fact or trigger.\n"
@@ -300,6 +302,46 @@ def generate_email_draft(
     if len(body) > 12000:
         raise ValueError("Email body too long")
     return subject, body
+
+
+def _apply_program_match(db: Session, run: Any, reasoning: dict, pers: dict[str, Any]) -> None:
+    """Feature 1: replace the generic `solution` slot with a concrete catalog program when one fits.
+
+    Mutates `reasoning` in place: solution/key_point get the program-grounded text and
+    `matched_program` carries name/bullets/asset_id — the draft prompt sees it (reasoning is
+    serialized into the prompt), and persistence auto-attaches the program's PDF from it.
+    No-op (generic offer kept) when the catalog is empty, nothing fits, or the matcher fails.
+    """
+    problem = (reasoning.get("problem") or "").strip()
+    if not problem:
+        return
+    try:
+        from app.services.program_matcher import match_program
+
+        rs = getattr(run, "run_setup", None)
+        match = match_program(
+            db,
+            problem=problem,
+            dossier=pers.get("osint_dossier") or "",
+            person_osint=pers.get("person_osint"),
+            language=getattr(rs, "language", "Russian"),
+        )
+    except Exception as exc:
+        logger.warning("Program matcher failed (generic offer kept): %s", exc, exc_info=False)
+        return
+    if not match:
+        return
+    reasoning["solution"] = match["solution_text"]
+    reasoning["key_point"] = match["solution_text"]
+    reasoning["matched_program"] = {
+        "program_id": match["program_id"],
+        "name": match["name"],
+        "asset_id": match["asset_id"],
+        "format": match["format"],
+        "bullets": match["bullets"],
+        "fit_score": match["fit_score"],
+        "rationale": match["rationale"],
+    }
 
 
 def _draft_without_reasoning(
@@ -402,6 +444,7 @@ def compose_outreach_subject_body(
             style_mode=style_mode,
             regenerate_hint=reg_hint,
         )
+        _apply_program_match(db, run, reasoning, pers)
         subject, body = generate_email_draft(
             db,
             run,

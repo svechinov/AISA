@@ -33,6 +33,7 @@ import { DraftAssetAttachmentsField, normalizeAttachedAssetIds } from "@/compone
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AiModelSelector } from "@/components/AiModelSelector";
 import { SmtpFarmModal } from "@/components/SmtpFarmModal";
+import { TrainingProgramsModal } from "@/components/TrainingProgramsModal";
 import { RunSetupHourlySendsChart } from "@/components/RunSetupHourlySendsChart";
 import { ManualLeadGenModal } from "@/components/ManualLeadGenModal";
 import { cn } from "@/lib/utils";
@@ -6168,6 +6169,7 @@ export default function AiBizOsHumanUI() {
               </Button>
               <AiModelSelector />
               <SmtpFarmModal apiBase={API_BASE} />
+              <TrainingProgramsModal apiBase={API_BASE} />
               <ThemeToggle />
               <Button
                 type="button"

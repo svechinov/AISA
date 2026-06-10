@@ -35,6 +35,7 @@ from app.models.run_outreach_context import RunOutreachContext  # noqa: F401
 from app.models.run_master_email_variant import RunMasterEmailVariant  # noqa: F401
 from app.models.contact_personalization import ContactPersonalization, ContactPersonalizationFact  # noqa: F401
 from app.models.template_variable import TemplateVariable  # noqa: F401
+from app.models.training_program import TrainingProgram  # noqa: F401 — register training_programs
 
 
 def _ensure_contacts_gmail_history_columns() -> None:
