@@ -108,6 +108,50 @@ def analyze_run_company_fit(
     }
 
 
+def set_run_company_fit_manual(
+    db: Session,
+    run_id: int,
+    collect_index: int,
+    status: str,
+) -> dict:
+    """Manual reject-queue override: the user's verdict beats the LLM judge's.
+
+    status: "correct" | "incorrect". The ICP gate in enrich_crm_data honors the result
+    (incorrect rows get no dossier/discovery spend).
+    """
+    if status not in ("correct", "incorrect"):
+        raise ValueError("status must be 'correct' or 'incorrect'")
+
+    run = get_run(db, run_id)
+    if not run:
+        raise ValueError("Run not found")
+    if run.closed_at is not None:
+        raise ValueError("Run is closed")
+
+    r = (
+        db.query(RunCompany)
+        .filter(RunCompany.run_id == run_id, RunCompany.collect_index == collect_index)
+        .first()
+    )
+    if not r:
+        raise ValueError("Company row not found")
+
+    now = datetime.utcnow()
+    r.ai_fit_status = status
+    r.ai_fit_reason = "Manual override"
+    r.ai_fit_checked_at = now
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    return {
+        "collect_index": collect_index,
+        "ai_fit_status": status,
+        "ai_fit_reason": "Manual override",
+        "ai_fit_checked_at": now.isoformat() + "Z",
+    }
+
+
 def analyze_run_companies_fit_pending(
     db: Session,
     run_id: int,

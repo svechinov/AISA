@@ -48,8 +48,19 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
     if company_limit is not None:
         logger.info(f"OSINT company limit active: at most {company_limit} companies this call")
 
+    # ICP gate (Phase 2): companies the AI-fit judge marked "incorrect" are skipped entirely —
+    # no dossier, no contact discovery — so Tavily/LLM tokens are not spent on off-target rows.
+    # The verdict comes from analyze-fit endpoints or a manual override; unchecked rows pass.
+    rejected_companies = {
+        (c.name or "").strip().lower() for c in companies if c.ai_fit_status == "incorrect"
+    }
+    if rejected_companies:
+        logger.info(f"ICP gate: skipping {len(rejected_companies)} rejected companies")
+
     # 1. Enrich Companies
     for company in companies:
+        if company.ai_fit_status == "incorrect":
+            continue
         # We store the dossier in the KV store
         kv = effective_run_company_extra(db, company)
         if not kv.get("osint_dossier"):
@@ -93,6 +104,9 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
             name = contact.name or ""
             company_name = contact.company or ""
             website = contact.website or ""
+
+            if (company_name or "").strip().lower() in rejected_companies:
+                continue  # ICP gate: no discovery spend on contacts of rejected companies
             
             if mode == "hardcore":
                 domain = get_domain(website)

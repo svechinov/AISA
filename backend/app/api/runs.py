@@ -3,6 +3,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -75,6 +76,7 @@ from app.services.retry_company_find_service import (
 from app.services.run_company_ai_fit_service import (
     analyze_run_companies_fit_pending,
     analyze_run_company_fit,
+    set_run_company_fit_manual,
 )
 from app.services.run_company_delete_service import delete_collected_company_at_index
 from app.services.run_companies_status_service import get_run_companies_with_status
@@ -335,6 +337,33 @@ def analyze_one_company_fit_route(
         if "Already analyzed" in msg:
             raise HTTPException(status_code=409, detail=msg) from e
         raise HTTPException(status_code=400, detail=msg) from e
+    return AnalyzeCompanyFitResult(**data)
+
+
+class SetCompanyFitBody(BaseModel):
+    status: str  # "correct" | "incorrect"
+
+
+@router.patch(
+    "/{run_id}/companies/{collect_index}/fit",
+    response_model=AnalyzeCompanyFitResult,
+)
+def set_company_fit_route(
+    run_id: int,
+    payload: SetCompanyFitBody,
+    collect_index: int = Path(ge=0),
+    db: Session = Depends(get_db),
+):
+    """Reject-queue manual override: set campaign-fit verdict by hand (beats the LLM judge).
+
+    The ICP gate in enrich skips "incorrect" companies (no dossier / contact-discovery spend).
+    """
+    if not run_exists(db, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        data = set_run_company_fit_manual(db, run_id, collect_index, payload.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return AnalyzeCompanyFitResult(**data)
 
 

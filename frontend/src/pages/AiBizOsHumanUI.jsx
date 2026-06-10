@@ -2246,6 +2246,33 @@ export default function AiBizOsHumanUI() {
     }
   };
 
+  /** PATCH …/companies/{idx}/fit — reject-queue manual override (beats the LLM judge).
+   *  The backend ICP gate stops spending tokens on "incorrect" companies. */
+  const overrideCompanyFit = async (runId, collectIndex, status) => {
+    if (!runId && runId !== 0) return;
+    setError("");
+    try {
+      await api(`/runs/${runId}/companies/${collectIndex}/fit`, {
+        method: "PATCH",
+        body: { status },
+      });
+      appendActivityLog(`Companies: fit override — idx=${collectIndex} → ${status}`);
+      setCompaniesPanel((prev) => {
+        if (!prev?.companies) return prev;
+        return {
+          ...prev,
+          companies: prev.companies.map((c) =>
+            c.collect_index === collectIndex
+              ? { ...c, ai_fit_status: status, ai_fit_reason: "Manual override" }
+              : c
+          ),
+        };
+      });
+    } catch (e) {
+      setUiError(setError, e);
+    }
+  };
+
   /**
    * Workspace-lite + optional section lists + global performance. Never GET /runs/:id here — use
    * GET /runs/:id/edit-form or GET /runs/:id/tracking-strip when a dialog/tab needs more.
@@ -7259,33 +7286,55 @@ export default function AiBizOsHumanUI() {
                                     </div>
                                   </td>
                                   <td className="max-w-[14rem] px-3 py-2 align-middle text-xs">
-                                    {row.ai_fit_status === "incorrect" ? (
-                                      <Badge
-                                        variant="destructive"
-                                        className="font-normal"
-                                        title={
-                                          typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
-                                            ? row.ai_fit_reason.trim()
-                                            : "Does not match your campaign brief"
-                                        }
-                                      >
-                                        Incorrect
-                                      </Badge>
-                                    ) : row.ai_fit_status === "correct" ? (
-                                      <Badge
-                                        variant="outline"
-                                        className="border-emerald-600/40 font-normal text-emerald-950 dark:text-emerald-100"
-                                        title={
-                                          typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
-                                            ? row.ai_fit_reason.trim()
-                                            : "Plausible fit for this campaign"
-                                        }
-                                      >
-                                        OK
-                                      </Badge>
-                                    ) : (
-                                      <span className="text-muted-foreground">—</span>
-                                    )}
+                                    <div className="flex items-center gap-1">
+                                      {row.ai_fit_status === "incorrect" ? (
+                                        <Badge
+                                          variant="destructive"
+                                          className="font-normal"
+                                          title={
+                                            typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
+                                              ? row.ai_fit_reason.trim()
+                                              : "Does not match your campaign brief"
+                                          }
+                                        >
+                                          Incorrect
+                                        </Badge>
+                                      ) : row.ai_fit_status === "correct" ? (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-emerald-600/40 font-normal text-emerald-950 dark:text-emerald-100"
+                                          title={
+                                            typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
+                                              ? row.ai_fit_reason.trim()
+                                              : "Plausible fit for this campaign"
+                                          }
+                                        >
+                                          OK
+                                        </Badge>
+                                      ) : (
+                                        <span className="text-muted-foreground">—</span>
+                                      )}
+                                      {(row.ai_fit_status === "correct" || row.ai_fit_status === "incorrect") && (
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="ghost"
+                                          className="h-5 px-1.5 text-[10px] text-muted-foreground"
+                                          title={row.ai_fit_status === "incorrect"
+                                            ? "Override: вернуть компанию в работу (correct)"
+                                            : "Override: отбраковать компанию (incorrect — без OSINT-затрат)"}
+                                          onClick={() =>
+                                            overrideCompanyFit(
+                                              selectedRun?.id,
+                                              row.collect_index,
+                                              row.ai_fit_status === "incorrect" ? "correct" : "incorrect"
+                                            )
+                                          }
+                                        >
+                                          ↺
+                                        </Button>
+                                      )}
+                                    </div>
                                   </td>
                                   <td className="whitespace-nowrap px-3 py-2 align-middle">
                                     {dossier ? (
