@@ -304,6 +304,12 @@ def sync_run_companies_from_dicts(
     for old in old_rows:
         delete_scope(db, SCOPE_RUN_COMPANY_EXTRA, old.id)
     db.query(RunCompany).filter(RunCompany.run_id == run_id).delete(synchronize_session=False)
+    # Evidence Store: rows are keyed by run_company_id, and SQLite does not enforce the FK
+    # cascade (no PRAGMA foreign_keys) — purge here so no orphans survive the re-create;
+    # persist_run_company_extra below re-indexes evidence for rows that carry a dossier.
+    from app.models.company_evidence import CompanyEvidence
+
+    db.query(CompanyEvidence).filter(CompanyEvidence.run_id == run_id).delete(synchronize_session=False)
     for i, co in enumerate(companies):
         if not isinstance(co, dict):
             continue

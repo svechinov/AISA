@@ -51,6 +51,11 @@ def generation_meta_dict_to_column_values(meta: dict) -> dict[str, Any]:
         "reasoning_angle": _reasoning_str(r, "angle"),
         "reasoning_cta_type": _reasoning_str(r, "cta_type"),
         "reasoning_key_point": _reasoning_str(r, "key_point"),
+        "reasoning_problem": _reasoning_str(r, "problem"),
+        "reasoning_solution": _reasoning_str(r, "solution"),
+        "matched_program_json": (
+            meta.get("matched_program") if isinstance(meta.get("matched_program"), dict) else None
+        ),
     }
 
 
@@ -80,10 +85,13 @@ def build_generation_meta_json_from_columns(draft: Any) -> dict:
         "angle": getattr(draft, "reasoning_angle", None) or "",
         "cta_type": getattr(draft, "reasoning_cta_type", None) or "",
         "key_point": getattr(draft, "reasoning_key_point", None) or "",
+        "problem": getattr(draft, "reasoning_problem", None) or "",
+        "solution": getattr(draft, "reasoning_solution", None) or "",
     }
     vr = getattr(draft, "validation_retries", None)
     return {
         "reasoning": reasoning,
+        "matched_program": getattr(draft, "matched_program_json", None),
         "style_mode": getattr(draft, "generation_style_mode", None) or "",
         "validation_score": getattr(draft, "validation_score", None),
         "validation_issues": issues,

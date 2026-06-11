@@ -11,28 +11,53 @@ def _matched_program_asset_id(meta: dict | None) -> int | None:
     """Asset id of the matched catalog program (Feature 1) — auto-attached to the new draft."""
     if not isinstance(meta, dict):
         return None
-    mp = (meta.get("reasoning") or {}).get("matched_program")
+    mp = meta.get("matched_program")
     if not isinstance(mp, dict):
         return None
     aid = mp.get("asset_id")
     return aid if isinstance(aid, int) else None
 
 
-def _attach_matched_program_assets(db: Session, created: list) -> int:
-    from app.models.asset import Asset
-    from app.repositories.draft_attachment_repo import replace_email_draft_assets
+def sync_matched_program_attachment(db: Session, draft, meta: dict | None) -> bool:
+    """Keep the draft's auto-attached program PDF in line with the (re)generated meta.
 
+    Adds the newly matched program's asset, and removes the PREVIOUS program's asset when the
+    match changed or disappeared (so a regenerated email never ships a stale brochure). Manual
+    attachments are preserved — only the old matched asset is touched. Call BEFORE the new meta
+    is applied to the draft (the old match is read from draft.matched_program_json).
+    Returns True if attachments changed.
+    """
+    from app.models.asset import Asset
+    from app.repositories.draft_attachment_repo import (
+        list_asset_ids_for_email_draft,
+        replace_email_draft_assets,
+    )
+
+    new_aid = _matched_program_asset_id(meta)
+    old_mp = getattr(draft, "matched_program_json", None)
+    old_aid = old_mp.get("asset_id") if isinstance(old_mp, dict) else None
+
+    current = list_asset_ids_for_email_draft(db, draft.id)
+    desired = list(current)
+    if isinstance(old_aid, int) and old_aid != new_aid and old_aid in desired:
+        desired = [a for a in desired if a != old_aid]
+    if new_aid is not None and new_aid not in desired:
+        asset = db.get(Asset, new_aid)
+        if asset and asset.status == "active":
+            desired = desired + [new_aid]
+        else:
+            logger.warning(f"Matched program asset {new_aid} missing/inactive — draft {draft.id} gets no attachment")
+    if desired == current:
+        return False
+    replace_email_draft_assets(db, draft.id, desired)
+    return True
+
+
+def _attach_matched_program_assets(db: Session, created: list) -> int:
     attached = 0
     for draft in created:
-        aid = _matched_program_asset_id(getattr(draft, "generation_meta_json", None))
-        if aid is None:
-            continue
-        asset = db.get(Asset, aid)
-        if not asset or asset.status != "active":
-            logger.warning(f"Matched program asset {aid} missing/inactive — draft {draft.id} gets no attachment")
-            continue
-        replace_email_draft_assets(db, draft.id, [aid])
-        attached += 1
+        if sync_matched_program_attachment(db, draft, getattr(draft, "generation_meta_json", None)):
+            attached += 1
     if attached:
         db.commit()
     return attached

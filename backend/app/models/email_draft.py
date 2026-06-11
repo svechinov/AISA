@@ -50,3 +50,8 @@ class EmailDraft(Base):
     reasoning_angle: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning_cta_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning_key_point: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 5-slot skeleton (problem/solution) + Feature 1 matched program — without these the
+    # startup blob backfill+strip would erase them on the first restart after generation.
+    reasoning_problem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reasoning_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    matched_program_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -363,7 +363,8 @@ def set_company_fit_route(
     try:
         data = set_run_company_fit_manual(db, run_id, collect_index, payload.status)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        code = 404 if "not found" in str(e).lower() else 400
+        raise HTTPException(status_code=code, detail=str(e)) from e
     return AnalyzeCompanyFitResult(**data)
 
 

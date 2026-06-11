@@ -13,6 +13,23 @@ from app.schemas.training_program import (
 
 router = APIRouter(prefix="/training-programs", tags=["training-programs"])
 
+ALLOWED_STATUSES = ("active", "archived")
+
+
+def _normalize_fields(data: dict) -> dict:
+    """One normalization rule for create AND update: strip list items / drop empties, strip name,
+    validate status (a typo like 'activ' would silently hide the program from the matcher)."""
+    for field in ("target_pains", "bullets"):
+        if data.get(field) is not None:
+            data[field] = [s.strip() for s in data[field] if s and s.strip()]
+    if data.get("name") is not None:
+        data["name"] = data["name"].strip()
+        if not data["name"]:
+            raise HTTPException(status_code=400, detail="name must not be empty")
+    if data.get("status") is not None and data["status"] not in ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {ALLOWED_STATUSES}")
+    return data
+
 
 @router.get("", response_model=list[TrainingProgramRead])
 def list_training_programs_route(
@@ -27,16 +44,8 @@ def list_training_programs_route(
 
 @router.post("", response_model=TrainingProgramRead)
 def create_training_program_route(payload: TrainingProgramCreate, db: Session = Depends(get_db)):
-    row = TrainingProgram(
-        name=payload.name.strip(),
-        description=payload.description,
-        target_pains=[p.strip() for p in payload.target_pains if p and p.strip()],
-        audience=payload.audience,
-        format=payload.format,
-        bullets=[b.strip() for b in payload.bullets if b and b.strip()],
-        asset_id=payload.asset_id,
-        status=payload.status or "active",
-    )
+    data = _normalize_fields(payload.dict())
+    row = TrainingProgram(**data)
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -52,12 +61,7 @@ def update_training_program_route(
     row = db.get(TrainingProgram, program_id)
     if not row:
         raise HTTPException(status_code=404, detail="Training program not found")
-    data = payload.dict(exclude_unset=True)
-    for field in ("target_pains", "bullets"):
-        if field in data and data[field] is not None:
-            data[field] = [s.strip() for s in data[field] if s and s.strip()]
-    if "name" in data and data["name"]:
-        data["name"] = data["name"].strip()
+    data = _normalize_fields(payload.dict(exclude_unset=True))
     for k, v in data.items():
         setattr(row, k, v)
     db.commit()

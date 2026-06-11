@@ -133,14 +133,18 @@ def evidence_summary_for_run(db: Session, run_id: int) -> dict[str, Any]:
 
 def backfill_evidence_for_run(db: Session, run_id: int) -> dict[str, int]:
     """Index existing dossiers (companies enriched before the Evidence Store existed)."""
-    from app.utils.run_company_extra import effective_run_company_extra
+    from app.constants.entity_kv_scope import SCOPE_RUN_COMPANY_EXTRA
+    from app.utils.entity_kv_storage import get_kv_maps_for_entities
 
     companies = db.query(RunCompany).filter(RunCompany.run_id == run_id).all()
+    # One IN-query for all KV maps instead of a SELECT per company (N+1 on the live SQLite).
+    kv_by_id = get_kv_maps_for_entities(
+        db, SCOPE_RUN_COMPANY_EXTRA, [rc.id for rc in companies]
+    ) if companies else {}
     synced = 0
     rows_written = 0
     for rc in companies:
-        kv = effective_run_company_extra(db, rc)
-        dossier = kv.get("osint_dossier")
+        dossier = (kv_by_id.get(rc.id) or {}).get("osint_dossier") or (rc.extra_json or {}).get("osint_dossier")
         if not dossier:
             continue
         n = sync_company_evidence_from_dossier(db, rc, dossier)

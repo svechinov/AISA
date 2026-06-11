@@ -25,12 +25,8 @@ export function TrainingProgramsModal({ apiBase }) {
   const emptyForm = { name: "", description: "", target_pains: "", audience: "", format: "", bullets: "", asset_id: "" };
   const [form, setForm] = useState(emptyForm);
 
-  const authHeaders = () => {
-    const token = localStorage.getItem("aibizos_auth_token");
-    const h = { "Content-Type": "application/json" };
-    if (token) h["Authorization"] = `Bearer ${token}`;
-    return h;
-  };
+  // Authorization is injected by the global fetch interceptor (src/main.jsx) — do not duplicate it here.
+  const authHeaders = () => ({ "Content-Type": "application/json" });
 
   const fetchAll = async () => {
     setLoading(true);

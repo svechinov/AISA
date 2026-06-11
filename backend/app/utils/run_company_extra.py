@@ -26,3 +26,20 @@ def persist_run_company_extra(db: Session, row: RunCompany, data: dict[str, Any]
     raw.pop("contact_status", None)
     replace_kv_dict(db, SCOPE_RUN_COMPANY_EXTRA, row.id, raw or None)
     row.extra_json = {}
+    # Evidence Store: this is the single choke point where dossiers are written (enrich,
+    # row re-creation in sync_run_companies_from_dicts, future writers) — index here so
+    # company_evidence can never silently drift from the KV dossier. Never fatal.
+    if "osint_dossier" in raw:
+        try:
+            from app.services.evidence_store import sync_company_evidence_from_dossier
+
+            # SAVEPOINT: a failed sync rolls back only itself — the dossier persist above
+            # survives and the session stays usable for the rest of the enrich loop.
+            with db.begin_nested():
+                sync_company_evidence_from_dossier(db, row, raw.get("osint_dossier"))
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Evidence sync failed for run_company id=%s (dossier kept, index stale)", row.id
+            )

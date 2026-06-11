@@ -91,6 +91,21 @@ def _ensure_contacts_email_health_columns() -> None:
                 )
 
 
+def _ensure_email_drafts_feature1_columns() -> None:
+    """reasoning_problem / reasoning_solution / matched_program_json (Feature 1 + 5-slot meta)."""
+    insp = inspect(engine)
+    if "email_drafts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("email_drafts")}
+    with engine.begin() as conn:
+        if "reasoning_problem" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_problem TEXT"))
+        if "reasoning_solution" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_solution TEXT"))
+        if "matched_program_json" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN matched_program_json JSON"))
+
+
 def _ensure_email_drafts_tracking_columns() -> None:
     insp = inspect(engine)
     if "email_drafts" not in insp.get_table_names():
@@ -1069,6 +1084,7 @@ def ensure_schema() -> None:
     _migrate_run_setups_from_legacy()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
+    _ensure_email_drafts_feature1_columns()
     _ensure_contacts_email_health_columns()
     _ensure_contacts_gmail_history_columns()
     _ensure_contacts_leadgen_columns()

@@ -8,6 +8,7 @@ from app.models.run_company import RunCompany
 from app.services.tavily_osint import get_company_dossier, discover_contact_email
 from app.services.hardcore_osint import gather_raw_entities, find_valid_email, get_domain
 from app.utils.run_company_extra import effective_run_company_extra, persist_run_company_extra
+from app.workers.contacts_worker import FRESHNESS_MIN_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,16 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
     # ICP gate (Phase 2): companies the AI-fit judge marked "incorrect" are skipped entirely —
     # no dossier, no contact discovery — so Tavily/LLM tokens are not spent on off-target rows.
     # The verdict comes from analyze-fit endpoints or a manual override; unchecked rows pass.
-    rejected_companies = {
-        (c.name or "").strip().lower() for c in companies if c.ai_fit_status == "incorrect"
-    }
-    if rejected_companies:
-        logger.info(f"ICP gate: skipping {len(rejected_companies)} rejected companies")
+    # Matching uses the same entity-key machinery as the UI badge (contact_company_ai_fit),
+    # so name-spelling/website variants can't make the gate and the badge disagree.
+    from app.services.run_companies_status_service import _contact_matches_company, _entity_keys
+
+    rejected_keys: set[str] = set()
+    for c in companies:
+        if c.ai_fit_status == "incorrect":
+            rejected_keys |= _entity_keys({"name": c.name, "website": c.website})
+    if rejected_keys:
+        logger.info(f"ICP gate: rejected-company keys active ({len(rejected_keys)})")
 
     # 1. Enrich Companies
     for company in companies:
@@ -80,15 +86,10 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                     logger.warning(f"OSINT dossier for {name} failed/empty — not persisted (will retry next run)")
                 else:
                     kv["osint_dossier"] = dossier
+                    # persist_run_company_extra also indexes the dossier into company_evidence
+                    # (Evidence Store hook at the single dossier-write choke point).
                     persist_run_company_extra(db, company, kv)
                     companies_processed += 1
-                    # Evidence Store: index the dossier's evidence/hypotheses/triggers as rows
-                    # (queryable copy; KV dossier stays the source of truth). Never fatal.
-                    try:
-                        from app.services.evidence_store import sync_company_evidence_from_dossier
-                        sync_company_evidence_from_dossier(db, company, dossier)
-                    except Exception as ev_exc:
-                        logger.warning(f"Evidence sync failed for {name}: {ev_exc}")
 
     # 2. Enrich Contacts (missing emails)
     # Verified-LPR discovery (hardcore: ЕГРЮЛ/dorks + SMTP-verified email) is now the default path.
@@ -105,7 +106,7 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
             company_name = contact.company or ""
             website = contact.website or ""
 
-            if (company_name or "").strip().lower() in rejected_companies:
+            if _contact_matches_company({"name": company_name, "website": website}, rejected_keys):
                 continue  # ICP gate: no discovery spend on contacts of rejected companies
             
             if mode == "hardcore":
@@ -123,10 +124,26 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                 
                 target_name = name
                 target_role = contact.role or ""
-                
-                if not target_name and leaders:
+
+                if target_name:
+                    # Contact already has a person name (e.g. CRM import) — run the verified
+                    # path for THAT person: permutations + SMTP against the company domain.
+                    # (Before the hardcore default flip these contacts went through the
+                    # unverified Tavily guess; never invalidate them without an attempt.)
+                    v_email = find_valid_email(target_name, domain, mask)
+                    if v_email:
+                        contact.email = v_email
+                        contact.status = "valid"
+                        contact.source_json = {
+                            **(contact.source_json or {}),
+                            "email_verification": "verified",
+                        }
+                        emails_found += 1
+                    else:
+                        contact.status = "invalid"
+                elif leaders:
                     # Filter stale contacts (assuming JSON has freshness_score)
-                    good_leaders = [l for l in leaders if l.get('freshness_score', 0) >= 30]
+                    good_leaders = [l for l in leaders if l.get('freshness_score', 0) >= FRESHNESS_MIN_DEFAULT]
                     if not good_leaders:
                         good_leaders = leaders
                         

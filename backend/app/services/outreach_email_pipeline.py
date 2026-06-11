@@ -118,11 +118,13 @@ def generate_email_reasoning(
     master_variant: dict[str, str] | None,
     style_mode: str,
     regenerate_hint: str = "",
+    pers: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Internal planning JSON — not the email itself."""
     role = _contact_role_for_prompt(db, contact)
     brief = _run_brief_blocks(run)
-    pers = _serialize_personalization(db, contact)
+    if pers is None:
+        pers = _serialize_personalization(db, contact)  # standalone callers; compose passes it in
     rules = _rules(db, run.id)
     style_block = style_prompt_fragment(style_mode)
     
@@ -209,10 +211,12 @@ def generate_email_draft(
     style_mode: str,
     prior_issues: list[str] | None = None,
     regenerate_hint: str = "",
+    pers: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Final subject + body; must reflect personalization and reasoning."""
     role = _contact_role_for_prompt(db, contact)
-    pers = _serialize_personalization(db, contact)
+    if pers is None:
+        pers = _serialize_personalization(db, contact)
     rules = _rules(db, run.id)
     brief = _run_brief_blocks(run)
     style_block = style_prompt_fragment(style_mode)
@@ -254,8 +258,8 @@ def generate_email_draft(
         "- If personalization.osint_dossier is non-empty (and no person_osint), use a concrete fact from it to create a powerful 'Product Hook'.\n"
         "- Address their management hunger (lack of strong leaders, mergers, scaling issues) or sales problems if apparent from the dossier.\n"
         "- Offer ONE specific, fast Quick Win step (e.g., training, facilitation session, workshop, express audit).\n"
-        "- If Internal reasoning contains `matched_program`, the solution MUST name that program explicitly "
-        "and mention 1-2 of its bullets; if a brochure is attached, you may reference it (e.g. 'подробности во вложении').\n"
+        "- If the `solution` slot names a concrete training program, keep the program name verbatim "
+        "and its key points; you may reference an attached brochure (e.g. 'подробности во вложении').\n"
         "- The CTA (Call to Action) must be a short 15-minute call.\n"
         "- DO NOT use IT jargon. Use words like 'external partner', 'development of managerial competencies'.\n"
         "- Avoid generic openers: jump straight into the fact or trigger.\n"
@@ -304,17 +308,20 @@ def generate_email_draft(
     return subject, body
 
 
-def _apply_program_match(db: Session, run: Any, reasoning: dict, pers: dict[str, Any]) -> None:
+def _apply_program_match(
+    db: Session, run: Any, reasoning: dict, pers: dict[str, Any]
+) -> dict[str, Any] | None:
     """Feature 1: replace the generic `solution` slot with a concrete catalog program when one fits.
 
-    Mutates `reasoning` in place: solution/key_point get the program-grounded text and
-    `matched_program` carries name/bullets/asset_id — the draft prompt sees it (reasoning is
-    serialized into the prompt), and persistence auto-attaches the program's PDF from it.
-    No-op (generic offer kept) when the catalog is empty, nothing fits, or the matcher fails.
+    Mutates reasoning's solution/key_point with the program-grounded text (the program name and
+    bullets live in that text — that is all the draft model needs) and returns the match record
+    for generation meta (meta["matched_program"]: ids/fit/rationale stay OUT of the LLM prompt;
+    persistence reads asset_id from the meta to auto-attach the PDF).
+    Returns None (generic offer kept) when the catalog is empty, nothing fits, or the matcher fails.
     """
     problem = (reasoning.get("problem") or "").strip()
     if not problem:
-        return
+        return None
     try:
         from app.services.program_matcher import match_program
 
@@ -328,12 +335,12 @@ def _apply_program_match(db: Session, run: Any, reasoning: dict, pers: dict[str,
         )
     except Exception as exc:
         logger.warning("Program matcher failed (generic offer kept): %s", exc, exc_info=False)
-        return
+        return None
     if not match:
-        return
+        return None
     reasoning["solution"] = match["solution_text"]
     reasoning["key_point"] = match["solution_text"]
-    reasoning["matched_program"] = {
+    return {
         "program_id": match["program_id"],
         "name": match["name"],
         "asset_id": match["asset_id"],
@@ -354,6 +361,7 @@ def _draft_without_reasoning(
     style_mode: str,
     prior_issues: list[str] | None = None,
     regenerate_hint: str = "",
+    pers: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Single-shot draft if reasoning step fails."""
     return generate_email_draft(
@@ -373,6 +381,7 @@ def _draft_without_reasoning(
         style_mode=style_mode,
         prior_issues=prior_issues,
         regenerate_hint=regenerate_hint,
+        pers=pers,
     )
 
 
@@ -433,6 +442,7 @@ def compose_outreach_subject_body(
         "cta_type": "",
         "key_point": "",
     }
+    matched_program: dict[str, Any] | None = None
 
     try:
         reasoning = generate_email_reasoning(
@@ -443,8 +453,9 @@ def compose_outreach_subject_body(
             master_variant=master_variant,
             style_mode=style_mode,
             regenerate_hint=reg_hint,
+            pers=pers,
         )
-        _apply_program_match(db, run, reasoning, pers)
+        matched_program = _apply_program_match(db, run, reasoning, pers)
         subject, body = generate_email_draft(
             db,
             run,
@@ -454,6 +465,7 @@ def compose_outreach_subject_body(
             master_variant=master_variant,
             style_mode=style_mode,
             regenerate_hint=reg_hint,
+            pers=pers,
         )
     except Exception as exc:
         logger.warning(
@@ -471,6 +483,7 @@ def compose_outreach_subject_body(
             master_variant=master_variant,
             style_mode=style_mode,
             regenerate_hint=reg_hint,
+            pers=pers,
         )
 
     val = validate_outbound_email(subject, body, pers, peer_bodies)
@@ -503,6 +516,7 @@ def compose_outreach_subject_body(
                     style_mode=style_mode,
                     prior_issues=prior,
                     regenerate_hint=reg_hint,
+                    pers=pers,
                 )
             else:
                 subject, body = _draft_without_reasoning(
@@ -514,6 +528,7 @@ def compose_outreach_subject_body(
                     style_mode=style_mode,
                     prior_issues=prior,
                     regenerate_hint=reg_hint,
+                    pers=pers,
                 )
         except Exception as exc:
             logger.warning(
@@ -533,6 +548,7 @@ def compose_outreach_subject_body(
         validation_retries=retries,
         pipeline_source="llm",
     )
+    meta["matched_program"] = matched_program  # Feature 1: persistence attaches the PDF from here
     pt = (prompt_setup_text or "").strip()
     meta["prompt_setup_text_used"] = pt if pt else None
     return subject, body, meta

@@ -3,6 +3,8 @@ import os
 
 from sqlalchemy.orm import Session
 
+from app.utils.env_utils import env_int, env_truthy
+
 from app.repositories.run_repo import get_run
 from app.repositories.run_company_repo import list_run_companies_sparse
 from app.services.apollo_service import apollo_configured, try_find_contacts_via_apollo
@@ -16,27 +18,21 @@ from app.services.rules_service import get_effective_rules_from_run
 logger = logging.getLogger(__name__)
 
 
-def _truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+_truthy = env_truthy
+
+# Default staleness floor. The same value appears as the example score in the deep-OSINT prompt
+# rubric and as the discovery filter in osint_worker (imported from here) — one constant, не два литерала.
+FRESHNESS_MIN_DEFAULT = 30
 
 
 def _freshness_min() -> int:
-    """Leaders below this freshness_score are flagged stale (mirrors hardcore_osint threshold)."""
-    raw = os.environ.get("VALIDATE_FRESHNESS_MIN", "").strip()
-    try:
-        return int(raw) if raw else 30
-    except ValueError:
-        return 30
+    """Leaders below this freshness_score are flagged stale (same floor as discovery in osint_worker)."""
+    return env_int("VALIDATE_FRESHNESS_MIN", FRESHNESS_MIN_DEFAULT)
 
 
 def _smtp_probe_max() -> int:
     """Cap on SMTP RCPT probes per validate call (cost/time/IP-reputation control)."""
-    raw = os.environ.get("VALIDATE_SMTP_MAX", "").strip()
-    try:
-        n = int(raw)
-        return n if n > 0 else 25
-    except ValueError:
-        return 25
+    return env_int("VALIDATE_SMTP_MAX", 25, min_value=1)
 
 
 def _smtp_probe(email: str, mx_cache: dict[str, str | None]) -> str:

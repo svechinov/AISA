@@ -4084,10 +4084,10 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  const runDeepOsint = async (contactId) => {
+  const runDeepOsint = async (contactId, { force = false } = {}) => {
     setDeepOsintBusyId(contactId);
     try {
-      await api(`/contacts/${contactId}/deep_osint`, { method: "POST" });
+      await api(`/contacts/${contactId}/deep_osint${force ? "?force=true" : ""}`, { method: "POST" });
       toast({ title: "OSINT Collected", description: "Deep OSINT data gathered successfully." });
       if (selectedRun?.id) {
         loadRunDetails(selectedRun.id, {
@@ -4097,7 +4097,21 @@ export default function AiBizOsHumanUI() {
         });
       }
     } catch (err) {
-      toast({ title: "OSINT Error", description: err.message || String(err), variant: "destructive" });
+      const msg = err.message || String(err);
+      // Agent B verification gate (422) — offer the force escape hatch instead of a raw error.
+      if (!force && msg.includes("Agent B gate")) {
+        setDeepOsintBusyId(null);
+        if (confirm(
+          "Контакт не прошёл верификацию (нет подтверждённого email или SMTP отверг ящик).\n" +
+          "Запустить Deep OSINT принудительно? Это потратит токены на неверифицированный лид."
+        )) {
+          return runDeepOsint(contactId, { force: true });
+        }
+        return;
+      }
+      let detail = msg;
+      try { detail = JSON.parse(msg)?.detail || msg; } catch { /* not JSON */ }
+      toast({ title: "OSINT Error", description: detail, variant: "destructive" });
     } finally {
       setDeepOsintBusyId(null);
     }

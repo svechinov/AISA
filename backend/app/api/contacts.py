@@ -261,11 +261,18 @@ def deep_osint_contact_route(
     if not force:
         email = (contact.email or "").strip()
         has_email = bool(email) and "@" in email
-        if not has_email or contact.status != "valid":
+        sj = contact.source_json if isinstance(contact.source_json, dict) else {}
+        smtp_rejected = sj.get("email_verification") == "rejected"
+        if not has_email or contact.status != "valid" or smtp_rejected:
+            reason = (
+                "the SMTP probe rejected this mailbox"
+                if smtp_rejected
+                else "contact needs a verified email (status='valid')"
+            )
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "Agent B gate: contact needs a verified email (status='valid'). "
+                    f"Agent B gate: {reason}. "
                     "Run validation/enrichment first, or retry with force=true."
                 ),
             )
