@@ -353,3 +353,70 @@ def sync_run_companies_from_dicts(
         db.commit()
     else:
         db.flush()
+
+
+def append_companies_to_run(
+    db: Session,
+    run_id: int,
+    companies: list[dict],
+    *,
+    source: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Append companies to a run WITHOUT touching existing rows (unlike the replace-all sync).
+
+    Dedupes against existing rows via the shared entity-key machinery (name + website),
+    continues collect_index, and records the provenance dict under the ``company_source``
+    KV key (Phase 4 sources: rating URL / criterion search / tender intent).
+    Returns {"added": [names], "skipped_duplicates": int}.
+    """
+    from sqlalchemy import func
+
+    from app.services.run_companies_status_service import _entity_keys
+
+    existing = db.query(RunCompany).filter(RunCompany.run_id == run_id).all()
+    seen_keys: set[str] = set()
+    for r in existing:
+        seen_keys |= _entity_keys({"name": r.name, "website": r.website})
+
+    next_index = (
+        db.query(func.max(RunCompany.collect_index))
+        .filter(RunCompany.run_id == run_id)
+        .scalar()
+        or 0
+    ) + 1
+
+    added: list[str] = []
+    skipped = 0
+    for co in companies:
+        if not isinstance(co, dict):
+            continue
+        name = str(co.get("name") or "").strip()
+        website = str(co.get("website") or "").strip()
+        if not name:
+            continue
+        keys = _entity_keys({"name": name, "website": website})
+        if keys & seen_keys:
+            skipped += 1
+            continue
+        seen_keys |= keys
+        rc = RunCompany(
+            run_id=run_id,
+            collect_index=next_index,
+            name=name,
+            website=website or None,
+            extra_json={},
+        )
+        db.add(rc)
+        db.flush()
+        extra: dict[str, Any] = {}
+        if source:
+            extra["company_source"] = {**source, **({"note": co["note"]} if co.get("note") else {})}
+        if extra:
+            persist_run_company_extra(db, rc, extra)
+        added.append(name)
+        next_index += 1
+
+    if commit:
+        db.commit()
+    return {"added": added, "skipped_duplicates": skipped}

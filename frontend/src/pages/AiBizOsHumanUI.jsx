@@ -34,6 +34,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { AiModelSelector } from "@/components/AiModelSelector";
 import { SmtpFarmModal } from "@/components/SmtpFarmModal";
 import { TrainingProgramsModal } from "@/components/TrainingProgramsModal";
+import { CompanySourcesModal } from "@/components/CompanySourcesModal";
 import { RunSetupHourlySendsChart } from "@/components/RunSetupHourlySendsChart";
 import { ManualLeadGenModal } from "@/components/ManualLeadGenModal";
 import { cn } from "@/lib/utils";
@@ -7067,6 +7068,26 @@ export default function AiBizOsHumanUI() {
                             "AI analysis"
                           )}
                         </Button>
+                      ) : null}
+                      {selectedRun && !selectedRun.closed_at ? (
+                        <CompanySourcesModal
+                          apiBase={API_BASE}
+                          runId={selectedRun.id}
+                          onCompaniesAdded={async () => {
+                            const rid = selectedRun?.id;
+                            if (!rid) return;
+                            try {
+                              const ps = new URLSearchParams();
+                              ps.set("limit", String(COMPANIES_FETCH_MAX));
+                              ps.set("offset", "0");
+                              const snap = await api(`/runs/${rid}/companies?${ps}`, {
+                                timeoutMs: COMPANIES_HTTP_TIMEOUT_MS,
+                              });
+                              setCompaniesPanel(normalizeCompaniesPanelResponse(snap, 0));
+                              refreshRunMetricsOnly(rid);
+                            } catch { /* table refreshes on next visit */ }
+                          }}
+                        />
                       ) : null}
                     </div>
                   </div>
