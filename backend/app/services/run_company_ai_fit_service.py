@@ -16,23 +16,37 @@ logger = logging.getLogger(__name__)
 
 
 def _prompt(run, company_name: str, company_website: str) -> str:
+    from app.services.run_context_service import get_prompt_setup_text
+
     ctx = get_effective_context(run)
     brief = build_master_prompt_text(ctx)
     mp = coalesce_str(getattr(run, "master_prompt", None))
     block = f"{mp}\n\n---\n{brief}" if mp else brief
+    offer = get_prompt_setup_text(run)
+    offer_block = f"What we SELL (our offer/persona):\n{offer}\n\n" if offer else ""
     return (
-        "You evaluate whether a REAL company is a plausible target for THIS specific outreach campaign.\n\n"
-        "A company is **incorrect** if it clearly cannot match what the campaign seeks "
-        "(e.g. a venture accelerator when the campaign seeks backpack manufacturers; "
-        "a museum gift shop when the campaign seeks OEM/licensing manufacturers), "
-        "based only on public knowledge and the company name + website domain.\n\n"
+        "You decide whether a REAL company is a plausible PROSPECT (a potential BUYER) for THIS "
+        "outreach campaign — i.e. a company we would sell our offer TO.\n\n"
+        "CRITICAL framing:\n"
+        "- The prospect's OWN industry is almost never disqualifying. A retailer, a bank, a factory, "
+        "an agro holding can all be valid prospects for e.g. a training/consulting offer — what matters "
+        "is whether they plausibly have the NEED or pain the offer addresses (large workforce, hiring, "
+        "scaling, management/sales challenges, etc.).\n"
+        "- Do NOT require the company to be in the same industry as the offer. Selling training to a "
+        "retailer is normal; the retailer is NOT 'off-target' just because it is not a training company.\n\n"
+        "Mark **incorrect** ONLY when:\n"
+        "- the company is a COMPETITOR / provider of the SAME offer (e.g. a training/consulting provider "
+        "when we sell training — they are peers, not buyers); or\n"
+        "- it is not a real buyer organization (an individual, a job board, an event page, a government "
+        "procurement agency that purchases on behalf of others rather than for itself); or\n"
+        "- it clearly cannot have the need the offer addresses per the campaign brief.\n"
+        "Otherwise mark **correct**.\n\n"
         "Return ONLY valid JSON (no markdown) with this exact shape:\n"
         '{"fit": true or false, "reason": "one short English sentence"}\n\n'
-        "- fit=true: the company could reasonably be a target for this campaign.\n"
-        "- fit=false: the company is clearly off-target or irrelevant.\n\n"
         f"Company name: {company_name}\n"
         f"Website: {company_website or '—'}\n\n"
-        "Campaign context:\n"
+        f"{offer_block}"
+        "Who we target (campaign brief):\n"
         f"{block}\n"
     )
 
