@@ -47,6 +47,12 @@ def delete_collected_company_at_index(db: Session, run_id: int, collect_index: i
     removed = delete_contacts_cascade(db, contact_ids, commit=False)
 
     delete_scope(db, SCOPE_RUN_COMPANY_EXTRA, rc.id)
+    # Evidence Store rows are keyed by run_company_id; SQLite does not enforce the FK cascade,
+    # so purge them here or they orphan (and keep inflating evidence_summary / UI counts).
+    from app.models.company_evidence import CompanyEvidence
+    db.query(CompanyEvidence).filter(CompanyEvidence.run_company_id == rc.id).delete(
+        synchronize_session=False
+    )
     db.delete(rc)
     db.commit()
 

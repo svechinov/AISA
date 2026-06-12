@@ -665,6 +665,21 @@ def _ensure_run_scoped_performance_indexes() -> None:
             conn.execute(text(f"CREATE INDEX IF NOT EXISTS {ix_name} ON {table} {columns}"))
 
 
+def _ensure_run_setups_icp_columns() -> None:
+    """ICP filter columns (Phase 6): icp_min_employees / icp_max_employees / icp_criteria_json."""
+    insp = inspect(engine)
+    if "run_setups" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_setups")}
+    with engine.begin() as conn:
+        if "icp_min_employees" not in columns:
+            conn.execute(text("ALTER TABLE run_setups ADD COLUMN icp_min_employees INTEGER"))
+        if "icp_max_employees" not in columns:
+            conn.execute(text("ALTER TABLE run_setups ADD COLUMN icp_max_employees INTEGER"))
+        if "icp_criteria_json" not in columns:
+            conn.execute(text("ALTER TABLE run_setups ADD COLUMN icp_criteria_json JSON"))
+
+
 def _migrate_run_setups_from_legacy() -> None:
     """Merge prompt/signature into run_setups only; strip context_json.prompt_setup_text and runs.sender_signature_html."""
     import logging
@@ -1082,6 +1097,7 @@ def ensure_schema() -> None:
     _ensure_run_outreach_context_columns()
     _ensure_run_input_goal_column()
     _migrate_run_setups_from_legacy()
+    _ensure_run_setups_icp_columns()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
     _ensure_email_drafts_feature1_columns()

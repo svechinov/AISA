@@ -1564,6 +1564,11 @@ export default function AiBizOsHumanUI() {
   const [promptDraftText, setPromptDraftText] = useState(DEFAULT_DRAFT_PROMPT);
   const [promptLanguage, setPromptLanguage] = useState("Russian");
   const [promptOsintDiscoveryMode, setPromptOsintDiscoveryMode] = useState("hardcore");
+  // ICP filter (Phase 6): employee band + criteria. Empty string = no bound on that side.
+  const [icpMinEmployees, setIcpMinEmployees] = useState("100");
+  const [icpMaxEmployees, setIcpMaxEmployees] = useState("3000");
+  const [icpOkvedExclude, setIcpOkvedExclude] = useState("");
+  const [icpRegions, setIcpRegions] = useState("");
   const [promptTab, setPromptTab] = useState("general");
   const [promptSetupSaving, setPromptSetupSaving] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
@@ -4845,6 +4850,11 @@ export default function AiBizOsHumanUI() {
         setPromptCompanySearchText(d.company_search_prompt || DEFAULT_COMPANY_SEARCH_PROMPT);
         setPromptOsintDiscoveryMode(d.osint_discovery_mode || "hardcore");
         setPromptLanguage(d.language || "Russian");
+        setIcpMinEmployees(d.icp_min_employees == null ? "" : String(d.icp_min_employees));
+        setIcpMaxEmployees(d.icp_max_employees == null ? "" : String(d.icp_max_employees));
+        const crit = d.icp_criteria_json || {};
+        setIcpOkvedExclude((crit.okved_exclude || []).join(", "));
+        setIcpRegions((crit.regions || []).join(", "));
       }
     } catch (e) {
       setUiError(setError, e);
@@ -4873,7 +4883,14 @@ export default function AiBizOsHumanUI() {
             reasoning_prompt: promptReasoningText,
             draft_prompt: promptDraftText,
             osint_discovery_mode: promptOsintDiscoveryMode,
-            language: promptLanguage
+            language: promptLanguage,
+            icp_min_employees: icpMinEmployees.trim() === "" ? null : Number(icpMinEmployees),
+            icp_max_employees: icpMaxEmployees.trim() === "" ? null : Number(icpMaxEmployees),
+            icp_clear_band: true, // band fields are authoritative from this form (null = no bound)
+            icp_criteria_json: {
+              okved_exclude: icpOkvedExclude.split(",").map((s) => s.trim()).filter(Boolean),
+              regions: icpRegions.split(",").map((s) => s.trim()).filter(Boolean),
+            },
           },
           timeoutMs: RUN_SETUP_PATCH_TIMEOUT_MS,
         });
@@ -8515,6 +8532,34 @@ export default function AiBizOsHumanUI() {
                           { value: "hardcore", label: "Hardcore (Local OSINT)" }
                         ]}
                       />
+                    </div>
+                    <div className="rounded-lg border p-3 space-y-2.5">
+                      <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{t("ICP-фильтр (численность и критерии)")}</div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Применяется детерминированно ДО ИИ-анализа: компании вне диапазона отбраковываются без затрат токенов. Требует подключённого провайдера фирмографики (Dadata); неизвестная численность не бракуется.
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium">Сотрудников, мин</label>
+                          <Input type="number" placeholder="100" value={icpMinEmployees}
+                                 onChange={(e) => setIcpMinEmployees(e.target.value)} />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium">Сотрудников, макс</label>
+                          <Input type="number" placeholder="3000" value={icpMaxEmployees}
+                                 onChange={(e) => setIcpMaxEmployees(e.target.value)} />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium">Исключить ОКВЭД (через запятую)</label>
+                        <Input placeholder="84, 85 (госуправление, образование)" value={icpOkvedExclude}
+                               onChange={(e) => setIcpOkvedExclude(e.target.value)} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium">Регионы (через запятую, пусто = любой)</label>
+                        <Input placeholder="Москва, Московская, Санкт-Петербург" value={icpRegions}
+                               onChange={(e) => setIcpRegions(e.target.value)} />
+                      </div>
                     </div>
                     <div>
                       <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider text-primary">{t("Мастер-промпт (контекст)")}</div>

@@ -247,8 +247,15 @@ def update_run_prompt_setup(
     deep_osint_prompt: str | None = None,
     osint_discovery_mode: str | None = None,
     language: str | None = None,
+    icp_min_employees: int | None = None,
+    icp_max_employees: int | None = None,
+    icp_criteria_json: dict | None = None,
+    icp_unset: bool = False,
 ) -> Run | None:
-    """Persist labeled outreach prompt text and granular AI prompts in ``run_setups``."""
+    """Persist labeled outreach prompt text and granular AI prompts in ``run_setups``.
+
+    ICP band: pass ints to set, or icp_unset=True to clear a bound to NULL (no limit on that side).
+    """
     run = get_run(db, run_id)
     if not run:
         return None
@@ -274,6 +281,12 @@ def update_run_prompt_setup(
         row.osint_discovery_mode = osint_discovery_mode.strip() or "hardcore"
     if language is not None:
         row.language = language.strip() or "Russian"
+    if icp_min_employees is not None or icp_unset:
+        row.icp_min_employees = icp_min_employees
+    if icp_max_employees is not None or icp_unset:
+        row.icp_max_employees = icp_max_employees
+    if icp_criteria_json is not None:
+        row.icp_criteria_json = icp_criteria_json or None
 
     db.add(run)
     db.commit()

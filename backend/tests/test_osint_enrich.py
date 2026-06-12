@@ -3,6 +3,7 @@
 import pytest
 
 import app.workers.osint_worker as ow
+from app.models.company_evidence import CompanyEvidence
 from app.models.contact import Contact
 from app.models.run_company import RunCompany
 from app.models.run_setup import RunSetup
@@ -63,6 +64,7 @@ def test_named_contact_without_email_gets_verified_discovery(db, stubs, run_with
         assert ct.status == "valid" and ct.email == "ivan@namedco.test"
         assert ct.source_json.get("email_verification") == "verified"
     finally:
+        db.query(CompanyEvidence).filter_by(run_company_id=rc.id).delete(synchronize_session=False)
         db.delete(ct); db.delete(rc); db.commit()
 
 
@@ -87,6 +89,8 @@ def test_icp_gate_skips_rejected_company_with_name_variants(db, stubs, run_witho
         db.refresh(ct_bad)
         assert ct_bad.status == "needs_discovery"              # untouched, not invalidated
     finally:
+        for rc in (rc_bad, rc_good):
+            db.query(CompanyEvidence).filter_by(run_company_id=rc.id).delete(synchronize_session=False)
         for o in (ct_bad, ct_good, rc_bad, rc_good):
             db.delete(o)
         db.commit()

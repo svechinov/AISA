@@ -83,6 +83,23 @@ def test_backfill_and_summary(db, rc):
     assert s["avg_confidence"] is not None
 
 
+def test_delete_company_purges_evidence(db):
+    """Deleting a company from the UI must not orphan its evidence rows (SQLite no FK cascade)."""
+    from app.repositories.project_repo import create_project
+    from app.repositories.run_repo import create_run
+    from app.services.run_company_delete_service import delete_collected_company_at_index
+
+    proj = create_project(db, name="EvDel", type="generic")
+    run = create_run(db, project_id=proj.id, workflow_name="generic_outreach", input_json={})
+    rc = RunCompany(run_id=run.id, collect_index=1, name="DelCo", website="delco.test", extra_json={})
+    db.add(rc); db.commit()
+    sync_company_evidence_from_dossier(db, rc, DOSSIER, commit=True)
+    assert db.query(CompanyEvidence).filter_by(run_company_id=rc.id).count() == 6
+
+    delete_collected_company_at_index(db, run.id, 1)
+    assert db.query(CompanyEvidence).filter_by(run_company_id=rc.id).count() == 0
+
+
 def test_company_resync_purges_orphans(db):
     """F3: re-creating run_companies rows must not leave orphaned evidence
     (SQLite does not enforce the FK cascade)."""

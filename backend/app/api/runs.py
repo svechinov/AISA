@@ -134,11 +134,17 @@ def get_run_review_setup_fields_route(run_id: int, db: Session = Depends(get_db)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     sig = get_sender_signature_html(run) or ""
+    rs = getattr(run, "run_setup", None)
     return RunReviewSetupFieldsRead(
         prompt_setup_editor_text=get_prompt_setup_editor_initial_text_for_ui(run),
+        osint_discovery_mode=getattr(rs, "osint_discovery_mode", None) or "hardcore",
+        language=getattr(rs, "language", None) or "Russian",
         sender_signature_html=sig,
         prompt_setup_saved=bool(get_prompt_setup_text(run).strip()),
         sender_signature_configured=signature_html_has_meaningful_content(get_sender_signature_html(run)),
+        icp_min_employees=getattr(rs, "icp_min_employees", None),
+        icp_max_employees=getattr(rs, "icp_max_employees", None),
+        icp_criteria_json=getattr(rs, "icp_criteria_json", None),
     )
 
 
@@ -671,6 +677,10 @@ def patch_run_prompt_setup_route(run_id: int, payload: RunPromptSetupPatch, db: 
         deep_osint_prompt=payload.deep_osint_prompt,
         osint_discovery_mode=payload.osint_discovery_mode,
         language=payload.language,
+        icp_min_employees=payload.icp_min_employees,
+        icp_max_employees=payload.icp_max_employees,
+        icp_criteria_json=payload.icp_criteria_json,
+        icp_unset=payload.icp_clear_band,
     )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")

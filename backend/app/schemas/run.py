@@ -223,6 +223,11 @@ class RunPromptSetupPatch(BaseModel):
     deep_osint_prompt: str | None = None
     osint_discovery_mode: str | None = None
     language: str = "Russian"
+    # ICP filter (Phase 6) — None means "leave unchanged"; send icp_clear_band=True to null a bound.
+    icp_min_employees: int | None = None
+    icp_max_employees: int | None = None
+    icp_criteria_json: dict | None = None
+    icp_clear_band: bool = False
 
 
 class RunPromptSetupPatchResult(BaseModel):
@@ -251,6 +256,9 @@ class RunReviewSetupFieldsRead(BaseModel):
     sender_signature_html: str = ""
     prompt_setup_saved: bool
     sender_signature_configured: bool
+    icp_min_employees: int | None = None
+    icp_max_employees: int | None = None
+    icp_criteria_json: dict | None = None
 
 
 class RunHumanUiPatch(BaseModel):

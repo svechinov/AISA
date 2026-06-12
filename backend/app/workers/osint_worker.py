@@ -28,6 +28,60 @@ def _osint_company_limit() -> int | None:
     except ValueError:
         return None
 
+def _apply_icp_size_filter(db: Session, run, companies: list) -> None:
+    """Resolve firmographics for each not-yet-judged company and reject those outside the Run's
+    ICP band/criteria (employee count + icp_criteria_json). Stores firmographics in the KV and a
+    size fact in company_evidence; unknown signal is left for the LLM judge. Never fatal."""
+    rs = getattr(run, "run_setup", None)
+    from app.services.icp_filter_service import icp_filter_active
+
+    if not icp_filter_active(rs):
+        return
+    from app.services.firmographics_service import firmographics_configured, lookup_firmographics
+    from app.services.icp_filter_service import evaluate_company_icp
+
+    if not firmographics_configured():
+        logger.info("ICP filter set but no firmographics provider configured — skipping size gate")
+        return
+
+    from datetime import datetime
+
+    for company in companies:
+        if company.ai_fit_checked_at is not None:
+            continue  # already judged (LLM or prior ICP run) — don't re-resolve
+        kv = effective_run_company_extra(db, company)
+        fg = kv.get("firmographics")
+        if not isinstance(fg, dict):
+            try:
+                fg = lookup_firmographics(company.name or "", website=company.website or "")
+            except Exception as exc:
+                logger.warning(f"Firmographics lookup failed for {company.name!r}: {exc}")
+                fg = None
+            if fg:
+                kv["firmographics"] = fg
+                persist_run_company_extra(db, company, kv)
+        if not fg:
+            continue  # unknown size -> let the LLM judge decide
+        verdict = evaluate_company_icp(fg, rs)
+        if verdict["verdict"] == "reject":
+            company.ai_fit_status = "incorrect"
+            company.ai_fit_reason = verdict["reason"]
+            company.ai_fit_checked_at = datetime.utcnow()
+            db.add(company)
+            # record the size as evidence so the UI dossier shows why it was filtered
+            if isinstance(fg.get("employee_count"), int):
+                try:
+                    from app.models.company_evidence import CompanyEvidence
+                    db.add(CompanyEvidence(
+                        run_company_id=company.id, run_id=company.run_id, kind="trigger",
+                        fact=f"Численность ~{fg['employee_count']} сотр. (источник: {fg.get('source')})",
+                        source_url=None, confidence=None,
+                    ))
+                except Exception:
+                    pass
+    db.commit()
+
+
 def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:
     """
     OSINT Worker that acts right after contacts and companies are loaded (e.g. from CRM).
@@ -55,6 +109,11 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
     # Matching uses the same entity-key machinery as the UI badge (contact_company_ai_fit),
     # so name-spelling/website variants can't make the gate and the badge disagree.
     from app.services.run_companies_status_service import _contact_matches_company, _entity_keys
+
+    # Deterministic ICP filter (Phase 6): when the Run sets an employee band / criteria, resolve
+    # firmographics and reject off-ICP companies BEFORE the dossier + LLM judge spend tokens.
+    # Unknown size is NOT a reject (left to the LLM judge). Reuses the ai_fit reject machinery.
+    _apply_icp_size_filter(db, run, companies)
 
     rejected_keys: set[str] = set()
     for c in companies:

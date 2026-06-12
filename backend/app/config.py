@@ -81,6 +81,15 @@ class Settings(BaseSettings):
     APOLLO_MAX_PEOPLE_PER_COMPANY: int = 8
     APOLLO_MAX_PEOPLE_TOTAL: int = 120
 
+    # Dadata — firmographics (employee_count from FNS ССЧ, OKVED, INN). Optional; gates the
+    # deterministic ICP size-filter (Phase 6). Free find-party fallback (egrul.itsoft) needs no key.
+    DADATA_API_KEY: str = Field(default="", description="Dadata API token (Расширенный tier for employee_count).")
+    DADATA_HTTP_TIMEOUT_SEC: float = 10.0
+    FIRMOGRAPHICS_PROVIDER_PRIORITY: str = Field(
+        default="dadata,egrul_free",
+        description="Comma-ordered firmographics providers; first configured+answering wins.",
+    )
+
     model_config = SettingsConfigDict(**_model_cfg)
 
 
