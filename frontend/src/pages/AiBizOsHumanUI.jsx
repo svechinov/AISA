@@ -4096,10 +4096,13 @@ export default function AiBizOsHumanUI() {
       await api(`/contacts/${contactId}/deep_osint${force ? "?force=true" : ""}`, { method: "POST" });
       toast({ title: "OSINT Collected", description: "Deep OSINT data gathered successfully." });
       if (selectedRun?.id) {
-        loadRunDetails(selectedRun.id, {
+        // Signature is (runId, runRowHint, options). Passing the options object as the 2nd arg
+        // made loadRunDetails setSelectedRun() to that junk object (no .id) — which blanked
+        // selectedRun.id, so contactsActionsReady went false and EVERY contact's buttons
+        // disabled until a full reload (which also lost the project/run context).
+        loadRunDetails(selectedRun.id, selectedRun, {
           includeContacts: true,
           includeDrafts: true,
-          rowGuess: selectedRun
         });
       }
     } catch (err) {
