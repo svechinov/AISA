@@ -13,6 +13,7 @@ boto3
 pandas
 openpyxl
 tavily-python
+trafilatura
 dnspython
 duckduckgo-search
 litellm

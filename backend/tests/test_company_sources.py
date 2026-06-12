@@ -46,6 +46,19 @@ def test_extract_url_rejects_bad_url(db):
         cse.extract_companies_from_url("rating.test/top")
 
 
+def test_extract_text_trafilatura_primary_tavily_fallback(monkeypatch):
+    # trafilatura returns text -> Tavily not called
+    monkeypatch.setattr(cse, "_trafilatura_extract", lambda u: "Альфа Бета Гамма")
+    called = {"tavily": False}
+    monkeypatch.setattr(cse, "_tavily_extract", lambda u: called.__setitem__("tavily", True) or "x")
+    assert cse._extract_page_text("https://r.test") == "Альфа Бета Гамма"
+    assert called["tavily"] is False
+    # trafilatura empty -> Tavily fallback used
+    monkeypatch.setattr(cse, "_trafilatura_extract", lambda u: "")
+    monkeypatch.setattr(cse, "_tavily_extract", lambda u: "from tavily")
+    assert cse._extract_page_text("https://r.test") == "from tavily"
+
+
 def test_tenders_extract_buyers(db, cleanup, monkeypatch):
     import app.services.search_service as ss
     monkeypatch.setattr(ss, "search_web", lambda q, **k: [

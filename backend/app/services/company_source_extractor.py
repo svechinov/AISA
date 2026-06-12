@@ -82,20 +82,54 @@ def _parse_companies_from_text(text: str, *, task_hint: str) -> list[dict[str, A
     return companies
 
 
-def _extract_page_text(url: str) -> str:
-    """Tavily Extract for one URL; empty string when nothing usable came back."""
+_FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+}
+
+
+def _trafilatura_extract(url: str) -> str:
+    """Self-host fetch + trafilatura (free, RU-effective). Empty string on failure."""
+    try:
+        import httpx
+        import trafilatura
+
+        r = httpx.get(url, timeout=15, follow_redirects=True, headers=_FETCH_HEADERS)
+        if r.status_code != 200 or not r.text:
+            return ""
+        # favor_recall + tables: rating/list pages enumerate companies in tables/lists.
+        text = trafilatura.extract(r.text, include_tables=True, include_comments=False,
+                                   favor_recall=True)
+        return (text or "").strip()
+    except Exception as e:
+        logger.info(f"trafilatura extract miss for {url}: {e}")
+        return ""
+
+
+def _tavily_extract(url: str) -> str:
+    """Fallback: managed Tavily Extract (for anti-bot/JS pages trafilatura can't fetch)."""
     client = get_tavily_client()
     if not client:
-        raise ValueError("Tavily API key not configured")
-    resp = client.extract(urls=[url])
+        return ""
+    try:
+        resp = client.extract(urls=[url])
+    except Exception as e:
+        logger.warning(f"Tavily extract failed for {url}: {e}")
+        return ""
     for item in resp.get("results", []):
         content = item.get("raw_content") or item.get("content") or ""
         if content.strip():
             return content
-    failed = resp.get("failed_results") or []
-    if failed:
-        logger.warning(f"Tavily extract failed for {url}: {failed[:1]}")
     return ""
+
+
+def _extract_page_text(url: str) -> str:
+    """URL → clean text. trafilatura primary (free, self-host); Tavily Extract as fallback."""
+    text = _trafilatura_extract(url)
+    if text:
+        return text
+    return _tavily_extract(url)
 
 
 def extract_companies_from_url(url: str, *, hint: str = "") -> list[dict[str, Any]]:
