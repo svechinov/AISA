@@ -8,10 +8,10 @@ def get_tavily_client() -> TavilyClient | None:
     return TavilyClient(api_key=api_key)
 
 def get_company_dossier(company_name: str, website: str, run=None) -> str:
-    client = get_tavily_client()
-    if not client:
-        return "Tavily API key not configured. OSINT skipped."
-        
+    from app.services.search_service import search_configured
+    if not search_configured():
+        return "No search provider configured. OSINT skipped."
+
     site_ctx = f" (website: {website})" if website and website.strip() else ""
     
     # Use custom prompt from run if available
@@ -36,22 +36,14 @@ def get_company_dossier(company_name: str, website: str, run=None) -> str:
         query += f"\n\nAdditional OSINT sources/instructions from user: {custom_sources}"
     
     try:
-        response = client.search(
-            query=query,
-            search_depth="advanced",
-            include_answer=True,
-            max_results=5
-        )
-        
+        # Search via the R4 provider (Yandex-primary — Runet coverage for RU companies;
+        # Tavily fallback). Replaces the direct Tavily call so RU sources are actually seen.
+        from app.services.search_service import search_web
+        hits = search_web(query, max_results=6, max_passages=5)
+
         context = ""
-        if response.get("answer"):
-            context += f"Summary: {response['answer']}\n"
-        for result in response.get("results", []):
-            context += f"Source ({result.get('url')}): {result.get('content')}\n"
-            
-        # (Removed Headroom compression: headroom.compress expects a list of chat messages,
-        # not a plain string, so it always failed here and only produced log noise.
-        # Tavily max_results is small, so the context is already compact.)
+        for h in hits:
+            context += f"Source ({h.get('url')}): [{h.get('title','')}] {h.get('snippet','')}\n"
 
         from app.services.llm_gateway import complete_prompt_json_object
         import json
@@ -81,28 +73,16 @@ OSINT Data:
         return f'{{"error": "OSINT profiling failed: {str(e)}"}}'
 
 def discover_contact_email(company_name: str, website: str, contact_name: str) -> str | None:
-    client = get_tavily_client()
-    if not client:
-        return None
-        
-    query = f"Email address for {contact_name} at {company_name} {website} contact"
+    # Search via the R4 provider (Yandex-primary). Russian query — the contact is RU.
+    from app.services.search_service import search_web
+
+    query = f"{contact_name} {company_name} email почта контакты"
     try:
-        response = client.search(
-            query=query,
-            search_depth="basic",
-            max_results=5
-        )
-        
-        # Simple extraction looking for @
-        # In a production system, this would be routed back to the LLM to parse cleanly, 
-        # or use a dedicated email hunting API (like Hunter.io), but this provides a fallback baseline.
         import re
-        for result in response.get("results", []):
-            content = result.get('content', '')
-            emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', content)
+        for hit in search_web(query, max_results=5, max_passages=5):
+            emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', hit.get("snippet", ""))
             if emails:
                 return emails[0]
-                
         return None
     except Exception:
         return None

@@ -114,18 +114,12 @@ def extract_companies_from_url(url: str, *, hint: str = "") -> list[dict[str, An
 
 
 def discover_list_urls(criterion: str, *, max_urls: int = 3) -> list[str]:
-    """Mode «дан критерий», step 1: find rating/list pages for the criterion."""
-    client = get_tavily_client()
-    if not client:
-        raise ValueError("Tavily API key not configured")
-    resp = client.search(
-        query=f"{criterion} рейтинг список компаний топ",
-        search_depth="basic",
-        max_results=max(3, max_urls * 2),
-    )
+    """Mode «дан критерий», step 1: find rating/list pages for the criterion (Yandex-primary)."""
+    from app.services.search_service import search_web
+
     urls: list[str] = []
-    for r in resp.get("results", []):
-        u = r.get("url") or ""
+    for hit in search_web(f"{criterion} рейтинг список компаний топ", max_results=max(3, max_urls * 2)):
+        u = hit.get("url") or ""
         if u and "youtube" not in u and "vk.com" not in u and u not in urls:
             urls.append(u)
         if len(urls) >= max_urls:
@@ -168,24 +162,17 @@ def extract_companies_from_tenders(query: str, *, max_results: int = 8) -> dict[
     MVP: search-engine-indexed tender pages via Tavily (no platform APIs / anti-bot fights).
     """
     query = (query or "").strip() or "закупка проведение тренинга обучение руководителей"
-    client = get_tavily_client()
-    if not client:
-        raise ValueError("Tavily API key not configured")
+    from app.services.search_service import search_web
 
     site_filter = " OR ".join(f"site:{s}" for s in TENDER_SITES)
-    resp = client.search(
-        query=f"{query} ({site_filter})",
-        search_depth="advanced",
-        max_results=max_results,
-        include_raw_content=True,
-    )
+    hits = search_web(f"{query} ({site_filter})", max_results=max_results, max_passages=5)
     chunks: list[str] = []
     urls: list[str] = []
-    for r in resp.get("results", []):
-        content = (r.get("raw_content") or r.get("content") or "").strip()
-        u = r.get("url") or ""
-        if content:
-            chunks.append(f"--- TENDER PAGE ({u}) ---\n{content[:6000]}")
+    for h in hits:
+        text = (h.get("snippet") or "").strip()
+        u = h.get("url") or ""
+        if text:
+            chunks.append(f"--- TENDER PAGE ({u}) ---\n{h.get('title','')}\n{text}")
             urls.append(u)
     if not chunks:
         return {"companies": [], "urls": []}

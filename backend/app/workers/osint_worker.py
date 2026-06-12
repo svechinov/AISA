@@ -140,7 +140,7 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                 # Persist only a real dossier. On transient failure get_company_dossier returns an
                 # error string ('{"error": ...}') or a "not configured" notice — persisting it would
                 # cache the failure as the dossier and permanently block retries. Skip → retry later.
-                bad = (not dossier) or ('"error"' in dossier) or dossier.startswith("Tavily API key not configured")
+                bad = (not dossier) or ('"error"' in dossier) or "OSINT skipped" in dossier
                 if bad:
                     logger.warning(f"OSINT dossier for {name} failed/empty — not persisted (will retry next run)")
                 else:

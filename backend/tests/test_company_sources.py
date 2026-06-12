@@ -47,9 +47,10 @@ def test_extract_url_rejects_bad_url(db):
 
 
 def test_tenders_extract_buyers(db, cleanup, monkeypatch):
-    monkeypatch.setattr(cse, "get_tavily_client", lambda: _FakeTavily(search_results=[
-        {"url": "https://zakupki.gov.ru/x", "raw_content": "Заказчик: ПАО Гамма, тренинг продаж"},
-    ]))
+    import app.services.search_service as ss
+    monkeypatch.setattr(ss, "search_web", lambda q, **k: [
+        {"title": "Закупка", "url": "https://zakupki.gov.ru/x", "snippet": "Заказчик: ПАО Гамма, тренинг продаж"},
+    ])
     monkeypatch.setattr(cse, "complete_prompt_json_object", lambda p: {"companies": [
         {"name": "ПАО Гамма", "website": "", "note": "закупает тренинг продаж"},
     ]})

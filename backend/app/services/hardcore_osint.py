@@ -31,36 +31,17 @@ def get_domain(url):
         domain = domain[4:]
     return domain
 
-def _search_via_tavily(query, max_res=5):
-    """Snippet search through Tavily (reachable from RU, does not block our datacenter IP).
-
-    Returns a concatenated snippet corpus, or None when Tavily is not configured / failed —
-    so the caller can fall back to DuckDuckGo.
-    """
-    from app.services.tavily_osint import get_tavily_client
-
-    client = get_tavily_client()
-    if not client:
-        return None
-    try:
-        resp = client.search(query=query, search_depth="basic", max_results=max_res)
-    except Exception as e:
-        logger.warning(f"Tavily snippet search failed: {e}")
-        return None
-    corpus = ""
-    if resp.get("answer"):
-        corpus += f"{resp['answer']}\n"
-    for r in resp.get("results", []):
-        corpus += f"[{r.get('title', '')}] {r.get('content', '')}\n"
-    return corpus
-
-
 def search_ddg(query, max_res=5):
-    """Snippet search for LPR/email dorks. Tavily is the primary backend (the pilot showed
-    DuckDuckGo 202-blocks our server IP); DDG (ddgs) remains a best-effort fallback."""
-    corpus = _search_via_tavily(query, max_res)
-    if corpus is not None:
-        return corpus
+    """Snippet search for LPR/email dorks. Routed through the R4 search provider
+    (Yandex-primary — Runet coverage; Tavily fallback). DuckDuckGo (ddgs) is a last-ditch
+    fallback only when the provider returns nothing (pilot: DDG 202-blocks our server IP)."""
+    try:
+        from app.services.search_service import search_corpus
+        corpus = search_corpus(query, max_results=max_res, max_passages=5)
+        if corpus.strip():
+            return corpus
+    except Exception as e:
+        logger.warning(f"search provider failed in search_ddg: {e}")
     try:
         results = DDGS().text(query, max_results=max_res, backend="html")
         text_corpus = ""
