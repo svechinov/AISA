@@ -123,6 +123,29 @@ def search_web(query: str, *, max_results: int = 8, max_passages: int = 5) -> li
     return []
 
 
+_DOMAIN_SKIP = (
+    "list-org", "rusprofile", "hh.ru", "vk.com", "t.me", "ok.ru", "youtube", "wikipedia",
+    "rbc.ru", "kommersant", "tadviser", "zachestnyibiznes", "sbis.ru", "audit-it", "2gis",
+    "yell.ru", "spark-interfax", "gov.ru", "interfax", "vedomosti", "cdn", "yandex", "google",
+    "facebook", "instagram", "telegram", "avito", "zoon", "flamp",
+)
+
+
+def resolve_company_domain(name: str) -> str | None:
+    """Find a company's official site domain via search (unblocks discovery for sourced companies
+    that arrive without a website). Returns a bare domain or None. Skips aggregators/news/social."""
+    from urllib.parse import urlparse
+
+    name = (name or "").strip()
+    if not name:
+        return None
+    for hit in search_web(f"{name} официальный сайт", max_results=6, max_passages=1):
+        host = (urlparse(hit.get("url", "")).netloc or "").lower().replace("www.", "")
+        if host and "." in host and not any(s in host for s in _DOMAIN_SKIP):
+            return host
+    return None
+
+
 def search_corpus(query: str, *, max_results: int = 5, max_passages: int = 5) -> str:
     """Concatenated title+snippet corpus for LLM consumption (replaces ad-hoc snippet joins)."""
     return "\n".join(

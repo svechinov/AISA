@@ -170,6 +170,14 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
             
             if mode == "hardcore":
                 domain = get_domain(website)
+                if not domain and company_name:
+                    # Sourced companies (ratings/tenders) often arrive without a website. Resolve
+                    # the official domain via search so discovery+SMTP can proceed; persist it.
+                    from app.services.search_service import resolve_company_domain
+                    domain = resolve_company_domain(company_name)
+                    if domain:
+                        contact.website = domain
+                        logger.info(f"Resolved domain for {company_name}: {domain}")
                 if not domain:
                     logger.warning(f"No domain for {company_name}, skipping hardcore OSINT")
                     contact.status = "invalid"

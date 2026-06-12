@@ -55,6 +55,24 @@ def test_empty_query_and_all_miss(monkeypatch):
     assert ss.search_web("q") == []
 
 
+def test_resolve_company_domain_skips_aggregators(monkeypatch):
+    monkeypatch.setattr(ss, "search_web", lambda q, **k: [
+        {"title": "list-org", "url": "https://www.list-org.com/company/1", "snippet": ""},
+        {"title": "RBC", "url": "https://rbc.ru/news/x", "snippet": ""},
+        {"title": "Official", "url": "https://moonmebel.ru/about", "snippet": ""},
+    ])
+    assert ss.resolve_company_domain("Мебельная фабрика Moon") == "moonmebel.ru"
+
+
+def test_resolve_company_domain_none_when_all_aggregators(monkeypatch):
+    monkeypatch.setattr(ss, "search_web", lambda q, **k: [
+        {"title": "x", "url": "https://vk.com/club1", "snippet": ""},
+        {"title": "y", "url": "https://hh.ru/employer/1", "snippet": ""},
+    ])
+    assert ss.resolve_company_domain("X") is None
+    assert ss.resolve_company_domain("") is None
+
+
 def test_yandex_not_configured_returns_empty(monkeypatch):
     monkeypatch.setattr(ss, "yandex_search_configured", lambda: False)
     assert ss._yandex_search("q", max_results=5, max_passages=5) == []
