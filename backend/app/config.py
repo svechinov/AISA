@@ -90,6 +90,17 @@ class Settings(BaseSettings):
         description="Comma-ordered firmographics providers; first configured+answering wins.",
     )
 
+    # Web search provider (R4). Yandex Cloud Search API = real yandex.ru index (sees VK/Telegram/
+    # regional RU press that the US-indexed Tavily misses). Yandex primary for RU, Tavily fallback.
+    YANDEX_SEARCH_API_KEY: str = Field(default="", description="Yandex Cloud Search API key (Api-Key auth).")
+    YANDEX_FOLDER_ID: str = Field(default="", description="Yandex Cloud folder id (required on every request).")
+    YANDEX_SEARCH_REGION: str = Field(default="225", description="Yandex search region (225 = Russia).")
+    YANDEX_HTTP_TIMEOUT_SEC: float = 40.0
+    SEARCH_PROVIDER_PRIORITY: str = Field(
+        default="yandex,tavily",
+        description="Comma-ordered web-search providers; first configured+answering wins.",
+    )
+
     model_config = SettingsConfigDict(**_model_cfg)
 
 

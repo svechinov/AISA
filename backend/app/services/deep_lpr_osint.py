@@ -2,8 +2,6 @@ import logging
 from typing import Any
 from sqlalchemy.orm import Session
 from app.models.contact import Contact
-from app.services.tavily_osint import get_tavily_client
-from app.services.llm_gateway import generate_json
 from app.services.prompt_builder import build_prompt
 
 logger = logging.getLogger(__name__)
@@ -15,31 +13,43 @@ LPR_OSINT_SCHEMA = {
     "notable_achievements": "string"
 }
 
+def _person_search_corpus(name: str, company: str, role: str) -> str:
+    """Tiered RU search for a person via the search provider (Yandex primary — sees VK/TG/regional).
+
+    Russian keywords (not English LinkedIn/blog which steer away from Runet) and a relaxation
+    ladder so an obscure-but-real person (pilot: Шаройкина) still surfaces: strict -> name+role+
+    region -> name in news. Returns a concatenated corpus, or '' when truly nothing is found.
+    """
+    from app.services.search_service import search_web
+
+    name = (name or "").strip()
+    company = (company or "").strip()
+    role = (role or "").strip()
+    if not name:
+        return ""
+
+    queries = [
+        f"{name} {company} интервью OR статья OR выступление OR новости",
+        f"{name} {company}",
+        f"{name} {role} {company}".strip(),
+        f"{name} {company} vk.com OR t.me OR ok.ru",
+    ]
+    seen: set[str] = set()
+    corpus_parts: list[str] = []
+    for q in queries:
+        for hit in search_web(q, max_results=6, max_passages=5):
+            if hit["url"] in seen or not hit.get("snippet"):
+                continue
+            seen.add(hit["url"])
+            corpus_parts.append(f"[{hit['title']}] {hit['snippet']} ({hit['url']})")
+        if len(corpus_parts) >= 8:
+            break  # enough grounding; stop spending search calls
+    return "\n".join(corpus_parts)
+
+
 def perform_deep_lpr_osint(db: Session, contact: Contact) -> dict[str, Any]:
-    client = get_tavily_client()
-    if not client:
-        return {"error": "Tavily API key not configured."}
-    
-    # 1. Search Tavily
-    query = f"\"{contact.name}\" \"{contact.company}\" (LinkedIn OR interview OR article OR speaker OR blog)"
-    try:
-        response = client.search(
-            query=query,
-            search_depth="advanced",
-            include_answer=True,
-            max_results=5
-        )
-    except Exception as e:
-        logger.exception(f"Tavily search failed for LPR {contact.name}")
-        return {"error": f"Search failed: {str(e)}"}
-    
-    raw_dossier = ""
-    if response.get("answer"):
-        raw_dossier += f"Answer: {response['answer']}\n\n"
-    
-    for result in response.get("results", []):
-        raw_dossier += f"Title: {result.get('title')}\nContent: {result.get('content')}\n\n"
-        
+    # 1. Search (Yandex primary via search_service — Runet coverage; Tavily fallback)
+    raw_dossier = _person_search_corpus(contact.name, contact.company, contact.role)
     if not raw_dossier.strip():
         return {"error": "No relevant public information found for this person."}
 
@@ -54,11 +64,14 @@ def perform_deep_lpr_osint(db: Session, contact: Contact) -> dict[str, Any]:
         logger.warning(f"Could not load custom deep_osint_prompt: {e}")
 
     task = custom_task or (
-        "You are an expert OSINT profiler. Analyze the raw search results for the target individual and extract a structured personal dossier.\n"
-        "Focus on their professional background, recent public statements, speaking engagements, and key focus areas.\n"
-        "If you cannot find specific information, leave the field empty or state 'Not found'.\n\n"
+        "Ты эксперт-OSINT-профайлер. Проанализируй сырую поисковую выдачу о человеке и собери "
+        "структурированное персональное досье.\n"
+        "Фокус: профессиональный бэкграунд, недавние публичные высказывания/посты, выступления, "
+        "ключевые интересы и зоны фокуса.\n"
+        "ВСЕ значения полей пиши ПО-РУССКИ. Если конкретной информации нет — оставь поле пустым "
+        "или укажи 'Не найдено'. Не выдумывай фактов, которых нет в выдаче.\n\n"
     )
-    task += f"\nRaw Search Results:\n{raw_dossier}"
+    task += f"\nСырая поисковая выдача:\n{raw_dossier}"
     
     data = {
         "person": contact.name,
