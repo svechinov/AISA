@@ -394,11 +394,8 @@ def regenerate_outbound_email_draft(db: Session, draft_id: int) -> EmailDraft:
     if not payload:
         raise RuntimeError("Could not regenerate draft — approve the contact and ensure a valid email.")
 
-    # Feature 1: re-sync the auto-attached program PDF to the NEW match (drop the stale one).
-    # Must run before the new meta overwrites draft.matched_program_json.
-    from app.services.email_draft_persistence_service import sync_matched_program_attachment
-    sync_matched_program_attachment(db, draft, payload.get("generation_meta_json"))
-
+    # Cold drafts carry no program PDF attachment (sent only as a post-reply materials follow-up);
+    # the regenerated meta still records the matched program for that later send.
     return update_email_draft_outreach_regenerate(
         db,
         draft,

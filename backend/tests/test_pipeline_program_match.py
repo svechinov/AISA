@@ -1,4 +1,5 @@
-"""Feature 1 wiring: _apply_program_match + meta + PDF attach/re-attach (review fixes F2/F4/F7)."""
+"""Feature 1 wiring: _apply_program_match + meta. PDF is NOT attached to the cold email — the
+program lives in the body summary; the PDF is a post-positive-reply follow-up (decision 12.06)."""
 
 import pytest
 
@@ -8,10 +9,7 @@ from app.models.asset import Asset
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
 from app.repositories.draft_attachment_repo import list_asset_ids_for_email_draft
-from app.services.email_draft_persistence_service import (
-    persist_generated_emails,
-    sync_matched_program_attachment,
-)
+from app.services.email_draft_persistence_service import persist_generated_emails
 from app.models.training_program import TrainingProgram
 
 
@@ -58,7 +56,9 @@ def test_empty_problem_is_noop(db, setup):
     assert r["solution"] == "g"
 
 
-def test_persist_attaches_pdf_from_meta(db, setup):
+def test_cold_draft_has_no_pdf_but_records_program(db, setup):
+    """Decision 12.06: the cold email must NOT carry the program PDF (it goes in a follow-up after
+    a positive reply); the program is recorded in the draft meta so the PDF can be sent later."""
     ct = setup["contact"]
     meta = {"reasoning": {"solution": "Решение: Прог"},
             "matched_program": {"program_id": setup["prog"].id, "asset_id": setup["pdf_a"].id}}
@@ -66,43 +66,21 @@ def test_persist_attaches_pdf_from_meta(db, setup):
         "contact_id": ct.id, "company": ct.company, "to": ct.email,
         "subject": "S", "body": "B " * 80, "generation_meta_json": meta,
     }]})
-    assert out["saved_drafts"] == 1 and out["program_pdfs_attached"] == 1
+    assert out["saved_drafts"] == 1
+    assert "program_pdfs_attached" not in out  # the auto-attach behavior is gone
     d = db.query(EmailDraft).filter_by(run_id=1, contact_id=ct.id).one()
-    assert list_asset_ids_for_email_draft(db, d.id) == [setup["pdf_a"].id]
+    assert list_asset_ids_for_email_draft(db, d.id) == []  # NO attachment on the cold draft
+    # program still recorded (in the meta blob) so a later materials send knows the PDF
+    from app.services.email_draft_persistence_service import matched_program_asset_id
+    assert matched_program_asset_id(d.generation_meta_json) == setup["pdf_a"].id
 
 
-def test_regenerate_swaps_stale_program_pdf(db, setup):
-    """F4: when the match changes on regenerate, the old brochure is dropped, the new one attached,
-    and manual attachments survive."""
-    ct = setup["contact"]
-    d = db.query(EmailDraft).filter_by(run_id=1, contact_id=ct.id).first()
-    if d is None:
-        persist_generated_emails(db, 1, {"emails": [{
-            "contact_id": ct.id, "company": ct.company, "to": ct.email,
-            "subject": "S", "body": "B " * 80,
-            "generation_meta_json": {"matched_program": {"asset_id": setup["pdf_a"].id}},
-        }]})
-        d = db.query(EmailDraft).filter_by(run_id=1, contact_id=ct.id).one()
-
-    # simulate: old match (pdf_a) is in typed column; user added a manual attachment (pdf_b)
-    from app.repositories.draft_attachment_repo import replace_email_draft_assets
-
-    d.matched_program_json = {"asset_id": setup["pdf_a"].id}
-    replace_email_draft_assets(db, d.id, [setup["pdf_a"].id, setup["pdf_b"].id])
-    db.commit()
-
-    new_meta = {"matched_program": {"asset_id": setup["pdf_b"].id}}
-    changed = sync_matched_program_attachment(db, d, new_meta)
-    db.commit()
-    assert changed
-    assert list_asset_ids_for_email_draft(db, d.id) == [setup["pdf_b"].id]  # stale A gone, B kept once
-
-    # match disappears entirely → previous program asset removed, nothing added
-    d.matched_program_json = {"asset_id": setup["pdf_b"].id}
-    db.commit()
-    sync_matched_program_attachment(db, d, {"matched_program": None})
-    db.commit()
-    assert list_asset_ids_for_email_draft(db, d.id) == []
+def test_matched_program_asset_id_helper(db, setup):
+    from app.services.email_draft_persistence_service import matched_program_asset_id
+    assert matched_program_asset_id({"matched_program": {"asset_id": 7}}) == 7
+    assert matched_program_asset_id({"matched_program": None}) is None
+    assert matched_program_asset_id({}) is None
+    assert matched_program_asset_id(None) is None
 
 
 def test_meta_columns_round_trip(db, setup):

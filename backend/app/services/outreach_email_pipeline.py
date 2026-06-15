@@ -259,7 +259,9 @@ def generate_email_draft(
         "- Address their management hunger (lack of strong leaders, mergers, scaling issues) or sales problems if apparent from the dossier.\n"
         "- Offer ONE specific, fast Quick Win step (e.g., training, facilitation session, workshop, express audit).\n"
         "- If the `solution` slot names a concrete training program, keep the program name verbatim "
-        "and its key points; you may reference an attached brochure (e.g. 'подробности во вложении').\n"
+        "and 1-2 of its key points IN THE BODY (the concise solution digest). Do NOT attach or "
+        "promise an attachment — instead, OFFER to send detailed materials if they're interested "
+        "(e.g. 'при интересе пришлю короткое описание программы'). Materials follow only after a reply.\n"
         "- The CTA (Call to Action) must be a short 15-minute call.\n"
         "- DO NOT use IT jargon. Use words like 'external partner', 'development of managerial competencies'.\n"
         "- Avoid generic openers: jump straight into the fact or trigger.\n"
@@ -315,8 +317,9 @@ def _apply_program_match(
 
     Mutates reasoning's solution/key_point with the program-grounded text (the program name and
     bullets live in that text — that is all the draft model needs) and returns the match record
-    for generation meta (meta["matched_program"]: ids/fit/rationale stay OUT of the LLM prompt;
-    persistence reads asset_id from the meta to auto-attach the PDF).
+    for generation meta (meta["matched_program"]: ids/fit/rationale stay OUT of the LLM prompt).
+    The PDF is NOT attached to the cold email — matched_program is recorded so the program PDF can
+    be sent as a follow-up after a positive reply (decision 12.06).
     Returns None (generic offer kept) when the catalog is empty, nothing fits, or the matcher fails.
     """
     problem = (reasoning.get("problem") or "").strip()
