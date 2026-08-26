@@ -46,3 +46,31 @@ def db():
     finally:
         session.rollback()
         session.close()
+
+
+@pytest.fixture()
+def fresh_db(tmp_path):
+    """Empty SQLite with the full schema, bound to its own engine — independent of the
+    prod-snapshot copy above. The dist does not ship ai_biz_os_realrun.db (gitignored), so any
+    test that must run in a clean checkout (not just on a machine with a leftover snapshot) needs
+    this instead of `db`. Every model is imported explicitly before create_all(), same reason as
+    init_db.py's own explicit import block: SQLAlchemy only registers tables for modules that have
+    actually been imported."""
+    import importlib
+    import pkgutil
+
+    import app.models as models_pkg
+    from app.db import Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    for _, name, _ in pkgutil.iter_modules(models_pkg.__path__):
+        importlib.import_module(f"app.models.{name}")
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'fresh.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        yield session
+    finally:
+        session.close()
