@@ -16,6 +16,28 @@ from app.services.run_context_service import build_master_prompt_text, coalesce_
 
 logger = logging.getLogger(__name__)
 
+# Fork-transition Phase 1, Task 6: the worked example here ("a training/consulting provider when
+# we sell training") assumed AlexStaff's offer is never itself training/consulting. A campaign
+# whose OWN offer IS training/consulting-adjacent (NODA12 trek A: selling a facilitation tool TO
+# training/consulting companies) could have every real buyer misread as a same-offer competitor by
+# an LLM taking the example literally. Overridable per run via run_setups.fit_exclusion_rules_text;
+# empty/unset falls back to this text verbatim (byte-identical to pre-Task-6 behavior).
+DEFAULT_FIT_EXCLUSION_RULES = (
+    "Mark **incorrect** ONLY when:\n"
+    "- the company is a COMPETITOR / provider of the SAME offer (e.g. a training/consulting provider "
+    "when we sell training — they are peers, not buyers); or\n"
+    "- it is not a real buyer organization (an individual, a job board, an event page, a government "
+    "procurement agency that purchases on behalf of others rather than for itself); or\n"
+    "- it clearly cannot have the need the offer addresses per the campaign brief.\n"
+    "Otherwise mark **correct**."
+)
+
+
+def _fit_exclusion_rules_for(run) -> str:
+    run_setup = getattr(run, "run_setup", None)
+    text = (getattr(run_setup, "fit_exclusion_rules_text", None) or "").strip()
+    return text or DEFAULT_FIT_EXCLUSION_RULES
+
 
 def _prompt(run, company_name: str, company_website: str) -> str:
     from app.services.run_context_service import get_prompt_setup_text
@@ -36,13 +58,7 @@ def _prompt(run, company_name: str, company_website: str) -> str:
         "scaling, management/sales challenges, etc.).\n"
         "- Do NOT require the company to be in the same industry as the offer. Selling training to a "
         "retailer is normal; the retailer is NOT 'off-target' just because it is not a training company.\n\n"
-        "Mark **incorrect** ONLY when:\n"
-        "- the company is a COMPETITOR / provider of the SAME offer (e.g. a training/consulting provider "
-        "when we sell training — they are peers, not buyers); or\n"
-        "- it is not a real buyer organization (an individual, a job board, an event page, a government "
-        "procurement agency that purchases on behalf of others rather than for itself); or\n"
-        "- it clearly cannot have the need the offer addresses per the campaign brief.\n"
-        "Otherwise mark **correct**.\n\n"
+        f"{_fit_exclusion_rules_for(run)}\n\n"
         "Return ONLY valid JSON (no markdown) with this exact shape:\n"
         '{"fit": true or false, "reason": "one short English sentence"}\n\n'
         f"Company name: {company_name}\n"

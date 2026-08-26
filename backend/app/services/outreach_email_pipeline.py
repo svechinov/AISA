@@ -487,11 +487,14 @@ def generate_email_draft(
         "business rule and is appended to your body automatically after you write it."
     )
 
+    # Kept in lockstep with the critic's decision below (compose_outreach_subject_body) via the
+    # same shared email_kind_for — two independent derivations of "no signal" previously risked
+    # drifting apart (generator's has_open_roles vs email_kind_for's vacancy_signals check).
     vacancy_signals = pers.get("vacancy_signals")
-    has_open_roles = isinstance(vacancy_signals, dict) and bool(vacancy_signals.get("open_roles"))
-    if not has_open_roles:
-        # No confirmed open roles anywhere (radar + dossier) — the no-vacancy template replaces
-        # the roles hook; naming a role here would be an invented one (decision 5/9, B-063).
+    if email_kind_for(pers, persona) == EMAIL_KIND_NO_VACANCY:
+        # No confirmed open roles anywhere (radar + dossier), and this persona has no other
+        # fallback — the no-vacancy template replaces the roles hook; naming a role here would be
+        # an invented one (decision 5/9, B-063).
         task += "\n\n" + _no_vacancy_block(lang, role, persona)
         task += (
             "\n\nHARD RULE: personalization.vacancy_signals is empty — do NOT name any specific "
@@ -499,7 +502,7 @@ def generate_email_draft(
             "above, not from invented positions."
         )
     else:
-        worldwide = _worldwide_note(vacancy_signals)
+        worldwide = _worldwide_note(vacancy_signals or {})
         if worldwide:
             task += "\n\n" + worldwide
 
@@ -757,8 +760,8 @@ def compose_outreach_subject_body(
         )
 
     # B-077: the critic judges against the generation contract (vacancy vs no_vacancy), the same
-    # decision generate_email_draft made from vacancy_signals (has_open_roles).
-    email_kind = email_kind_for(pers)
+    # decision generate_email_draft made above via the shared email_kind_for(pers, persona).
+    email_kind = email_kind_for(pers, persona)
     # B-077 etap 2: per-run canon of judgement, editable without a deploy (falls back to
     # DEFAULT_CRITIC_CANON inside validate_outbound_email when unset).
     critic_canon = get_critic_canon_text(run)
@@ -867,7 +870,7 @@ def build_template_fallback_meta(
     persona = get_run_persona(db, run)
     val = validate_outbound_email(
         subject, body, pers, peer_bodies,
-        email_kind=email_kind_for(pers), critic_canon=get_critic_canon_text(run),
+        email_kind=email_kind_for(pers, persona), critic_canon=get_critic_canon_text(run),
         persona=persona, company_name=(contact.company or "").strip() or None,
     )
     return {

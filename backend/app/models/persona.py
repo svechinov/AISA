@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -34,6 +34,12 @@ class Persona(Base):
     proof_anchors_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # This persona's default sending mailbox; real per-mailbox creds are stage B (not this stage).
     primary_mailbox_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Fork-transition Phase 1, Task 5: does this persona have a frozen recruiting-industry §2.3
+    # fallback (NO_VACANCY_OPENERS/NO_VACANCY_MIDDLE) to fall back on when there's no vacancy
+    # signal? NULL/True = current behavior (email_kind_for forces no_vacancy, the body must
+    # reproduce the verbatim AlexStaff template). False = no signal still gets a freely-authored,
+    # taste-rubric-judged letter (see email_kind_for in email_validation_service.py).
+    no_signal_template_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

@@ -41,6 +41,11 @@ class RunSetup(Base):
     icp_min_employees: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     icp_max_employees: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     icp_criteria_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Fork-transition Phase 1, Task 6: overrides the AI-fit judge's "competitor, not buyer" rule
+    # (run_company_ai_fit_service.DEFAULT_FIT_EXCLUSION_RULES) for campaigns whose own offer is
+    # itself training/consulting-adjacent, where the default's worked example could otherwise read
+    # every real buyer as a same-offer competitor. Empty/NULL = default text verbatim.
+    fit_exclusion_rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     run: Mapped["Run"] = relationship("Run", back_populates="run_setup")

@@ -61,13 +61,29 @@ _NO_VACANCY_OPENER_MATCH = 0.6
 _NO_VACANCY_MIDDLE_MATCH = 0.6
 
 
-def email_kind_for(personalization: dict[str, Any] | None) -> str:
+def _no_signal_template_enabled(persona: Any) -> bool:
+    """True (current behavior) unless persona explicitly opts out. Treats a NULL column value —
+    every pre-existing persona row before this toggle existed — the same as True, not as False."""
+    if persona is None:
+        return True
+    value = getattr(persona, "no_signal_template_enabled", None)
+    return True if value is None else bool(value)
+
+
+def email_kind_for(personalization: dict[str, Any] | None, persona: Any = None) -> str:
     """Derive the generation contract from personalization — mirrors `has_open_roles` in the
     pipeline so the critic and the generator always agree on vacancy vs no-vacancy. Empty/absent
-    vacancy_signals.open_roles ⇒ no_vacancy (the §2.3 template replaced the roles hook)."""
+    vacancy_signals.open_roles normally ⇒ no_vacancy (the §2.3 template replaces the roles hook) —
+    UNLESS the sending persona has no_signal_template_enabled=False: a persona with no frozen
+    recruiting-industry fallback still gets a freely-authored letter, judged by the normal taste
+    rubric, instead of being forced to reproduce AlexStaff's verbatim template."""
     vacancy_signals = (personalization or {}).get("vacancy_signals")
     has_open_roles = isinstance(vacancy_signals, dict) and bool(vacancy_signals.get("open_roles"))
-    return EMAIL_KIND_VACANCY if has_open_roles else EMAIL_KIND_NO_VACANCY
+    if has_open_roles:
+        return EMAIL_KIND_VACANCY
+    if not _no_signal_template_enabled(persona):
+        return EMAIL_KIND_VACANCY
+    return EMAIL_KIND_NO_VACANCY
 
 
 _no_vacancy_variants_cache: list[tuple[list[str], list[str]]] | None = None
@@ -487,7 +503,7 @@ def validate_outbound_email(
     rather than guessed.
     """
     if email_kind is None:
-        email_kind = email_kind_for(personalization)
+        email_kind = email_kind_for(personalization, persona)
     is_no_vacancy = email_kind == EMAIL_KIND_NO_VACANCY
 
     issues: list[dict[str, str]] = []

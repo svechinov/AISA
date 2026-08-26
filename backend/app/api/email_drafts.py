@@ -365,10 +365,11 @@ def instruct_apply_email_draft_route(
             # would be re-judged by the LLM rubric and trip hook_not_grounded again.
             # B-077 etap 2: same per-run canon of judgement as the generation pipeline.
             # B-071: fixed-block exclusion reads the run's persona (decision 4, B-063).
+            persona = get_run_persona(db, run)
             val = validate_outbound_email(
                 payload.subject, payload.body, pers, peers,
-                email_kind=email_kind_for(pers), critic_canon=get_critic_canon_text(run),
-                persona=get_run_persona(db, run),
+                email_kind=email_kind_for(pers, persona), critic_canon=get_critic_canon_text(run),
+                persona=persona,
                 company_name=(contact.company or "").strip() or None,
             )
             updated.validation_score = val.get("score")

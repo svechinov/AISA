@@ -905,6 +905,20 @@ def _ensure_run_setups_icp_columns() -> None:
             conn.execute(text("ALTER TABLE run_setups ADD COLUMN icp_criteria_json JSON"))
 
 
+def _ensure_personas_no_signal_template_column() -> None:
+    """Fork-transition Phase 1, Task 5: personas.no_signal_template_enabled. NULL on every
+    pre-existing row (AlexStaff's alexey/stepan/anastasia) resolves to True in application code —
+    identical to today's forced no_vacancy behavior."""
+    insp = inspect(engine)
+    if "personas" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("personas")}
+    if "no_signal_template_enabled" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE personas ADD COLUMN no_signal_template_enabled BOOLEAN"))
+
+
 def _ensure_send_queue_reschedule_reason_column() -> None:
     """Why the last transient reschedule pushed this item to a new slot (B-026)."""
     insp = inspect(engine)
@@ -927,6 +941,18 @@ def _ensure_run_setups_critic_canon_column() -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE run_setups ADD COLUMN critic_canon_text TEXT"))
+
+
+def _ensure_run_setups_fit_exclusion_rules_column() -> None:
+    """Fork-transition Phase 1, Task 6: per-run override of the AI-fit judge's competitor rule."""
+    insp = inspect(engine)
+    if "run_setups" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_setups")}
+    if "fit_exclusion_rules_text" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE run_setups ADD COLUMN fit_exclusion_rules_text TEXT"))
 
 
 def _migrate_run_setups_from_legacy() -> None:
@@ -1348,6 +1374,8 @@ def ensure_schema() -> None:
     _migrate_run_setups_from_legacy()
     _ensure_run_setups_icp_columns()
     _ensure_run_setups_critic_canon_column()
+    _ensure_run_setups_fit_exclusion_rules_column()
+    _ensure_personas_no_signal_template_column()
     _ensure_send_queue_reschedule_reason_column()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
