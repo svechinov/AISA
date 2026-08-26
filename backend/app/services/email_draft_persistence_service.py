@@ -3,6 +3,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.repositories.email_draft_repo import bulk_create_email_drafts, find_draft_by_contact_id
+from app.utils.email_draft_generation_meta import generation_meta_dict_to_column_values
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,13 @@ def persist_generated_emails(db: Session, run_id: int, step_output: dict) -> dic
         }
         meta = email.get("generation_meta_json")
         if meta is not None:
-            row["generation_meta_json"] = meta
+            # Canonical: generation metadata lives in typed columns (validation_score,
+            # generation_is_valid, prompt_setup_text_used, reasoning_*, …). Map the pipeline
+            # meta dict into those columns — the single-create path already does this via
+            # apply_generation_meta_to_draft, but bulk_create_email_drafts does a bare
+            # EmailDraft(**row), so we must fold the columns into the row here.
+            row.update(generation_meta_dict_to_column_values(meta))
+            row["generation_meta_json"] = meta  # optional legacy blob (kept as fallback)
         rows.append(row)
 
     # Cold drafts carry NO program PDF attachment (the matched program lives in the body summary

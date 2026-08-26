@@ -22,6 +22,7 @@ def run_with_band(db):
     yield get_run(db, run.id)
     db.query(CompanyEvidence).filter_by(run_id=run.id).delete(synchronize_session=False)
     db.query(RunCompany).filter_by(run_id=run.id).delete(synchronize_session=False)
+    db.query(RunSetup).filter_by(run_id=run.id).delete(synchronize_session=False)
     db.commit()
 
 

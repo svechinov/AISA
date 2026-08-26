@@ -1,8 +1,10 @@
 import os
 import requests
 
+VDS_HOST = os.environ.get("VDS_HOST", "<your-server-ip>")
+
 def run_generate_emails(run_id):
-    url = f"http://95.163.223.186/api/steps/run/{run_id}/execute/generate_emails"
+    url = f"http://{VDS_HOST}/api/steps/run/{run_id}/execute/generate_emails"
     headers = {
         "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }

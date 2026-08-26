@@ -88,7 +88,7 @@ export function EmailDraftBodyPreview({
     return (
       <>
         <div
-          className="email-draft-html-preview rounded-2xl bg-muted/50 p-4 text-sm leading-6 [&_a]:break-all [&_a]:text-primary [&_a]:underline"
+          className="email-draft-html-preview rounded-lg bg-muted/50 p-4 text-sm leading-6 [&_a]:break-all [&_a]:text-primary [&_a]:underline"
           dangerouslySetInnerHTML={{ __html: safeHtml }}
         />
         {trailing}
@@ -98,7 +98,7 @@ export function EmailDraftBodyPreview({
 
   return (
     <>
-      <div className="rounded-2xl bg-muted/50 p-4 text-sm leading-6 whitespace-pre-wrap">{body ?? ""}</div>
+      <div className="rounded-lg bg-muted/50 p-4 text-sm leading-6 whitespace-pre-wrap">{body ?? ""}</div>
       {trailing}
     </>
   );

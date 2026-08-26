@@ -23,15 +23,22 @@ import {
   useDialog,
 } from "@/components/ui/dialog";
 import { NativeFilterSelect } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import appPkg from "../../package.json";
 import TrackingView from "@/components/TrackingView";
 import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
+import OpsDashboard from "@/components/OpsDashboard";
+import DraftRuTranslation from "@/components/DraftRuTranslation";
+import DraftInstructEdit from "@/components/DraftInstructEdit";
 import { DraftAssetAttachmentsField, normalizeAttachedAssetIds } from "@/components/DraftAssetAttachmentsField";
+import { draftBodyLanguage } from "@/lib/emailDraftBody";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { AiModelSelector } from "@/components/AiModelSelector";
+import AppSidebar from "@/components/AppSidebar";
+import ContextSwitcher from "@/components/ContextSwitcher";
+import { RUN_PHASE_CHIP } from "@/lib/runPhase";
 import { SmtpFarmModal } from "@/components/SmtpFarmModal";
 import { TrainingProgramsModal } from "@/components/TrainingProgramsModal";
 import { CompanySourcesModal } from "@/components/CompanySourcesModal";
@@ -70,8 +77,6 @@ import { formatDateTimeYmdHms, formatDateYmd } from "@/lib/formatDate";
 import {
   Archive,
   ArchiveRestore,
-  ArrowDownWideNarrow,
-  ArrowUpNarrowWide,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -83,6 +88,7 @@ import {
   Mail,
   Notebook,
   Pencil,
+  Plus,
   RefreshCw,
   Search,
   Settings,
@@ -91,20 +97,7 @@ import {
   Zap,
 } from "lucide-react";
 import { t } from "@/lib/i18n";
-
-/**
- * In dev without VITE_API_BASE: requests go to the same host as the UI (`/api/...`), and Vite proxies to :8000.
- * The browser then avoids hitting port 8000 directly (common firewall / IPv6 / file-policy issues).
- * In a production build without env, the default is a direct URL (with nginx, configure your own proxy).
- */
-const ENV_API = import.meta.env.VITE_API_BASE?.trim();
-
-const API_BASE =
-  ENV_API && ENV_API.length > 0
-    ? ENV_API.replace(/\/$/, "")
-    : import.meta.env.DEV
-      ? "/api"
-      : "http://127.0.0.1:8000";
+import { API_BASE } from "@/lib/apiBase";
 
 /** GET /email-drafts/run/:id — compact list (`body_preview` only; full `body` via GET /email-drafts/:id when editing). */
 function emailDraftsRunListPath(runId) {
@@ -114,6 +107,7 @@ function emailDraftsRunListPath(runId) {
 /** Labels for GET /setup/status summary (dashboard informer). */
 const SETUP_LLM_LABELS = {
   claude: "Claude",
+  gemini: "Gemini",
   openai: "OpenAI",
   perplexity: "Perplexity",
   grok: "Grok",
@@ -133,21 +127,26 @@ const DEFAULT_OUTREACH_BRIEF =
   "How long has the respondent company been in the market:\n\n" +
   "Additional information:\n\n";
 
-const DEFAULT_FG_PROFILER_PROMPT = `О нас (FG Consulting): мы внедряем системные изменения в корпоративное управление и обучение — продажи и лидерство.
+const DEFAULT_PROFILER_PROMPT = `About us (AlexStaff Agency, alexstaff.agency): recruiting for game development studios since 2006. We are a team of recruiters who grew up inside gamedev, not an HR agency that "also does games". Voice: "we" — the agency team. Sender: Alexey, based in Cyprus (in-person meetings possible).
 
-Наш фокус сейчас — Quick Win: быстрые, точечные решения, которые дают клиенту мгновенную пользу, «расшивают» узкие места и открывают дверь к долгосрочным контрактам. Формат может быть любым под боль клиента: тренинг, фасилитационная сессия, воркшоп, ассессмент (оценка), экспресс-аудит управления.
+Proof anchors (all can be named openly):
+- Alawar (since 2006): hired ~70 people — a third of the company at its 2008 peak (~200).
+- Helio Games (Limassol, Cyprus, since 2021): around 20 hires — a significant part of the studio's current team, with the studio coming back to us year after year.
+- Social Quantum: opened their Novosibirsk office from scratch, 2-3 → 120+ people.
+- Broken Sun MMORPG (OIJO GAMES / REDNECK STUDIO): scaled the team 30 → 260, ~500 hires, through open beta; relocated up to 35 people per month under hard logistics.
 
-На какие боли заходим: управленческий голод (нехватка сильных руководителей, проблемы при слияниях/диверсификации/масштабировании) и проблемы в продажах (слабая конверсия, текучка/выгорание РОП, неэффективные процессы).
+Offer: first candidate 24-72 hours after the brief; search starts within hours. Roles: Unity/C#, Unreal, art, animation, game design, narrative, QA, backend (Node/TS, .NET). We source worldwide — remote and relocation, many countries and languages, not limited to one market.
 
-Цель письма — короткий ознакомительный 15-минутный звонок.
+Differentiator: we don't send CV piles — we sell your product and culture to candidates, so they arrive at the tech interview already motivated.
 
-Тон: экспертный, лаконичный, как личное письмо 1-на-1, без сейлзовых клише.
-Запрещено: IT-жаргон (TaaS, аутстаффинг, «инновационный»). Используй формулировки «внешний партнёр», «развитие управленческих компетенций».
-НЕ предлагаем IT/CRM-системы — мы про управленческий консалтинг и обучение.`;
+Email goal: a short intro 15-minute call (or an in-person meeting for Cyprus-based studios).
+
+Tone: expert, concise, like a personal 1-on-1 note; no sales clichés, no buzzwords.
+We are a recruiting partner — do NOT pitch software, outsourcing, or consulting.`;
 
 const DEFAULT_OSINT_PROMPT =
   "Find deep business intelligence on {{company}} (website: {{website}}). " +
-  "Focus on: 1. Recent news and 2026 strategy. 2. Management and HR challenges (e.g., expansion, restructuring, leadership training needs). 3. Key decision makers (CEO, HR Director).";
+  "Focus on: 1. Recent news, releases, funding, strategy. 2. Team and hiring signals (open roles, scaling, new projects, key departures). 3. Key decision makers (CEO, founders, HR/People lead, producers).";
 
 const DEFAULT_DEEP_OSINT_PROMPT =
   "Анализ корпоративных данных для {company_name}.\n" +
@@ -167,24 +166,16 @@ const DEFAULT_DEEP_OSINT_PROMPT =
   '    "email_mask_guess": "предполагаемая маска или null"\n' +
   "}";
 
-const DEFAULT_REASONING_PROMPT = `You are a Senior B2B SDR Strategist.
-Your goal is to analyze the company dossier and the recipient's role, and formulate a strategy for the cold email.
+// Empty = the backend's built-in 5-slot pipeline prompt applies (hook/angle/problem/
+// solution/cta grounded in OSINT + LLM critic). Only fill these to OVERRIDE that
+// pipeline for a specific run — a saved legacy 4-slot prompt here would silently
+// replace the whole skeleton.
+const DEFAULT_REASONING_PROMPT = "";
 
-Based on the provided Master Prompt, OSINT data, and the recipient's profile, generate the following elements for the email:
-1. hook: An engaging opening hook that grabs attention.
-2. angle: The main value proposition angle tailored to their business.
-3. key_point: The core problem we solve for them.
-4. cta_type: The recommended Call to Action (e.g., "Ask for 15 min call", "Send case study").
-
-Output strictly valid JSON with these keys: "hook", "angle", "key_point", "cta_type".`;
-
-const DEFAULT_DRAFT_PROMPT =
-  "You are an expert B2B copywriter.\n" +
-  "Draft a highly personalized, concise cold email using the Master Prompt context, the company dossier, and the recipient's role.\n" +
-  "Focus on their specific pain points and keep the tone professional but conversational.";
+const DEFAULT_DRAFT_PROMPT = "";
 
 const DEFAULT_COMPANY_SEARCH_PROMPT =
-  "Specific sources to prioritize (e.g., vedomosti.ru, kommersant.ru, rbc.ru) or custom search instructions.";
+  "Specific sources to prioritize (e.g., gamesindustry.biz, pocketgamer.biz, LinkedIn, local business registries) or custom search instructions.";
 
 /** Stored in `email_drafts.review_notes` when reviewer uses the clock (defer send). */
 const OUTBOUND_REVIEW_SEND_LATER = "send_later";
@@ -307,14 +298,14 @@ function reviewDraftsSnapMode(draftsSnap) {
 function SnapshotCardsPlaceholder({ mode, kind }) {
   if (mode === "empty") {
     return (
-      <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
+      <div className="rounded-lg border border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
         No {kind} data for this run.
       </div>
     );
   }
   return (
     <div
-      className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-10 text-center text-sm text-muted-foreground"
+      className="rounded-lg border border-dashed border-muted-foreground/25 py-10 text-center text-sm text-muted-foreground"
       role="status"
       aria-live="polite"
     >
@@ -341,7 +332,7 @@ function SwitchRunListRow({ run, selectedRun, onSelect }) {
     <button
       type="button"
       aria-current={isCurrent ? "true" : undefined}
-      className={`w-full rounded-2xl border-2 p-3 text-left text-sm transition-colors hover:bg-muted/50 ${
+      className={`w-full rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/50 ${
         isCurrent ? "border-primary bg-primary/5" : "border-border"
       }`}
       onClick={() => void onSelect(run.id, run)}
@@ -525,11 +516,11 @@ function runSetupPrefsRollbackPartial(prefsBefore, prevRun) {
 }
 
 function getPromptSetupEditorInitialText(run) {
-  if (!run) return DEFAULT_FG_PROFILER_PROMPT;
+  if (!run) return DEFAULT_PROFILER_PROMPT;
   if (typeof run.prompt_setup_text === "string" && run.prompt_setup_text.length > 0) {
     return run.prompt_setup_text;
   }
-  return DEFAULT_FG_PROFILER_PROMPT;
+  return DEFAULT_PROFILER_PROMPT;
 }
 
 /** Instant dialog text: cached bodies (localStorage) beat card-only selectedRun (no context_json). */
@@ -557,7 +548,7 @@ function seedNewRunFormFromRun(run) {
       notes: "",
       segment: "",
       outreach_brief: DEFAULT_OUTREACH_BRIEF,
-      prompt_setup_text: DEFAULT_FG_PROFILER_PROMPT,
+      prompt_setup_text: DEFAULT_PROFILER_PROMPT,
       osint_prompt: DEFAULT_OSINT_PROMPT,
       deep_osint_prompt: DEFAULT_DEEP_OSINT_PROMPT,
       reasoning_prompt: DEFAULT_REASONING_PROMPT,
@@ -581,7 +572,7 @@ function seedNewRunFormFromRun(run) {
     notes: String(run.notes ?? "").trim(),
     segment: seg,
     outreach_brief: brief,
-    prompt_setup_text: String(run.prompt_setup_text ?? "").trim() || DEFAULT_FG_PROFILER_PROMPT,
+    prompt_setup_text: String(run.prompt_setup_text ?? "").trim() || DEFAULT_PROFILER_PROMPT,
     osint_prompt: String(run.osint_prompt ?? "").trim() || DEFAULT_OSINT_PROMPT,
     deep_osint_prompt: String(run.deep_osint_prompt ?? "").trim() || DEFAULT_DEEP_OSINT_PROMPT,
     reasoning_prompt: String(run.reasoning_prompt ?? "").trim() || DEFAULT_REASONING_PROMPT,
@@ -605,7 +596,7 @@ function seedNewRunFormFromEditFormRead(payload) {
     notes: String(payload.notes ?? "").trim(),
     segment: seg,
     outreach_brief: String(payload.outreach_brief ?? "").trim() || DEFAULT_OUTREACH_BRIEF,
-    prompt_setup_text: String(payload.prompt_setup_text ?? "").trim() || DEFAULT_FG_PROFILER_PROMPT,
+    prompt_setup_text: String(payload.prompt_setup_text ?? "").trim() || DEFAULT_PROFILER_PROMPT,
     osint_prompt: String(payload.osint_prompt ?? "").trim() || DEFAULT_OSINT_PROMPT,
     deep_osint_prompt: String(payload.deep_osint_prompt ?? "").trim() || DEFAULT_DEEP_OSINT_PROMPT,
     reasoning_prompt: String(payload.reasoning_prompt ?? "").trim() || DEFAULT_REASONING_PROMPT,
@@ -633,8 +624,6 @@ const LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS = 120000;
 const EDIT_FORM_OPEN_TIMEOUT_MS = LOAD_RUN_DETAILS_BUNDLE_TIMEOUT_MS;
 /** GET /runs/:id/companies — allow long wait when the server worker is busy (do not abort client-side). */
 const COMPANIES_HTTP_TIMEOUT_MS = 300000;
-/** POST /sending/.../mock-send-preview — synchronous Gmail on server; allow long wait. */
-const MOCK_SEND_PREVIEW_POST_TIMEOUT_MS = 120000;
 /** Poll GET /email-drafts/:id until terminal status (API returns 202 immediately; Gmail runs in background). */
 const OUTBOUND_SEND_POLL_MS = 2000;
 const OUTBOUND_SEND_POLL_MAX = 30;
@@ -647,16 +636,8 @@ const POLL_METRICS_TIMEOUT_MS = 60000;
 const METRICS_SILENT_FAILURE_LOG_INTERVAL_MS = 45000;
 /** GET /email-drafts/:id for edit modal — list often already has full body; this caps wait when a second GET is needed. */
 const EMAIL_DRAFT_GET_FOR_EDIT_TIMEOUT_MS = 45000;
-/** Contact analyzer: many Gmail searches in one request — allow long run (default 25s would abort mid-flight). */
-const CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS = 600000;
-/** Single-address Gmail search can be slow. */
-const CONTACT_ANALYZER_VERIFY_ONE_TIMEOUT_MS = 120000;
-/** Import inbox+sent (6 months) may fetch many messages; allow long run. */
-const CONTACT_ANALYZER_IMPORT_INBOX_TIMEOUT_MS = 600000;
-/** Rows per page in Contact analyzer table. */
-const CONTACT_ANALYZER_PAGE_SIZE = 50;
 /** Same page size for Companies table and Contacts group lists. */
-const WORKSPACE_TABLE_PAGE_SIZE = CONTACT_ANALYZER_PAGE_SIZE;
+const WORKSPACE_TABLE_PAGE_SIZE = 50;
 /** One GET loads up to this many company rows; pagination is client-side only. */
 const COMPANIES_FETCH_MAX = 500;
 /** Retry-all queue scan: find next candidate across this many companies (API allows up to 5000). */
@@ -753,7 +734,7 @@ function formatSetupIntegrationInformer(si) {
       : "—";
   const cdnId = String(si?.cdn_provider ?? "").trim().toLowerCase();
   const cdnPart = cdnId ? SETUP_CDN_LABELS[cdnId] || pretty(cdnId) : "—";
-  const outreachPart = si?.apollo_outreach_ready === true ? "Apollo" : "—";
+  const outreachPart = "—";
   return { llmPart, cdnPart, outreachPart };
 }
 
@@ -763,7 +744,7 @@ function isStaleOutboundDraftErrorMessage(msg) {
   return String(msg).toLowerCase().includes("simplenamespace");
 }
 
-/** Append server-pushed Activity lines (e.g. Apollo progress) from workspace-lite / workspace-tick. */
+/** Append server-pushed Activity lines from workspace-lite / workspace-tick. */
 function appendHumanUiActivityInformers(lite, appendLog) {
   const rows = lite?.activity_informers;
   if (!Array.isArray(rows) || rows.length === 0) return;
@@ -839,6 +820,26 @@ function contactRoleFromPayload(contact) {
   return String(sj.role ?? sj.title ?? sj.job_title ?? sj.position ?? "").trim();
 }
 
+/** B-445: human label for contact.source_json.source — GDPR provenance shown on the card. */
+const CONTACT_SOURCE_LABELS = {
+  apollo: "Apollo",
+  osint: "Открытые источники",
+  replacement_search: "Замена контакта",
+  amocrm_import: "Импорт amoCRM",
+  manual: "Добавлен вручную",
+  llm_generated: "Сгенерировано LLM — не найдено в источниках",
+};
+
+/** Decision 11.08: llm_generated is not provenance, it's a warning — LLM invented this contact
+ * rather than finding it in a search corpus, must never read as "found publicly at ...". */
+const CONTACT_SOURCE_IS_WARNING = { llm_generated: true };
+
+function contactSourceLabel(contact) {
+  const source = contact?.source_json?.source;
+  if (!source) return null;
+  return CONTACT_SOURCE_LABELS[source] ?? source;
+}
+
 /** Expand panel-lite snapshot row to a full contact-shaped object for display (GET /contacts/run not applied yet). */
 function contactRowFromPanelLitePreview(p, runId) {
   if (!p || typeof p !== "object") return null;
@@ -871,10 +872,10 @@ function contactRowFromPanelLitePreview(p, runId) {
 function AiPipelineBadge({ value }) {
   if (!value || value === "new") return null;
   const labels = {
-    needs_osint: "⏳ Needs OSINT",
-    osint_running: "🔍 OSINT Running",
-    needs_profiling: "🧠 Needs Profiling",
-    profiled: "✅ Profiled"
+    needs_osint: "⏳ Нужен OSINT",
+    osint_running: "🔍 OSINT идёт",
+    needs_profiling: "🧠 Нужен профайлинг",
+    profiled: "✅ Профиль готов"
   };
   const colors = {
     needs_osint: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300",
@@ -898,14 +899,14 @@ function SendLifecycleBadge({ status }) {
   if (st === "dead_mailbox") {
     return (
       <Badge variant="destructive" className="font-normal text-xs">
-        Dead mailbox
+        Мёртвый ящик
       </Badge>
     );
   }
   const cls = sendLifecycleBadgeClass[st];
   const label =
     st === "bounced"
-      ? "Bounced"
+      ? "Возврат"
       : pretty(st);
   return (
     <Badge className={cls} variant="secondary">
@@ -1176,38 +1177,6 @@ function contactReviewTabBucket(c) {
   return "no_email";
 }
 
-/** Total performance card: Gmail daily send-tier hint from 24h volume (all runs). */
-function totalPerformance24hBand(emailsSent24h) {
-  const n = Number(emailsSent24h);
-  const safe = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
-  if (safe >= 200) {
-    return {
-      label: "danger of blocking",
-      cardClass: "border-red-500/55 bg-red-500/15",
-      captionClass: "text-red-700 dark:text-red-400",
-    };
-  }
-  if (safe >= 180) {
-    return {
-      label: "blocking capability",
-      cardClass: "border-orange-500/55 bg-orange-500/15",
-      captionClass: "text-orange-800 dark:text-orange-400",
-    };
-  }
-  if (safe > 160) {
-    return {
-      label: "above normal",
-      cardClass: "border-amber-400/55 bg-amber-500/15",
-      captionClass: "text-amber-900 dark:text-amber-300",
-    };
-  }
-  return {
-    label: "normal",
-    cardClass: "border-border bg-card",
-    captionClass: "text-muted-foreground",
-  };
-}
-
 function NewProjectFooter({ projectName, onCreated }) {
   const { setOpen } = useDialog();
   return (
@@ -1263,19 +1232,21 @@ function validationScoreToneClass(score) {
 }
 
 const MAIN_NAV = [
-  { value: "runs", label: t("Кампании") },
+  { value: "ops", label: t("Управление") },
+  { value: "runs", label: "Проекты" },
   { value: "companies", label: t("Companies") },
   { value: "contacts", label: t("Contacts") },
   { value: "drafts", label: t("Drafts") },
-  { value: "events", label: t("Events") },
+  // «События» убраны из навигации (решение 10.07): сырой лог дублируется «Тредами»,
+  // глубокая диагностика — через API/БД. Экран events остаётся в TrackingView (роутинг цел).
   { value: "threads", label: t("Threads") },
   { value: "reply-drafts", label: t("Reply drafts") },
   { value: "reminders", label: t("Reminders") },
-  { value: "assets", label: t("Assets") },
-  { value: "packets", label: t("Packets") },
+  // «Ассеты»/«Пакеты» убраны из навигации (решение Алексея 10.07): вложения в первых
+  // письмах — легаси старой системы; материалы отправляются только после ответа.
+  // Бэкенд-механика ассетов сохранена — вернём точечно в ответы, если понадобится.
   { value: "dead", label: t("Dead mailboxes") },
   { value: "queue", label: t("Re-search queue") },
-  { value: "contact-analyzer", label: t("Contact analyzer") },
 ];
 
 /** Nav values that show TrackingView — load minimal strip (signature + event_chain) only here. */
@@ -1378,7 +1349,10 @@ export default function AiBizOsHumanUI() {
   const [projectView, setProjectView] = useState(() => snapshotInitialProjectView());
   const [mainNav, setMainNav] = useState(() => {
     const lc = snapshotReadLastContext();
-    return typeof lc?.mainNav === "string" ? lc.mainNav : "runs";
+    const saved = typeof lc?.mainNav === "string" ? lc.mainNav : "runs";
+    // Гвард: после релиза в localStorage мог остаться раздел, убранный из навигации
+    // (assets/packets/events) → это дало бы экран-сироту без пути назад. Падаем на «Сегодня».
+    return MAIN_NAV.some((item) => item.value === saved) ? saved : "ops";
   });
   const [runsList, setRunsList] = useState([]);
   /** GET /runs/:id/tracking-strip while on Tracking nav — never full Кампания row. */
@@ -1386,7 +1360,7 @@ export default function AiBizOsHumanUI() {
   const [workspace, setWorkspace] = useState(null);
   /** When === selectedRun.id, Review contacts / Drafts sub-tab counts use live data; else localStorage snapshot. */
   const [runDetailsHydratedId, setRunDetailsHydratedId] = useState(null);
-  /** GET /contacts/run/:id applied for this run (Review + contact-analyzer). */
+  /** GET /contacts/run/:id applied for this run (Review). */
   const [contactsListReadyRunId, setContactsListReadyRunId] = useState(null);
   /** Last run where GET /contacts/run failed — stops infinite "Loading…" without marking list hydrated. */
   const [contactsListFailedRunId, setContactsListFailedRunId] = useState(null);
@@ -1402,6 +1376,32 @@ export default function AiBizOsHumanUI() {
   const [totalPerformance, setTotalPerformance] = useState(() => snapshotReadTotalPerformance());
     const [isCreatingNewRun, setIsCreatingNewRun] = useState(false);
   const [globalSetupOpen, setGlobalSetupOpen] = useState(false);
+  // B-028: «Офферы» и «SMTP-ящики» открываются из сайдбара → «Настройки» (кнопки из шапки убраны)
+  const [offersOpen, setOffersOpen] = useState(false);
+  const [smtpFarmOpen, setSmtpFarmOpen] = useState(false);
+  // B-017: клик по №письма в «Очереди отправки» → «Ревью писем» с прокруткой к карточке
+  const [focusDraftId, setFocusDraftId] = useState(null);
+
+  useEffect(() => {
+    if (mainNav !== "drafts" || focusDraftId == null) return;
+    // Сбрасываем focusDraftId после первой удачной прокрутки — иначе эффект переотрабатывает на
+    // каждом обновлении списка черновиков (поллинг) и дёргает вид обратно к карточке (код-ревью).
+    const tryScroll = () => {
+      const el = document.getElementById(`draft-card-${focusDraftId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setFocusDraftId(null);
+      }
+      return Boolean(el);
+    };
+    // список черновиков грузится своим GET'ом — пробуем сразу и с запасом по времени
+    const t1 = setTimeout(tryScroll, 300);
+    const t2 = setTimeout(tryScroll, 1400);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [mainNav, focusDraftId, drafts]);
 
   /** Snapshot when the dialog opened from an existing run: trimmed fields + optional runId for Update vs Create. */
   const [newRunBaseline, setNewRunBaseline] = useState(null);
@@ -1410,7 +1410,6 @@ export default function AiBizOsHumanUI() {
   /** Invalidates in-flight GET /edit-form when dialog closes or mode switches — never blocks UI. */
   const editFormFetchSeqRef = useRef(0);
   const newRunDialogBusy = newRunCreateInFlight || newRunUpdateInFlight;
-  const [switchRunOpen, setSwitchRunOpen] = useState(false);
   /** PATCH /runs/:id/project — attach run to current project when project_id drifted. */
   const [runProjectMoveInFlight, setRunProjectMoveInFlight] = useState(false);
   const [closeRunOpen, setCloseRunOpen] = useState(false);
@@ -1423,48 +1422,11 @@ export default function AiBizOsHumanUI() {
     notes: "",
     segment: "",
     outreach_brief: DEFAULT_OUTREACH_BRIEF,
-    prompt_setup_text: DEFAULT_FG_PROFILER_PROMPT,
+    prompt_setup_text: DEFAULT_PROFILER_PROMPT,
     email_style_mode: "auto",
     osint_discovery_mode: "hardcore",
   });
 
-  /** AmoCRM Import State */
-  const [amoCrmImportOpen, setAmoCrmImportOpen] = useState(false);
-  const [amoCrmFile, setAmoCrmImportFile] = useState(null);
-  const [amoCrmRunName, setAmoCrmRunName] = useState("");
-  const [amoCrmProjectId, setAmoCrmProjectId] = useState("");
-  const [amoCrmImportInFlight, setAmoCrmImportInFlight] = useState(false);
-
-  const handleAmoCrmImport = async () => {
-    if (!amoCrmFile || !amoCrmRunName || !amoCrmProjectId) return;
-    setAmoCrmImportInFlight(true);
-    setError("");
-    const formData = new FormData();
-    formData.append("file", amoCrmFile);
-    formData.append("run_name", amoCrmRunName);
-    formData.append("project_id", amoCrmProjectId);
-
-    try {
-      const authToken = localStorage.getItem("aibizos_auth_token");
-      const res = await fetch(`${API_BASE}/runs/import-amocrm`, {
-        method: "POST",
-        headers: authToken ? { "Authorization": `Bearer ${authToken}` } : {},
-        body: formData
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const run = await res.json();
-      setAmoCrmImportOpen(false);
-      setAmoCrmImportFile(null);
-      setAmoCrmRunName("");
-      appendActivityLog(`AmoCRM Import: Success. Created Кампания #${run.id}`);
-      await loadProjects();
-      await loadRunDetails(run.id);
-    } catch (e) {
-      setUiError(setError, e);
-    } finally {
-      setAmoCrmImportInFlight(false);
-    }
-  };
   /** Inline edit: { id, email } */
   const [editingContact, setEditingContact] = useState(null);
   /** POST PATCH /contacts/:id/edit in flight (Review contacts Save). */
@@ -1492,8 +1454,13 @@ export default function AiBizOsHumanUI() {
   /** True while GET /email-drafts/:id for the editor is in flight — modal still opens (was null until fetch, so Edit looked broken). */
   const [editDraftLoading, setEditDraftLoading] = useState(false);
   const [editDraftSaving, setEditDraftSaving] = useState(false);
+  /** Code review afe4e2d (B-544): saveEditDraft failure shown INSIDE the modal — the page-level
+   * banner sits under the portal's dimmer (z-[100], bg-black/50) and is not visible to the eye. */
+  const [editDraftError, setEditDraftError] = useState("");
   /** Edit draft dialog: apply chosen attachments to all drafts in Pending or Approved (matches active sub-tab). */
   const [applyAssetsEditScope, setApplyAssetsEditScope] = useState("none");
+  /** Edit draft dialog: "text" (дословный Textarea, дефолт) | "rich" (EmailDraftRichTextEditor). */
+  const [editDraftBodyMode, setEditDraftBodyMode] = useState("text");
   const [assetsLibrary, setAssetsLibrary] = useState([]);
   const [runAssetPackets, setRunAssetPackets] = useState([]);
   /** Set after a successful assets GET (Tracking can also push via onStaticAssetsSynced). */
@@ -1556,7 +1523,7 @@ export default function AiBizOsHumanUI() {
   const [signatureEditorMount, setSignatureEditorMount] = useState(false);
   const [signatureSetupSaving, setSignatureSetupSaving] = useState(false);
   const [promptSetupOpen, setPromptSetupOpen] = useState(false);
-  const [promptSetupText, setPromptSetupText] = useState(DEFAULT_FG_PROFILER_PROMPT);
+  const [promptSetupText, setPromptSetupText] = useState(DEFAULT_PROFILER_PROMPT);
   const [promptOsintText, setPromptOsintText] = useState(DEFAULT_OSINT_PROMPT);
   const [promptCompanySearchText, setPromptCompanySearchText] = useState(DEFAULT_COMPANY_SEARCH_PROMPT);
   const [promptDeepOsintText, setPromptDeepOsintText] = useState(DEFAULT_DEEP_OSINT_PROMPT);
@@ -1591,7 +1558,7 @@ export default function AiBizOsHumanUI() {
    * Keyed by collect_index; reset when switching runs.
    */
   const [companyFindUnavailable, setCompanyFindUnavailable] = useState(() => ({}));
-  /** { name, engine: "apollo" | "llm" } while Continue searching / Retry all / per-row Retry runs find. */
+  /** { name, engine: "llm" } while Continue searching / Retry all / per-row Retry runs find. */
   const [companyBulkFindProgress, setCompanyBulkFindProgress] = useState(null);
   const [removeCompanyDialog, setRemoveCompanyDialog] = useState(null);
   const [removeCompanyInFlight, setRemoveCompanyInFlight] = useState(false);
@@ -1607,19 +1574,6 @@ export default function AiBizOsHumanUI() {
 
   const [companyAiFitBatchLoading, setCompanyAiFitBatchLoading] = useState(false);
   const [setupIntegration, setSetupIntegration] = useState(null);
-  const [yandexSetupOpen, setYandexSetupOpen] = useState(false);
-  const [yandexForm, setYandexForm] = useState({ yandexEmail: "", yandexPassword: "" });
-  const [yandexSetupBusy, setYandexSetupBusy] = useState(false);
-  const [yandexSetupErr, setYandexSetupErr] = useState("");
-  const [testSendBusy, setTestSendBusy] = useState(false);
-  const [analyzerRows, setAnalyzerRows] = useState([]);
-  const [analyzerLoading, setAnalyzerLoading] = useState(false);
-  const [analyzerRowBusy, setAnalyzerRowBusy] = useState(() => ({}));
-  const [analyzerBulkBusy, setAnalyzerBulkBusy] = useState(false);
-  const [analyzerBulkNote, setAnalyzerBulkNote] = useState("");
-  const [analyzerPage, setAnalyzerPage] = useState(1);
-  /** false = Not verified → No history → History detected (matches API); true = reversed */
-  const [analyzerGmailHistorySortDesc, setAnalyzerGmailHistorySortDesc] = useState(false);
 
   const gmailSendReady = setupIntegration?.gmail_send_ready === true;
 
@@ -1649,26 +1603,7 @@ export default function AiBizOsHumanUI() {
     if (!selectedRun) setRunDetailsHydratedId(null);
   }, [selectedRun]);
 
-  const contactAnalyzerNavVisible = Boolean(
-    gmailSendReady && selectedRun && Array.isArray(contactsVisible) && contactsVisible.length > 0,
-  );
-
-  const visibleMainNavItems = useMemo(
-    () =>
-      MAIN_NAV.filter(
-        (item) => item.value !== "contact-analyzer" || contactAnalyzerNavVisible,
-      ),
-    [contactAnalyzerNavVisible],
-  );
-
-  const switchRunOpenList = useMemo(
-    () => (Array.isArray(runsList) ? runsList.filter((r) => !r.closed_at) : []),
-    [runsList],
-  );
-  const switchRunClosedList = useMemo(
-    () => (Array.isArray(runsList) ? runsList.filter((r) => r.closed_at) : []),
-    [runsList],
-  );
+  const visibleMainNavItems = MAIN_NAV;
 
   const runProjectMismatch = useMemo(() => {
     if (!selectedRun?.id || !selectedProject) return false;
@@ -1684,69 +1619,40 @@ export default function AiBizOsHumanUI() {
     return row?.name?.trim() || `Проект #${selectedRun.project_id}`;
   }, [runProjectMismatch, selectedRun?.project_id, projects]);
 
-  const analyzerRowsSorted = useMemo(() => {
-    const rows = analyzerRows.slice();
-    const badgeRank = (st) => {
-      if (st == null) return 0;
-      if (st === "no_history") return 1;
-      if (st === "history_detected") return 2;
-      return 3;
-    };
-    rows.sort((a, b) => {
-      const ra = badgeRank(a.gmail_history_status);
-      const rb = badgeRank(b.gmail_history_status);
-      const primary = analyzerGmailHistorySortDesc ? rb - ra : ra - rb;
-      if (primary !== 0) return primary;
-      return String(a.email_normalized).localeCompare(String(b.email_normalized));
-    });
-    return rows;
-  }, [analyzerRows, analyzerGmailHistorySortDesc]);
-
-  const analyzerPageCount = Math.max(1, Math.ceil(analyzerRowsSorted.length / CONTACT_ANALYZER_PAGE_SIZE));
-
-  const analyzerRowsPage = useMemo(() => {
-    const start = (analyzerPage - 1) * CONTACT_ANALYZER_PAGE_SIZE;
-    return analyzerRowsSorted.slice(start, start + CONTACT_ANALYZER_PAGE_SIZE);
-  }, [analyzerRowsSorted, analyzerPage]);
-
-  useEffect(() => {
-    setAnalyzerPage((p) => Math.min(Math.max(1, p), analyzerPageCount));
-  }, [analyzerPageCount, analyzerRowsSorted.length]);
-
   const gmailSetupHintsFromApi = useMemo(() => {
     const raw = setupIntegration?.hints;
     if (!Array.isArray(raw)) return [];
     return raw.filter((h) => String(h).startsWith("Gmail setup:"));
   }, [setupIntegration?.hints]);
 
-  const openGmailSetup = useCallback(() => {
-    setGmailSetupErr("");
-    setYandexSetupOpen(true);
-  }, []);
-
-  const connectYandex = async () => {
-    setYandexSetupBusy(true);
+  /** B-015: раньше кнопка «переподключить почту» открывала легаси-форму Яндекса; теперь —
+   *  штатный Gmail OAuth (POST /oauth/google/start → redirect на согласие Google → callback).
+   *  B-071 stage B: опциональный mailboxEmail — какой ящик подключаем (напр. Степана); без него —
+   *  как раньше, дефолтный глобальный ящик Алексея. */
+  const openGmailSetup = useCallback(async (mailboxEmail) => {
+    setError("");
     try {
-      const res = await fetch(`${API_BASE}/setup/yandex`, {
+      const res = await fetch(`${API_BASE}/oauth/google/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          yandex_email: yandexForm.yandexEmail?.trim(),
-          yandex_password: yandexForm.yandexPassword?.trim(),
+          public_origin: window.location.origin,
+          return_path: "/",
+          ...(mailboxEmail ? { mailbox_email: mailboxEmail } : {}),
         }),
       });
-      if (res.ok) {
-        setYandexSetupOpen(false);
-        void loadSetupIntegration();
-      } else {
-        console.error("Yandex setup failed");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.authorization_url) {
+        throw new Error(typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`);
       }
+      window.location.href = data.authorization_url;
     } catch (e) {
-      console.error(e);
-    } finally {
-      setYandexSetupBusy(false);
+      setError(`Подключение Gmail: ${String(e?.message || e)}`);
     }
-  };
+  }, []);
+
+  /** B-071 stage B: text field for "Подключить ещё ящик" (см. блок «Ящики» на экране Черновиков). */
+  const [newMailboxEmailInput, setNewMailboxEmailInput] = useState("");
 
   const loadSetupIntegration = useCallback(async () => {
     try {
@@ -1900,8 +1806,8 @@ export default function AiBizOsHumanUI() {
     if (!runId) return;
     setError("");
     setContinueCompanyFindLoading(true);
-    const engine = setupIntegration?.apollo_outreach_ready === true ? "apollo" : "llm";
-    const engineLabel = engine === "apollo" ? "Apollo" : "LLM";
+    const engine = "llm";
+    const engineLabel = "LLM";
     appendActivityLog(`Companies: Continue searching — start (run_id=${runId}, ${engineLabel})`);
     const companiesSnapshotUrl = () => {
       const ps = new URLSearchParams();
@@ -1995,7 +1901,7 @@ export default function AiBizOsHumanUI() {
     const k = Number(collectIndex);
     if (!Number.isFinite(k) || k < 0) return;
     setError("");
-    const engine = setupIntegration?.apollo_outreach_ready === true ? "apollo" : "llm";
+    const engine = "llm";
     const rowHint = companiesPanel?.companies?.find((c) => normalizeCompanyCollectIndex(c) === k);
     const progressName = String(rowHint?.name ?? rowHint?.company ?? "—").trim() || "—";
     setCompanyBulkFindProgress({ name: progressName, engine });
@@ -2063,7 +1969,7 @@ export default function AiBizOsHumanUI() {
   const retryAllCompanyFindNotFound = async (runId) => {
     if (!runId) return;
     setError("");
-    const engine = setupIntegration?.apollo_outreach_ready === true ? "apollo" : "llm";
+    const engine = "llm";
     setCompanyRetryAllLoading(true);
     appendActivityLog(`Companies: Retry all — start (run_id=${runId})`);
     let retryAllAbortedByError = false;
@@ -2754,7 +2660,7 @@ export default function AiBizOsHumanUI() {
     [setError, appendActivityLog],
   );
 
-  /** Contacts tab / contact-analyzer — full GET /contacts/run (deduped list); search is client-side. */
+  /** Contacts tab — full GET /contacts/run (deduped list); search is client-side. */
   const refreshRunContactsOnly = useCallback(
     async (runId) => {
       if (!runId) return;
@@ -2917,7 +2823,7 @@ export default function AiBizOsHumanUI() {
   );
 
   useEffect(() => {
-    if (mainNav !== "contacts" && mainNav !== "contact-analyzer") {
+    if (mainNav !== "contacts") {
       try {
         contactsRunListAbortRef.current?.abort();
       } catch {
@@ -3050,28 +2956,6 @@ export default function AiBizOsHumanUI() {
     assetPacketsLoadedForRunIdRef.current = rid ?? null;
   }, [appendRunTraceLog]);
 
-  const loadContactAnalyzer = useCallback(async () => {
-    const rid = selectedRun?.id;
-    if (!rid) {
-      setAnalyzerRows([]);
-      return;
-    }
-    setAnalyzerBulkNote("");
-    setAnalyzerLoading(true);
-    appendActivityLog(`Contact analyzer: GET /runs/${rid}/contact-analyzer`);
-    try {
-      const data = await api(`/runs/${rid}/contact-analyzer`);
-      setAnalyzerRows(Array.isArray(data?.rows) ? data.rows : []);
-      appendActivityLog(`Contact analyzer: ${Array.isArray(data?.rows) ? data.rows.length : 0} rows.`);
-    } catch (e) {
-      appendActivityLog(`Contact analyzer: ${detailFromApiErrorMessage(e?.message || e) || String(e)}`);
-      setUiError(setError, e);
-      setAnalyzerRows([]);
-    } finally {
-      setAnalyzerLoading(false);
-    }
-  }, [selectedRun?.id, appendActivityLog]);
-
   useEffect(() => {
     if (!editingContact?.id) return;
     const c = contacts.find((x) => x.id === editingContact.id);
@@ -3106,17 +2990,13 @@ export default function AiBizOsHumanUI() {
       draftsListReadyRunIdRef.current = null;
     }
     /** Drafts UI joins drafts + contacts (e.g. «Generating…» placeholders) — keep contacts while on Drafts. */
-    if (!["contacts", "contact-analyzer", "companies", "drafts"].includes(mainNav)) {
+    if (!["contacts", "companies", "drafts"].includes(mainNav)) {
       setContacts([]);
       setContactsListReadyRunId(null);
       contactsListReadyRunIdRef.current = null;
     }
     if (mainNav !== "companies") {
       setCompaniesPanel(null);
-    }
-    if (mainNav !== "contact-analyzer") {
-      setAnalyzerRows([]);
-      setAnalyzerLoading(false);
     }
   }, [mainNav]);
 
@@ -3138,9 +3018,7 @@ export default function AiBizOsHumanUI() {
               ? "Review drafts"
               : mainNav === "companies"
                 ? "Companies"
-                : mainNav === "contact-analyzer"
-                  ? "Contact analyzer"
-                  : `Tracking / ${String(mainNav)}`,
+                : `Tracking / ${String(mainNav)}`,
     });
     prevRunIdDebugRef.current = id;
   }, [selectedRun?.id, mainNav, appendRunTraceLog]);
@@ -3227,17 +3105,6 @@ export default function AiBizOsHumanUI() {
   useEffect(() => {
     if (mainNav === "assets") void loadSetupIntegration();
   }, [mainNav, loadSetupIntegration]);
-
-  useEffect(() => {
-    if (mainNav === "contact-analyzer" && selectedRun?.id) void loadContactAnalyzer();
-  }, [mainNav, selectedRun?.id, loadContactAnalyzer]);
-
-  useEffect(() => {
-    if (mainNav !== "contact-analyzer") return;
-    if (!gmailSendReady || contactsVisible.length === 0 || !selectedRun) {
-      setMainNav("runs");
-    }
-  }, [mainNav, gmailSendReady, contactsVisible.length, selectedRun]);
 
   useEffect(() => {
     try {
@@ -3597,7 +3464,7 @@ export default function AiBizOsHumanUI() {
   useEffect(() => {
     const rid = Number(selectedRun?.id);
     if (!Number.isFinite(rid) || rid <= 0) return;
-    if (mainNav !== "contacts" && mainNav !== "contact-analyzer") return;
+    if (mainNav !== "contacts") return;
     if (contactsListReadyRunId === rid) return;
     /** Avoid duplicating GETs while `loadRunDetails` already loads contacts for this run. */
     if (runDetailsLoading) return;
@@ -3924,7 +3791,7 @@ export default function AiBizOsHumanUI() {
     } else {
       setNewRunForm(seedNewRunFormFromRun(null));
       setNewRunBaseline(null);
-      setPromptSetupText(DEFAULT_FG_PROFILER_PROMPT);
+      setPromptSetupText(DEFAULT_PROFILER_PROMPT);
       setPromptOsintText(DEFAULT_OSINT_PROMPT);
       setPromptReasoningText(DEFAULT_REASONING_PROMPT);
       setPromptDraftText(DEFAULT_DRAFT_PROMPT);
@@ -4433,174 +4300,6 @@ export default function AiBizOsHumanUI() {
     }
   };
 
-  /** Sends first sendable approved draft to the same mailbox as From (self-test; no DB updates). */
-  const testSendFirstApproved = async () => {
-    if (!selectedRun) return;
-    if (!gmailSendReady) {
-      openGmailSetup();
-      return;
-    }
-    setTestSendBusy(true);
-    try {
-      setError("");
-      await api(`/sending/runs/${selectedRun.id}/mock-send-preview`, {
-        method: "POST",
-        timeoutMs: MOCK_SEND_PREVIEW_POST_TIMEOUT_MS,
-      });
-    } catch (e) {
-      setUiError(setError, e);
-      void loadSetupIntegration();
-      if (isGmailAuthReconnectErrorMessage(String(e?.message ?? e ?? ""))) {
-        openGmailSetup();
-      }
-    } finally {
-      setTestSendBusy(false);
-    }
-  };
-
-  const verifyContactAnalyzerOne = async (emailNormalized) => {
-    if (!selectedRun?.id) return;
-    const runId = selectedRun.id;
-    setAnalyzerBulkNote("");
-    setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: true }));
-    try {
-      setError("");
-      await api(`/runs/${runId}/contact-analyzer/verify`, {
-        method: "POST",
-        body: { email_normalized: emailNormalized },
-        timeoutMs: CONTACT_ANALYZER_VERIFY_ONE_TIMEOUT_MS,
-      });
-    } catch (e) {
-      setUiError(setError, e);
-    } finally {
-      try {
-        await loadContactAnalyzer();
-        refreshRunMetricsOnly(runId);
-      } catch {
-        /* refresh failed — user can reopen the tab */
-      }
-      setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: false }));
-    }
-  };
-
-  const importContactAnalyzerInbox = async (emailNormalized) => {
-    if (!selectedRun?.id) return;
-    const runId = selectedRun.id;
-    setAnalyzerBulkNote("");
-    setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: true }));
-    try {
-      setError("");
-      await api(`/runs/${runId}/contact-analyzer/import-inbox`, {
-        method: "POST",
-        body: { email_normalized: emailNormalized },
-        timeoutMs: CONTACT_ANALYZER_IMPORT_INBOX_TIMEOUT_MS,
-      });
-    } catch (e) {
-      setUiError(setError, e);
-    } finally {
-      try {
-        await loadContactAnalyzer();
-        refreshRunMetricsOnly(runId);
-      } catch {
-        /* ignore */
-      }
-      setAnalyzerRowBusy((m) => ({ ...m, [emailNormalized]: false }));
-    }
-  };
-
-  const verifyContactAnalyzerAll = async () => {
-    if (!selectedRun?.id) return;
-    const runId = selectedRun.id;
-    setAnalyzerBulkBusy(true);
-    setAnalyzerBulkNote("");
-    let bulkNote = "";
-    try {
-      setError("");
-      const res = await api(`/runs/${runId}/contact-analyzer/verify-all`, {
-        method: "POST",
-        timeoutMs: CONTACT_ANALYZER_VERIFY_ALL_TIMEOUT_MS,
-      });
-      const n = res?.verified ?? 0;
-      const fails = Array.isArray(res?.failures) ? res.failures : [];
-      if (fails.length) {
-        bulkNote = `Verified ${n}. Issues: ${fails.map((f) => `${f.email}: ${f.error}`).join("; ")}`;
-      } else {
-        bulkNote = n > 0 ? `Verified ${n} address(es).` : "Nothing left to verify.";
-      }
-    } catch (e) {
-      setUiError(setError, e);
-      bulkNote =
-        "Request failed or timed out — refreshing the list. If verification finished on the server, statuses will appear below.";
-    } finally {
-      try {
-        await loadContactAnalyzer();
-        refreshRunMetricsOnly(runId);
-      } catch {
-        /* ignore */
-      }
-      setAnalyzerBulkNote(bulkNote);
-      setAnalyzerBulkBusy(false);
-    }
-  };
-
-  const connectGmailOAuth = async () => {
-    setGmailSetupBusy(true);
-    setGmailSetupErr("");
-    try {
-      setError("");
-      const cid = gmailForm.clientId.trim();
-      const sec = gmailForm.clientSecret.trim();
-      const ruri = gmailForm.redirectUri.trim();
-      const hasFormCreds = Boolean(cid && sec);
-      const serverHasClient = setupIntegration?.gmail_client_configured === true;
-      if (!hasFormCreds && !serverHasClient) {
-        setGmailSetupErr(
-          "Add OAuth Client ID and Client secret below (saved to backend .env when allowed), " +
-            "or set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in backend/.env, restart the API, then click Connect again with empty fields.",
-        );
-        return;
-      }
-      if (cid && sec) {
-        if (!setupIntegration?.allow_env_write) {
-          throw new Error(
-            "Saving credentials from the browser is disabled. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to backend/.env, " +
-              "restart the API, then use Connect Yandex (or enable ALLOW_SETUP_ENV_WRITE for local dev).",
-          );
-        }
-        await api("/setup/gmail-credentials", {
-          method: "POST",
-          body: {
-            client_id: cid,
-            client_secret: sec,
-            ...(ruri ? { redirect_uri: ruri } : {}),
-          },
-        });
-        await loadSetupIntegration();
-      }
-      const startRes = await api("/oauth/google/start", {
-        method: "POST",
-        body: {
-          public_origin: window.location.origin,
-          return_path: window.location.pathname || "/",
-        },
-      });
-      const authUrl = startRes?.authorization_url;
-      if (!authUrl || typeof authUrl !== "string") {
-        throw new Error(
-          "API did not return authorization_url — ensure the backend is running and GET/POST /oauth/google/start is mounted.",
-        );
-      }
-      window.location.assign(authUrl);
-    } catch (e) {
-      const raw = formatApiError(e);
-      const friendly = detailFromApiErrorMessage(raw);
-      setGmailSetupErr(friendly);
-      setError(friendly);
-    } finally {
-      setGmailSetupBusy(false);
-    }
-  };
-
   const closeEditDraftModal = () => {
     if (editDraftSaving) return;
     editDraftGetAbortRef.current?.abort();
@@ -4609,6 +4308,7 @@ export default function AiBizOsHumanUI() {
     editDraftOpenTargetIdRef.current = null;
     setEditDraft(null);
     setEditDraftLoading(false);
+    setEditDraftError("");
   };
 
   const openEditDraft = (d) => {
@@ -4621,6 +4321,8 @@ export default function AiBizOsHumanUI() {
     editDraftGetAbortRef.current?.abort();
     editDraftGetAbortRef.current = null;
     setApplyAssetsEditScope("none");
+    setEditDraftBodyMode("text");
+    setEditDraftError("");
     editDraftOpenTargetIdRef.current = nid;
 
     const rowWithBody =
@@ -4690,6 +4392,7 @@ export default function AiBizOsHumanUI() {
     const applyApproved = applyAssetsEditScope === "approved";
     const applyAll = applyPending || applyApproved;
     setEditDraftSaving(true);
+    setEditDraftError("");
     let updatedDraft = null;
     try {
       setError("");
@@ -4706,6 +4409,7 @@ export default function AiBizOsHumanUI() {
       });
     } catch (e) {
       setUiError(setError, e);
+      setEditDraftError(String(e?.message ?? e ?? "Не удалось сохранить правку"));
       return;
     } finally {
       setEditDraftSaving(false);
@@ -4845,7 +4549,7 @@ export default function AiBizOsHumanUI() {
     try {
       const d = await fetchReviewSetupFieldsLite(selectedRun.id);
       if (d) {
-        setPromptSetupText(d.prompt_setup_editor_text || DEFAULT_FG_PROFILER_PROMPT);
+        setPromptSetupText(d.prompt_setup_editor_text || DEFAULT_PROFILER_PROMPT);
         setPromptOsintText(d.osint_prompt || DEFAULT_OSINT_PROMPT);
         setPromptReasoningText(d.reasoning_prompt || DEFAULT_REASONING_PROMPT);
         setPromptDraftText(d.draft_prompt || DEFAULT_DRAFT_PROMPT);
@@ -5333,11 +5037,6 @@ export default function AiBizOsHumanUI() {
 
   const canContinue = approvedContactsReachable > 0;
 
-  const totalPerformance24hUi = useMemo(
-    () => totalPerformance24hBand(totalPerformance?.emails_sent_24h ?? 0),
-    [totalPerformance?.emails_sent_24h],
-  );
-
   const promptSetupSavedFilled = useMemo(() => {
     const rid = selectedRun?.id;
     if (rid == null) return false;
@@ -5381,19 +5080,19 @@ export default function AiBizOsHumanUI() {
     if (workspace?.display_phase !== "Preparing") return null;
     if (selectedRun.status === "needs_review") {
       return {
-        label: "Approve contacts to continue",
+        label: "Одобрить контакты, чтобы продолжить",
         disabled: approvedContactsReachable === 0,
         hint:
           approvedContactsReachable === 0
-            ? "Approve or edit at least one reachable contact first (bounced / dead mailbox do not count)."
+            ? "Сначала одобрите или отредактируйте хотя бы один достижимый контакт (bounced / мёртвый ящик не считаются)."
             : null,
         onClick: () => void continueRun(),
       };
     }
     return {
-      label: "Approve contacts to continue",
+      label: "Одобрить контакты, чтобы продолжить",
       disabled: true,
-      hint: "Кампания setup is in progress.",
+      hint: "Настройка кампании ещё идёт.",
       onClick: null,
     };
   }, [selectedRun?.id, selectedRun?.status, workspace?.display_phase, approvedContactsReachable, continueRun]);
@@ -5407,7 +5106,7 @@ export default function AiBizOsHumanUI() {
     }
     if (phase === "Ready") {
       return {
-        label: "Start outreach",
+        label: "Начать рассылку",
         disabled: false,
         hint: null,
         onClick: () => setMainNav("drafts"),
@@ -5421,46 +5120,46 @@ export default function AiBizOsHumanUI() {
 
   const contactCardClass = (c) => {
     if (contactHasBadEmailHealth(c)) {
-      return "rounded-2xl border-2 border-red-700/50 bg-red-950/10 shadow-none dark:border-red-700/40 dark:bg-red-950/20";
+      return "rounded-lg border border-red-700/50 bg-red-950/10 shadow-none dark:border-red-700/40 dark:bg-red-950/20";
     }
     const rs = c.review_status;
     if (["approved", "edited"].includes(rs)) {
-      return "rounded-2xl border-2 border-green-600/40 bg-green-500/5 shadow-none";
+      return "rounded-lg border border-green-600/40 bg-green-500/5 shadow-none";
     }
     if (rs === "pending") {
-      return "rounded-2xl border-2 border-muted bg-muted/25 shadow-none";
+      return "rounded-lg border border-muted bg-muted/25 shadow-none";
     }
-    return "rounded-2xl border-2 border-border shadow-none";
+    return "rounded-lg border border-border shadow-none";
   };
 
   const draftCardClass = (d) => {
     const st = d.tracking_status ?? d.status;
     if (st === "sent") {
-      return "rounded-2xl border-2 border-green-600/40 bg-green-500/5 shadow-none";
+      return "rounded-lg border border-green-600/40 bg-green-500/5 shadow-none";
     }
     if (st === "failed") {
-      return "rounded-2xl border-2 border-destructive/45 bg-destructive/5 shadow-none";
+      return "rounded-lg border border-destructive/45 bg-destructive/5 shadow-none";
     }
     if (st === "sending") {
-      return "rounded-2xl border-2 border-blue-500/40 bg-blue-500/5 shadow-none";
+      return "rounded-lg border border-blue-500/40 bg-blue-500/5 shadow-none";
     }
     if (st === "replied") {
-      return "rounded-2xl border-2 border-emerald-600/40 bg-emerald-500/5 shadow-none";
+      return "rounded-lg border border-emerald-600/40 bg-emerald-500/5 shadow-none";
     }
     if (st === "bounced") {
-      return "rounded-2xl border-2 border-orange-500/40 bg-orange-500/5 shadow-none";
+      return "rounded-lg border border-orange-500/40 bg-orange-500/5 shadow-none";
     }
     if (st === "dead_mailbox") {
-      return "rounded-2xl border-2 border-red-700/40 bg-red-600/5 shadow-none";
+      return "rounded-lg border border-red-700/40 bg-red-600/5 shadow-none";
     }
     const rs = d.review_status;
     if (["approved", "edited"].includes(rs)) {
-      return "rounded-2xl border-2 border-green-600/40 bg-green-500/5 shadow-none";
+      return "rounded-lg border border-green-600/40 bg-green-500/5 shadow-none";
     }
     if (rs === "pending") {
-      return "rounded-2xl border-2 border-muted bg-muted/25 shadow-none";
+      return "rounded-lg border border-muted bg-muted/25 shadow-none";
     }
-    return "rounded-2xl border-2 border-border shadow-none";
+    return "rounded-lg border border-border shadow-none";
   };
 
   const canSendDraft = (d) =>
@@ -5488,11 +5187,11 @@ export default function AiBizOsHumanUI() {
                 <CircleAlert className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400" aria-hidden />
               ) : null}
               {!grouped ? (
-                <div className="text-lg font-semibold">{contact.company || "Unnamed company"}</div>
+                <div className="text-lg font-semibold">{contact.company || "Компания без названия"}</div>
               ) : null}
               {isReplacement ? (
                 <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
-                  Replacement
+                  Замена
                 </Badge>
               ) : null}
               <AiPipelineBadge value={contact.ai_pipeline_status} />
@@ -5501,15 +5200,15 @@ export default function AiBizOsHumanUI() {
               {badEmailHealth ? (
                 <Badge variant="destructive" className="font-normal text-xs">
                   {contact.email_health === "dead_mailbox"
-                    ? "Dead mailbox"
+                    ? "Мёртвый ящик"
                     : contact.email_health === "bounced"
-                      ? "Bounced"
+                      ? "Возврат"
                       : pretty(contact.email_health)}
                 </Badge>
               ) : null}
-              {!hasEmail ? <Badge variant="destructive">No email</Badge> : null}
+              {!hasEmail ? <Badge variant="destructive">Нет email</Badge> : null}
               {(contact.confidence || "").toLowerCase() === "low" ? (
-                <Badge variant="secondary">Low confidence</Badge>
+                <Badge variant="secondary">Низкая уверенность</Badge>
               ) : null}
               {!badEmailHealth && contact.email_health && contact.email_health !== "unknown" ? (
                 <Badge variant="outline" className="text-xs">
@@ -5518,15 +5217,43 @@ export default function AiBizOsHumanUI() {
               ) : null}
             </div>
             <div className="text-sm text-muted-foreground">
-              {contact.name || "No name"} · {contactRoleFromPayload(contact) || "No role"}
+              {contact.name || "Без имени"} · {contactRoleFromPayload(contact) || "Без роли"}
               {contact.source_json?.freshness_score ? (
-                <span className="ml-2 inline-flex items-center rounded-md bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20 dark:bg-green-900/20 dark:text-green-400 dark:ring-green-800/40" title="Freshness Score">
+                <span className="ml-2 inline-flex items-center rounded-md bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20 dark:bg-green-900/20 dark:text-green-400 dark:ring-green-800/40" title="Оценка свежести">
                   🔋 {contact.source_json.freshness_score}
                 </span>
               ) : null}
             </div>
-            <div className="text-sm">{contact.email || "No email"}</div>
-            <div className="text-xs text-muted-foreground">{contact.website || "No website"}</div>
+            {contactSourceLabel(contact) ? (
+              <div
+                className={
+                  CONTACT_SOURCE_IS_WARNING[contact.source_json?.source]
+                    ? "flex items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400"
+                    : "text-xs text-muted-foreground"
+                }
+              >
+                {CONTACT_SOURCE_IS_WARNING[contact.source_json?.source] ? (
+                  <CircleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                ) : null}
+                Источник: {contactSourceLabel(contact)}
+                {contact.source_json?.source_url ? (
+                  <>
+                    {" · "}
+                    <a
+                      href={contact.source_json.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block max-w-[260px] align-bottom truncate text-primary underline"
+                      title={contact.source_json.source_url}
+                    >
+                      {contact.source_json.source_url}
+                    </a>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="text-sm">{contact.email || "Нет email"}</div>
+            <div className="text-xs text-muted-foreground">{contact.website || "Нет сайта"}</div>
           </div>
           <div className="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 lg:w-auto lg:flex-nowrap">
             {!isDeadMailbox ? (
@@ -5534,7 +5261,7 @@ export default function AiBizOsHumanUI() {
                 size="sm"
                 variant="outline"
                 disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
-                title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
+                title={!contactsActionsReady ? "Загружаем полный список контактов с сервера…" : undefined}
                 onClick={() =>
                   setEditingContact({
                     id: contact.id,
@@ -5544,7 +5271,7 @@ export default function AiBizOsHumanUI() {
                   })
                 }
               >
-                <Pencil className="mr-1 h-3 w-3" /> Edit
+                <Pencil className="mr-1 h-3 w-3" /> Править
               </Button>
             ) : null}
             {isPending ? (
@@ -5554,13 +5281,13 @@ export default function AiBizOsHumanUI() {
                     size="sm"
                     disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
                     aria-busy={contactApproveBusyId === contact.id}
-                    title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
+                    title={!contactsActionsReady ? "Загружаем полный список контактов с сервера…" : undefined}
                     onClick={() => void approveContact(contact.id)}
                   >
                     {contactApproveBusyId === contact.id ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
                     ) : null}
-                    Approve
+                    Одобрить
                   </Button>
                 ) : null}
                 <Button
@@ -5569,14 +5296,14 @@ export default function AiBizOsHumanUI() {
                   className="bg-indigo-50/50 hover:bg-indigo-100/50 text-indigo-700 border-indigo-200"
                   disabled={deepOsintBusyId === contact.id || !contactsActionsReady}
                   onClick={() => void runDeepOsint(contact.id)}
-                  title="Кампания Deep OSINT on this specific person"
+                  title="Запустить глубокий OSINT по этому конкретному человеку"
                 >
                   {deepOsintBusyId === contact.id ? (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
                   ) : (
                     <span className="mr-1">🕵️‍♂️</span>
                   )}
-                  Deep OSINT
+                  Глубокий OSINT
                 </Button>
                 {contact.personalization_json?.person_osint && (
                   <Button
@@ -5584,7 +5311,7 @@ export default function AiBizOsHumanUI() {
                     variant="outline"
                     className="bg-purple-50/50 hover:bg-purple-100/50 text-purple-700 border-purple-200"
                     onClick={() => setOsintDossierView({ title: contact.name, content: JSON.stringify(contact.personalization_json.person_osint, null, 2) })}
-                    title="View Deep OSINT summary"
+                    title="Смотреть сводку глубокого OSINT"
                   >
                     <span className="mr-1">📄</span>
                   </Button>
@@ -5594,10 +5321,10 @@ export default function AiBizOsHumanUI() {
                     size="sm"
                     variant="outline"
                     disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
-                    title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
+                    title={!contactsActionsReady ? "Загружаем полный список контактов с сервера…" : undefined}
                     onClick={() => reviewContact(contact.id, "rejected")}
                   >
-                    Reject
+                    Отклонить
                   </Button>
                 ) : null}
               </>
@@ -5607,10 +5334,10 @@ export default function AiBizOsHumanUI() {
                 size="sm"
                 variant="outline"
                 disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
-                title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
+                title={!contactsActionsReady ? "Загружаем полный список контактов с сервера…" : undefined}
                 onClick={() => reviewContact(contact.id, "rejected")}
               >
-                Reject
+                Отклонить
               </Button>
             ) : null}
             {isRejected && hasEmail ? (
@@ -5618,13 +5345,13 @@ export default function AiBizOsHumanUI() {
                 size="sm"
                 disabled={contactApproveBusyId === contact.id || !contactsActionsReady}
                 aria-busy={contactApproveBusyId === contact.id}
-                title={!contactsActionsReady ? "Loading full contact list from server…" : undefined}
+                title={!contactsActionsReady ? "Загружаем полный список контактов с сервера…" : undefined}
                 onClick={() => void approveContact(contact.id)}
               >
                 {contactApproveBusyId === contact.id ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
                 ) : null}
-                Approve
+                Одобрить
               </Button>
             ) : null}
             {!isPending &&
@@ -5638,14 +5365,14 @@ export default function AiBizOsHumanUI() {
                 disabled={!((contact.email || "").trim()) || !contactsActionsReady}
                 title={
                   !contactsActionsReady
-                    ? "Loading full contact list from server…"
+                    ? "Загружаем полный список контактов с сервера…"
                     : !(contact.email || "").trim()
-                      ? "Add an email to this contact first"
+                      ? "Сначала добавьте email этому контакту"
                       : undefined
                 }
                 onClick={() => void createDraftForContact(contact.id)}
               >
-                Create draft
+                Создать черновик
               </Button>
             ) : null}
           </div>
@@ -5653,9 +5380,9 @@ export default function AiBizOsHumanUI() {
         {editingContact?.id === contact.id && !isDeadMailbox ? (
           <div className="mt-3 space-y-2 border-t border-border pt-3">
             <div>
-              <div className="mb-1 text-xs text-muted-foreground">Recipient name</div>
+              <div className="mb-1 text-xs text-muted-foreground">Имя получателя</div>
               <Input
-                placeholder="Contact name"
+                placeholder="Имя контакта"
                 value={editingContact.name ?? ""}
                 onChange={(e) =>
                   setEditingContact({
@@ -5666,9 +5393,9 @@ export default function AiBizOsHumanUI() {
               />
             </div>
             <div>
-              <div className="mb-1 text-xs text-muted-foreground">Job title</div>
+              <div className="mb-1 text-xs text-muted-foreground">Должность</div>
               <Input
-                placeholder="e.g. Head of Partnerships"
+                placeholder="напр. Head of Partnerships"
                 value={editingContact.role ?? ""}
                 onChange={(e) =>
                   setEditingContact({
@@ -5686,7 +5413,7 @@ export default function AiBizOsHumanUI() {
                 disabled={contact.status === "valid"}
                 title={
                   contact.status === "valid"
-                    ? "This email is verified — editing is disabled."
+                    ? "Этот email верифицирован — правка отключена."
                     : undefined
                 }
                 onChange={(e) =>
@@ -5733,7 +5460,7 @@ export default function AiBizOsHumanUI() {
                 {contactEditSavingId === contact.id ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
                 ) : null}
-                Save
+                Сохранить
               </Button>
               <Button
                 size="sm"
@@ -5741,7 +5468,7 @@ export default function AiBizOsHumanUI() {
                 disabled={contactEditSavingId === contact.id}
                 onClick={() => setEditingContact(null)}
               >
-                Cancel
+                Отмена
               </Button>
             </div>
           </div>
@@ -5788,20 +5515,20 @@ export default function AiBizOsHumanUI() {
         <CardContent className="p-5">
           <div className="mb-4 border-b border-border pb-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-lg font-semibold">{group[0].company || "Unnamed company"}</span>
+              <span className="text-lg font-semibold">{group[0].company || "Компания без названия"}</span>
               {companyAiFit === "correct" ? (
                 <Badge
                   variant="outline"
                   className="border-emerald-300 bg-emerald-100 font-normal text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-100"
                 >
-                  AI OK
+                  AI: подходит
                 </Badge>
               ) : companyAiFit === "incorrect" ? (
                 <Badge
                   variant="outline"
                   className="border-red-300 bg-red-100 font-normal text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100"
                 >
-                  AI Incorrect
+                  AI: не подходит
                 </Badge>
               ) : null}
               {touched ? (
@@ -5809,14 +5536,14 @@ export default function AiBizOsHumanUI() {
                   variant="default"
                   className="bg-green-600 font-normal text-white hover:bg-green-600 dark:bg-green-700 dark:text-white dark:hover:bg-green-700"
                 >
-                  Pending
+                  Уже писали
                 </Badge>
               ) : (
                 <Badge
                   variant="outline"
                   className="border-border bg-muted/40 font-normal text-muted-foreground"
                 >
-                  No touch
+                  Ещё не писали
                 </Badge>
               )}
             </div>
@@ -5833,7 +5560,7 @@ export default function AiBizOsHumanUI() {
   };
 
   const renderGeneratingOutboundDraftPlaceholder = (contact) => (
-    <Card key={`outreach-gen-${contact.id}`} className="border-2 border-dashed border-muted-foreground/35">
+    <Card key={`outreach-gen-${contact.id}`} className="border border-dashed border-muted-foreground/35">
       <CardContent className="p-5">
         <div className="flex flex-col gap-2">
           <div className="break-words text-lg font-semibold">{contact.company || "—"}</div>
@@ -5846,7 +5573,7 @@ export default function AiBizOsHumanUI() {
             aria-live="polite"
           >
             <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-            Generating email…
+            Генерируем письмо…
           </div>
         </div>
       </CardContent>
@@ -5854,6 +5581,8 @@ export default function AiBizOsHumanUI() {
   );
 
   const renderDraftCard = (draft) => {
+    // B-546: лейбл «Оригинал» и наличие RU-колонки следуют языку самого письма, не рана.
+    const draftBodyLang = draftBodyLanguage(draft.body ?? draft.body_preview);
     const draftContact = contactById.get(draft.contact_id);
     const isReplacementDraft = draftContact?.source_json?.source === "replacement_search";
     const draftLifecycle = draft.tracking_status ?? draft.status;
@@ -5885,75 +5614,135 @@ export default function AiBizOsHumanUI() {
     const reasoning = genMeta?.reasoning;
 
     return (
-    <Card key={draft.id} className={draftCardClass(draft)}>
+    <Card
+      key={draft.id}
+      id={`draft-card-${draft.id}`}
+      className={cn(draftCardClass(draft), focusDraftId === draft.id && "ring-2 ring-primary/60")}
+    >
       <CardContent className="p-5">
         <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start lg:gap-4">
-            <div className="min-w-0 space-y-2">
-              <div className="flex min-w-0 items-center gap-2">
-                {isDeadMailboxDraft ? (
-                  <CircleAlert
-                    className="h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
-                    aria-hidden
-                  />
-                ) : null}
-                <div className="min-w-0 text-lg font-semibold break-words">
-                  {draft.company || "Untitled draft"}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {isReplacementDraft ? (
-                  <Badge variant="default" className="bg-violet-600 hover:bg-violet-600">
-                    Replacement draft
-                  </Badge>
-                ) : null}
-                <SendLifecycleBadge status={draftLifecycle} />
-                <StatusBadge value={draft.review_status} />
-                {isSendLater ? (
-                  <Badge
-                    variant="outline"
-                    className="inline-flex items-center gap-1 border-amber-500/50 font-normal text-amber-900 dark:text-amber-100"
-                    title="Approved — send later (clock)"
-                  >
-                    <Clock className="h-3 w-3 shrink-0" aria-hidden />
-                    Send later
-                  </Badge>
-                ) : null}
-                {isRegeneratingOutbound ? (
-                  <Badge
-                    variant="outline"
-                    className="inline-flex items-center gap-1 border-pink-500/50 bg-pink-500/15 font-normal text-pink-900 dark:border-pink-400/45 dark:bg-pink-500/20 dark:text-pink-100"
-                    aria-live="polite"
-                  >
-                    <Clock className="h-3 w-3 shrink-0" aria-hidden />
-                    Regenerating
-                  </Badge>
-                ) : null}
-              </div>
-
-              {reasoning && (
-                <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 p-3 text-[11px] leading-relaxed">
-                  <div className="mb-1.5 flex items-center gap-1.5 font-semibold text-primary uppercase tracking-wider">
-                    <Zap className="h-3 w-3" /> AI Strategy (Reasoning)
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    <div className="space-y-0.5">
-                      <div className="font-medium text-muted-foreground opacity-70">Hook</div>
-                      <div className="text-foreground">{reasoning.hook}</div>
-                    </div>
-                    <div className="space-y-0.5">
-                      <div className="font-medium text-muted-foreground opacity-70">Angle</div>
-                      <div className="text-foreground">{reasoning.angle}</div>
-                    </div>
-                    <div className="space-y-0.5">
-                      <div className="font-medium text-muted-foreground opacity-70">Key Point</div>
-                      <div className="text-foreground">{reasoning.key_point}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
+          {/* Шапка: компания + статусные чипы (семантическая палитра) + оценка критика справа */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {isDeadMailboxDraft ? (
+              <CircleAlert className="h-5 w-5 shrink-0 text-danger" aria-hidden />
+            ) : null}
+            <div className="min-w-0 text-lg font-semibold break-words">
+              {draft.company || "Письмо без названия"}
             </div>
-            <div className="flex min-w-0 flex-nowrap items-center justify-start gap-1.5 overflow-x-auto pt-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] sm:gap-2 lg:justify-end [&::-webkit-scrollbar]:h-1 [&_button]:shrink-0 [&_button]:whitespace-nowrap">
+            {isReplacementDraft ? <Badge variant="info">замена контакта</Badge> : null}
+            <SendLifecycleBadge status={draftLifecycle} />
+            <StatusBadge value={draft.review_status} />
+            {isSendLater ? (
+              <Badge
+                variant="warning"
+                className="inline-flex items-center gap-1"
+                title="Одобрено — отправить позже"
+              >
+                <Clock className="h-3 w-3 shrink-0" aria-hidden />
+                отложено
+              </Badge>
+            ) : null}
+            {isRegeneratingOutbound ? (
+              <Badge variant="info" className="inline-flex items-center gap-1" aria-live="polite">
+                <Clock className="h-3 w-3 shrink-0" aria-hidden />
+                перегенерация…
+              </Badge>
+            ) : null}
+            {genMeta?.validation_score != null && Number.isFinite(Number(genMeta.validation_score)) ? (
+              <span
+                className={cn(
+                  "ml-auto inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium tabular-nums",
+                  validationScoreToneClass(genMeta.validation_score),
+                )}
+                title="Оценка критика (0–100)"
+              >
+                критик {Math.round(Number(genMeta.validation_score))}
+              </span>
+            ) : null}
+          </div>
+
+          <div className="text-sm">
+            <span className="font-medium">Кому:</span> {draft.to_email || "адресат не указан"}
+          </div>
+
+          {/* Стратегия ИИ — на всю ширину карточки (B-019: раньше ютилась в узкой колонке) */}
+          {reasoning && (
+            <div className="rounded-md border border-primary/20 bg-primary/5 p-3 text-xs leading-relaxed">
+              <div className="mb-2 flex items-center gap-1.5 font-semibold uppercase tracking-wider text-primary">
+                <Zap className="h-3 w-3" aria-hidden /> Стратегия ИИ
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <div className="space-y-0.5">
+                  <div className="font-medium text-muted-foreground">Хук</div>
+                  <div className="text-foreground">{reasoning.hook}</div>
+                </div>
+                <div className="space-y-0.5">
+                  <div className="font-medium text-muted-foreground">Угол</div>
+                  <div className="text-foreground">{reasoning.angle}</div>
+                </div>
+                <div className="space-y-0.5">
+                  <div className="font-medium text-muted-foreground">Ключевой аргумент</div>
+                  <div className="text-foreground">{reasoning.key_point}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="text-sm">
+            <span className="font-medium">Тема:</span> {draft.subject}
+          </div>
+
+          {/* Письмо: оригинал на языке письма (B-546) — для RU перевод рядом не нужен, ревьюер
+              и так читает оригинал; для EN оригинал и RU-перевод показываются рядом, как раньше. */}
+          <div
+            className={cn(
+              "grid grid-cols-1 items-start gap-3",
+              draftBodyLang === "ru" ? "" : "lg:grid-cols-2",
+            )}
+          >
+            <div className="min-w-0 space-y-1.5">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Оригинал · {draftBodyLang === "ru" ? "RU" : "EN"}
+              </div>
+              <EmailDraftBodyPreview
+                body={draft.body ?? draft.body_preview}
+                showSignaturePlaceholder={runSignatureHasMeaningfulContent(
+                  selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "",
+                )}
+                attachedAssetIds={normalizeAttachedAssetIds(draft.attached_asset_ids)}
+                assetLibrary={assetsLibrary}
+              />
+            </div>
+            {draftBodyLang === "ru" ? null : (
+              <div className="min-w-0 space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Перевод · RU
+                </div>
+                <DraftRuTranslation draftId={draft.id} />
+              </div>
+            )}
+          </div>
+
+          {/* B-018: правка по русской инструкции — LLM меняет только указанное место в EN */}
+          {/* Правку показываем только для писем в работе (pending/approved/edited) и не отправленных:
+              на отклонённых/отправленных она бы перезаписала текст и исказила историю (код-ревью). */}
+          {["pending", "approved", "edited"].includes(draft.review_status) &&
+          draft.status !== "sent" &&
+          !isDeadMailboxDraft ? (
+            <DraftInstructEdit
+              draftId={draft.id}
+              // Полный список pending в run (не отфильтрованный поиском) — иначе батч молча сужается.
+              otherPendingIds={drafts
+                .filter((d) => d.id !== draft.id && d.review_status === "pending")
+                .map((d) => d.id)}
+              onApplied={() => {
+                if (selectedRun?.id) void refreshRunDraftsOnly(selectedRun.id);
+              }}
+            />
+          ) : null}
+
+          {/* Действия — внизу карточки, как в макете; предупреждение об автоотправке рядом */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-border/60 pt-3 [&_button]:shrink-0 [&_button]:whitespace-nowrap">
               {isDeadMailboxDraft ? (
                 <Button
                   type="button"
@@ -5961,17 +5750,16 @@ export default function AiBizOsHumanUI() {
                   variant="destructive"
                   onClick={() => void deleteDeadMailboxDraft(draft.id)}
                 >
-                  Delete
+                  Удалить
                 </Button>
               ) : (
                 <>
                   <Button size="sm" variant="outline" onClick={() => openEditDraft(draft)}>
-                    <Pencil className="mr-1 h-3 w-3" /> Edit
+                    <Pencil className="mr-1 h-3 w-3" aria-hidden /> Править
                   </Button>
                   {draft.review_status === "pending" ? (
                     <>
                       <Button
-                        size="sm"
                         disabled={isDraftReviewBusy}
                         aria-busy={draftReviewKind === "approve"}
                         onClick={() => void reviewDraft(draft.id, "approved")}
@@ -5979,7 +5767,7 @@ export default function AiBizOsHumanUI() {
                         {draftReviewKind === "approve" ? (
                           <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
                         ) : null}
-                        Approve
+                        Одобрить — в очередь
                       </Button>
                       <Button
                         size="sm"
@@ -5990,8 +5778,8 @@ export default function AiBizOsHumanUI() {
                           void reviewDraft(draft.id, "approved", OUTBOUND_REVIEW_SEND_LATER)
                         }
                         className="px-2.5"
-                        aria-label="Send later"
-                        title="Send later — approve without sending now"
+                        aria-label="Одобрить, отправить позже"
+                        title="Одобрить, но не ставить в ближайший слот (отложенная отправка)"
                       >
                         {draftReviewKind === "later" ? (
                           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -6007,7 +5795,7 @@ export default function AiBizOsHumanUI() {
                           disabled={isRegeneratingOutbound || isDraftReviewBusy}
                           onClick={() => void regenerateOutboundDraft(draft.id)}
                         >
-                          Regenerate
+                          Перегенерировать
                         </Button>
                       ) : null}
                       <Button
@@ -6020,7 +5808,7 @@ export default function AiBizOsHumanUI() {
                         {draftReviewKind === "reject" ? (
                           <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
                         ) : null}
-                        Reject
+                        Отклонить
                       </Button>
                     </>
                   ) : null}
@@ -6034,7 +5822,7 @@ export default function AiBizOsHumanUI() {
                           disabled={isRegeneratingOutbound || isDraftReviewBusy}
                           onClick={() => void regenerateOutboundDraft(draft.id)}
                         >
-                          Regenerate
+                          Перегенерировать
                         </Button>
                       ) : null}
                       <Button
@@ -6047,7 +5835,7 @@ export default function AiBizOsHumanUI() {
                         {draftReviewKind === "reject" ? (
                           <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
                         ) : null}
-                        Reject
+                        Отклонить
                       </Button>
                     </>
                   ) : null}
@@ -6061,7 +5849,7 @@ export default function AiBizOsHumanUI() {
                       {draftReviewKind === "approve" ? (
                         <Loader2 className="mr-2 h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
                       ) : null}
-                      Approve
+                      Одобрить — в очередь
                     </Button>
                   ) : null}
                   {canSendDraft(draft) ? (
@@ -6076,48 +5864,46 @@ export default function AiBizOsHumanUI() {
                       {isSendingOutbound ? (
                         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
                       ) : !gmailSendReady ? (
-                        <CircleX
-                          className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-500"
-                          aria-hidden
-                        />
+                        <CircleX className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />
                       ) : null}
-                      Send
+                      Отправить сейчас
                     </Button>
                   ) : null}
                 </>
               )}
+              {draft.review_status === "pending" && !isDeadMailboxDraft ? (
+                <span className="min-w-0 whitespace-normal text-xs font-medium text-warning">
+                  ⚠ Одобрение = автоотправка в ближайший слот; отдельной кнопки «отправить» нет.
+                </span>
+              ) : null}
             </div>
-            <div className="min-w-0 space-y-3 text-sm lg:col-span-2">
-              <div>
-                <span className="font-medium">To:</span> {draft.to_email || "No recipient"}
-              </div>
-              <div>
-                <span className="font-medium">Subject:</span> {draft.subject}
-              </div>
+
+            {/* Служебные спойлеры: промпт, обоснование выбора компании, мета генерации */}
+            <div className="min-w-0 space-y-3 text-sm">
               {promptUsedForDraft ? (
-                <DraftCollapsibleSection title="Prompt used for this email">
+                <DraftCollapsibleSection title="Промпт этого письма">
                   <div className="whitespace-pre-wrap break-words text-sm text-foreground">{promptUsedForDraft}</div>
                 </DraftCollapsibleSection>
               ) : null}
               {contactPers &&
               (contactPers.why_this_company || contactPers.offer_fit || contactPers.role_angle) ? (
-                <DraftCollapsibleSection title="Why this company" className="bg-muted/25">
+                <DraftCollapsibleSection title="Почему эта компания" className="bg-muted/25">
                   <dl className="space-y-2 text-sm">
                     {contactPers.why_this_company ? (
                       <div>
-                        <dt className="text-xs text-muted-foreground">Context</dt>
+                        <dt className="text-xs text-muted-foreground">Контекст</dt>
                         <dd className="whitespace-pre-wrap break-words">{contactPers.why_this_company}</dd>
                       </div>
                     ) : null}
                     {contactPers.offer_fit ? (
                       <div>
-                        <dt className="text-xs text-muted-foreground">Offer fit</dt>
+                        <dt className="text-xs text-muted-foreground">Совпадение с оффером</dt>
                         <dd className="whitespace-pre-wrap break-words">{contactPers.offer_fit}</dd>
                       </div>
                     ) : null}
                     {contactPers.role_angle ? (
                       <div>
-                        <dt className="text-xs text-muted-foreground">Role angle</dt>
+                        <dt className="text-xs text-muted-foreground">Угол по роли</dt>
                         <dd className="whitespace-pre-wrap break-words">{contactPers.role_angle}</dd>
                       </div>
                     ) : null}
@@ -6128,19 +5914,9 @@ export default function AiBizOsHumanUI() {
                 <div className="rounded-lg border border-border p-3">
                   <div className="mb-2 flex flex-wrap items-center gap-2">
                     <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Generation
+                      Генерация
                     </span>
-                    {genMeta.validation_score != null && Number.isFinite(Number(genMeta.validation_score)) ? (
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium tabular-nums",
-                          validationScoreToneClass(genMeta.validation_score),
-                        )}
-                        title="Validation score (0–100)"
-                      >
-                        Score {Math.round(Number(genMeta.validation_score))}
-                      </span>
-                    ) : null}
+                    {/* оценка критика показана чипом в шапке карточки — тут не дублируем */}
                     {genMeta.style_mode ? (
                       <Badge variant="outline" className="font-normal">
                         {String(genMeta.style_mode)}
@@ -6152,14 +5928,14 @@ export default function AiBizOsHumanUI() {
                       </Badge>
                     ) : null}
                     {genMeta.is_valid === false ? (
-                      <Badge variant="destructive" className="font-normal">
-                        Needs review
+                      <Badge variant="danger" className="font-normal">
+                        не прошло критика
                       </Badge>
                     ) : null}
                   </div>
                   <details className="text-xs text-muted-foreground">
                     <summary className="cursor-pointer select-none text-foreground hover:underline">
-                      Details (reasoning, issues)
+                      Детали генерации (reasoning, замечания критика)
                     </summary>
                     <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-muted/50 p-2 text-[11px] leading-relaxed">
                       {JSON.stringify(genMetaDetailsJson, null, 2)}
@@ -6168,17 +5944,16 @@ export default function AiBizOsHumanUI() {
                 </div>
               ) : null}
             </div>
-          </div>
           {draft.error_message &&
           !isStaleOutboundDraftErrorMessage(draft.error_message) &&
           !["bounced", "dead_mailbox", "replied"].includes(String(draft.tracking_status || "")) &&
           !dismissedOutboundDraftErrorKeys.has(`${draft.id}:${draft.error_message}`) ? (
-            <div className="flex items-start gap-2 rounded-xl border-2 border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               <p className="min-w-0 flex-1">{draft.error_message}</p>
               <button
                 type="button"
                 className="shrink-0 rounded-md p-1 opacity-80 hover:bg-destructive/15 hover:opacity-100"
-                aria-label="Dismiss"
+                aria-label="Скрыть"
                 onClick={() =>
                   setDismissedOutboundDraftErrorKeys((prev) =>
                     new Set(prev).add(`${draft.id}:${draft.error_message}`),
@@ -6189,14 +5964,6 @@ export default function AiBizOsHumanUI() {
               </button>
             </div>
           ) : null}
-          <EmailDraftBodyPreview
-            body={draft.body ?? draft.body_preview}
-            showSignaturePlaceholder={runSignatureHasMeaningfulContent(
-              selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "",
-            )}
-            attachedAssetIds={normalizeAttachedAssetIds(draft.attached_asset_ids)}
-            assetLibrary={assetsLibrary}
-          />
         </div>
       </CardContent>
     </Card>
@@ -6206,16 +5973,21 @@ export default function AiBizOsHumanUI() {
   /** Do not tie Activity spinner to routine GETs (run/contacts/drafts) — it only distracts; use inline placeholders. */
   const activityLogBusy =
     loading ||
-    analyzerLoading ||
     continueCompanyFindLoading ||
     Object.keys(restartsInFlight).length > 0;
   const showActivityLogPanel = activityLogPinnedOpen;
+
+  // Счётчики-бейджи сайдбара (не отфильтрованные поиском): сколько писем ждёт ревью.
+  const navCounts = useMemo(
+    () => ({ drafts: drafts.filter((d) => d.review_status === "pending").length }),
+    [drafts],
+  );
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       {showActivityLogPanel ? (
         <div
-          className="fixed top-4 right-4 z-[100] flex max-h-[min(840px,110vh)] w-[min(100vw-2rem,22rem)] flex-col overflow-hidden rounded-2xl border-2 border-border bg-card shadow-lg"
+          className="fixed top-4 right-4 z-[100] flex max-h-[min(840px,110vh)] w-[min(100vw-2rem,22rem)] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg"
           role="log"
           aria-live="polite"
           aria-label="Activity log"
@@ -6267,42 +6039,49 @@ export default function AiBizOsHumanUI() {
           </ScrollArea>
         </div>
       ) : null}
+      <div className="flex">
+        <AppSidebar
+          nav={mainNav}
+          onNavigate={setMainNav}
+          version={appPkg.version}
+          counts={navCounts}
+          onOpenSettings={() => setGlobalSetupOpen(true)}
+          onOpenOffers={() => setOffersOpen(true)}
+          onOpenSmtp={() => setSmtpFarmOpen(true)}
+        />
+        <div className="min-w-0 flex-1">
       <div className="mx-auto max-w-7xl p-6 md:p-8">
         <div className="mb-6 space-y-4">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-            <div>
-              <div className="mb-2 inline-flex items-baseline gap-2 rounded-2xl bg-primary/10 px-3 py-1 text-sm font-medium text-primary">
-                <span>AI Biz OS</span>
-                <span className="text-xs font-normal tabular-nums text-primary/80">v{appPkg.version}</span>
-              </div>
-              <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Дашборд аутрича</h1>
+            {/* Селектор контекста (согласовано 10.07): дропдауны «проект» и «кампания» —
+                только переключение, от какого контекста показывать данные; создание и
+                настройка — на экране «Проекты». Фазовый чип — состояние выбранной волны. */}
+            <div className="flex min-w-0 flex-wrap items-center gap-2 self-center">
+              <ContextSwitcher
+                projects={projects}
+                selectedProject={selectedProject}
+                onSelectProject={setSelectedProject}
+                runs={runsList}
+                selectedRun={selectedRun}
+                onSelectRun={(r) => void openRunById(r.id, r)}
+                onOpenProjectsScreen={
+                  // Самоссылку прячем: на экране «Проекты» ссылка «перейти в Проекты» не нужна.
+                  // Создание — только кнопкой «+ Новый проект» там же (единственная дорога).
+                  mainNav === "runs" ? undefined : () => setMainNav("runs")
+                }
+              />
+              {workspace?.display_phase && RUN_PHASE_CHIP[workspace.display_phase] ? (
+                <Badge variant={RUN_PHASE_CHIP[workspace.display_phase].variant}>
+                  {RUN_PHASE_CHIP[workspace.display_phase].label}
+                </Badge>
+              ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Dialog>
-                <DialogTrigger asChild>
-                  <Button variant="outline">Новый проект</Button>
-                </DialogTrigger>
-                <DialogContent className="sm:max-w-lg">
-                  <DialogHeader>
-                    <DialogTitle>Create project</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-3 py-2">
-                    <Input
-                      value={projectName}
-                      onChange={(e) => setProjectName(e.target.value)}
-                      placeholder="Проект name"
-                    />
-                  </div>
-                  <NewProjectFooter projectName={projectName} onCreated={createProject} />
-                </DialogContent>
-              </Dialog>
-                            <Button variant="outline" onClick={() => setGlobalSetupOpen(true)}>
-                <Settings className="h-4 w-4 mr-2" />
-                Integrations
-              </Button>
-              <AiModelSelector />
-              <SmtpFarmModal apiBase={API_BASE} />
-              <TrainingProgramsModal apiBase={API_BASE} />
+              {/* «Новый проект» переехал в панель «Проекты» (логика: кнопка живёт рядом со списком).
+                  «Integrations» — в сайдбар → «Настройки»; селектор AI-модели удалён как мёртвый
+                  (писал SystemSetting ai_model, который никто не читает — B-028 инвентаризация) */}
+              <SmtpFarmModal apiBase={API_BASE} open={smtpFarmOpen} onOpenChange={setSmtpFarmOpen} />
+              <TrainingProgramsModal apiBase={API_BASE} open={offersOpen} onOpenChange={setOffersOpen} />
               <ThemeToggle />
               <Button
                 type="button"
@@ -6321,7 +6100,7 @@ export default function AiBizOsHumanUI() {
           {Object.keys(restartsInFlight).length > 0 ? (
             <div
               role="status"
-              className="flex items-start gap-3 rounded-2xl border-2 border-border bg-muted/30 px-4 py-3 text-sm"
+              className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm"
             >
               <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
               <p className="text-muted-foreground">
@@ -6339,7 +6118,7 @@ export default function AiBizOsHumanUI() {
           {runProjectMismatch && selectedProject && selectedProject.is_archived ? (
             <div
               role="status"
-              className="flex items-start gap-3 rounded-2xl border-2 border-border bg-muted/30 px-4 py-3 text-sm"
+              className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm"
             >
               <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
               <p className="text-muted-foreground">
@@ -6352,7 +6131,7 @@ export default function AiBizOsHumanUI() {
           {runProjectMismatch && selectedProject && !selectedProject.is_archived ? (
             <div
               role="status"
-              className="flex flex-col gap-3 rounded-2xl border-2 border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+              className="flex flex-col gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
             >
               <div className="flex items-start gap-3">
                 <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden />
@@ -6387,99 +6166,18 @@ export default function AiBizOsHumanUI() {
             </div>
           ) : null}
 
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
-            <div className="flex min-w-0 flex-1 flex-col gap-3 rounded-2xl border-2 border-border bg-card p-4 md:flex-row md:items-center md:justify-between">
-              <div className="space-y-2">
-                <div className="text-lg font-medium leading-snug md:text-xl">
-                  <span className="text-muted-foreground font-normal">Проект</span>{" "}
-                  <span>{selectedProject?.name ?? "—"}</span>
-                </div>
-                <div className="text-lg font-medium leading-snug md:text-xl">
-                  <span className="text-muted-foreground font-normal">Кампания</span>{" "}
-                  <span>
-                    {selectedRun
-                      ? selectedRun.name?.trim() || `Кампания #${selectedRun.id}`
-                      : "Select a run"}
-                  </span>
-                </div>
-                <div className="space-y-1 pt-1 text-sm">
-                  <div>
-                    <span className="text-muted-foreground">Статус</span>{" "}
-                    <span className="font-medium">{workspace?.display_phase ?? "—"}</span>
-                  </div>
-                  <div className="text-foreground/90">
-                    <span className="text-muted-foreground">LLMs</span>{" "}
-                    <span className="font-medium">{integrationInformer.llmPart}</span>
-                    <span className="px-1.5 text-muted-foreground">•</span>
-                    <span className="text-muted-foreground">CDN</span>{" "}
-                    <span className="font-medium">{integrationInformer.cdnPart}</span>
-                    <span className="px-1.5 text-muted-foreground">•</span>
-                    <span className="text-muted-foreground">Outreach</span>{" "}
-                    <span className="font-medium">{integrationInformer.outreachPart}</span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  disabled={!selectedProject || selectedProject.is_archived}
-                  onClick={() => openNewRunDialog()}
-                >
-                  New run
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={!selectedProject || (runsList.length === 0 && !selectedRun)}
-                  onClick={() => setSwitchRunOpen(true)}
-                >
-                  <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
-                  Switch run
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={!selectedRun || workspace?.display_phase === "Closed"}
-                  onClick={() => setCloseRunOpen(true)}
-                >
-                  Close run
-                </Button>
-              </div>
-            </div>
-            <Card
-              className={cn(
-                "min-h-0 min-w-0 w-full shrink-0 rounded-2xl border-2 shadow-none lg:w-80",
-                totalPerformance24hUi.cardClass,
-              )}
-            >
-              <CardHeader className="pb-3">
-                <CardTitle>Общая эффективность</CardTitle>
-                <p className={cn("mt-1 text-xs font-medium leading-snug", totalPerformance24hUi.captionClass)}>
-                  {totalPerformance24hUi.label}
-                </p>
-              </CardHeader>
-              <CardContent className="min-w-0">
-                <ul className="space-y-2 break-words text-sm">
-                  <li>
-                    Emails sent:{" "}
-                    <span className="font-medium">{totalPerformance?.emails_sent ?? 0}</span>
-                  </li>
-                  <li>
-                    Emails sent (24 hrs):{" "}
-                    <span className="font-medium">{totalPerformance?.emails_sent_24h ?? 0}</span>
-                  </li>
-                  <li>
-                    Replies:{" "}
-                    <span className="font-medium">{totalPerformance?.replies ?? 0}</span>
-                  </li>
-                </ul>
-              </CardContent>
-            </Card>
-          </div>
+          {/* B-028 этап 3: большой блок «Проект/Кампания/Статус + New/Switch/Close run + Общая
+              эффективность» заменён компактным селектором кампании в шапке; New/Close живут на
+              экране «Кампании», тоталы — тайлом на «Сегодня» (prop totals у OpsDashboard). */}
+          {integrationInformer.llmPart === "—" && setupIntegration ? (
+            <p className="flex items-center gap-2 rounded-md bg-danger-soft px-3 py-2 text-sm font-medium text-danger">
+              ⚠ Ни один LLM-ключ не подтверждён — генерация и критик писем работать не будут. Проверьте «Настройки → Интеграции и ключи».
+            </p>
+          ) : null}
         </div>
 
         {error ? (
-          <Card className="mb-6 border-2 border-destructive/50">
+          <Card className="mb-6 border border-destructive/50">
             <CardContent className="flex items-start gap-3 p-4">
               <p className="min-w-0 flex-1 text-sm text-destructive">{error}</p>
               <button
@@ -6494,13 +6192,37 @@ export default function AiBizOsHumanUI() {
           </Card>
         ) : null}
 
-        <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
-          <Card className="rounded-2xl border-2 border-border shadow-none">
+        {/* B-028 этап 3: колонка «Проекты» показывается только на экране «Кампании» —
+            на остальных экранах контекст задаёт селектор кампании в шапке. */}
+        <div className={cn("grid gap-6", mainNav === "runs" && "lg:grid-cols-[320px_1fr]")}>
+          {mainNav === "runs" ? (
+          <Card className="rounded-lg border border-border shadow-none">
             <CardHeader>
               <CardTitle>Проекты</CardTitle>
               <CardDescription>Выберите проект, затем создайте или откройте кампанию</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button variant="outline" className="w-full">
+                    <Plus className="mr-2 h-4 w-4" aria-hidden />
+                    Новый проект
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-lg">
+                  <DialogHeader>
+                    <DialogTitle>Новый проект</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2">
+                    <Input
+                      value={projectName}
+                      onChange={(e) => setProjectName(e.target.value)}
+                      placeholder="Название проекта"
+                    />
+                  </div>
+                  <NewProjectFooter projectName={projectName} onCreated={createProject} />
+                </DialogContent>
+              </Dialog>
               <NativeFilterSelect
                 className="w-full"
                 value={projectView}
@@ -6512,7 +6234,7 @@ export default function AiBizOsHumanUI() {
                   {projects.map((project) => (
                     <div
                       key={project.id}
-                      className={`rounded-2xl border-2 p-4 transition ${
+                      className={`rounded-lg border p-4 transition ${
                         selectedProject?.id === project.id ? "border-primary bg-primary/5" : "border-border"
                       }`}
                     >
@@ -6545,11 +6267,11 @@ export default function AiBizOsHumanUI() {
                                 </>
                               ) : runsList.length > 0 &&
                                 !runsList.some((r) => r.project_id === project.id) ? (
-                                <div className="mt-0.5 text-muted-foreground">Loading…</div>
+                                <div className="mt-0.5 text-muted-foreground">Загружаем…</div>
                               ) : runsList.some((r) => r.project_id === project.id) && !selectedRun ? (
-                                <div className="mt-0.5 text-muted-foreground">Loading…</div>
+                                <div className="mt-0.5 text-muted-foreground">Загружаем…</div>
                               ) : (
-                                <div className="mt-0.5 font-medium text-muted-foreground">No runs yet</div>
+                                <div className="mt-0.5 font-medium text-muted-foreground">Кампаний пока нет</div>
                               )}
                             </div>
                           ) : null}
@@ -6604,7 +6326,7 @@ export default function AiBizOsHumanUI() {
                     </div>
                   ))}
                   {!projects.length && (
-                    <div className="rounded-2xl border-2 border-dashed p-6 text-sm text-muted-foreground">
+                    <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
                       {loading
                         ? "Loading projects..."
                         : projectView === "archived"
@@ -6617,11 +6339,14 @@ export default function AiBizOsHumanUI() {
 
             </CardContent>
           </Card>
+          ) : null}
 
           <div className="space-y-6">
-            {selectedRun && workspace ? (
+            {/* Карточки «Настройка кампании» + «Эффективность кампании» — только на экране
+                «Кампании» (B-028 этап 3): раньше висели над всеми разделами. */}
+            {mainNav === "runs" && selectedRun && workspace ? (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start">
-                <Card className="min-w-0 rounded-2xl border-2 border-border shadow-none">
+                <Card className="min-w-0 rounded-lg border border-border shadow-none">
                   <CardHeader className="min-w-0 space-y-0">
                     <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0">
@@ -6651,7 +6376,7 @@ export default function AiBizOsHumanUI() {
                   </CardHeader>
                   <CardContent className="min-w-0 space-y-4">
                     <RunSetupHourlySendsChart counts={workspace.hourly_sends_24h} />
-                    <div className="rounded-2xl border-2 border-border bg-muted/30 p-3 text-sm">
+                    <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
                       <div className="font-medium">{t("Setup summary")}</div>
                       <ul className="mt-2 space-y-1 text-muted-foreground">
                         <li>
@@ -6763,7 +6488,7 @@ export default function AiBizOsHumanUI() {
                   </CardContent>
                 </Card>
 
-                <Card className="min-w-0 w-full rounded-2xl border-2 border-border shadow-none">
+                <Card className="min-w-0 w-full rounded-lg border border-border shadow-none">
                   <CardHeader className="pb-3">
                     <CardTitle>Эффективность кампании</CardTitle>
                   </CardHeader>
@@ -6819,7 +6544,8 @@ export default function AiBizOsHumanUI() {
               </div>
             ) : null}
 
-            <div className="flex flex-wrap gap-1 rounded-2xl border-2 border-border bg-muted/20 p-1">
+            {/* мобильный фолбэк навигации: на md+ навигация живёт в сайдбаре (AppSidebar) */}
+            <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-muted/20 p-1 md:hidden">
               {visibleMainNavItems.map((item) => {
                 const active = mainNav === item.value;
                 return (
@@ -6835,9 +6561,9 @@ export default function AiBizOsHumanUI() {
                       size="sm"
                       variant={active ? "default" : "ghost"}
                       className={cn(
-                        "rounded-xl",
+                        "rounded-md",
                         !active &&
-                          "border-2 border-transparent shadow-none hover:border-primary hover:bg-transparent",
+                          "border border-transparent shadow-none hover:border-primary hover:bg-transparent",
                       )}
                       onClick={() => setMainNav(item.value)}
                     >
@@ -6848,13 +6574,33 @@ export default function AiBizOsHumanUI() {
               })}
             </div>
 
+            {mainNav === "ops" ? (
+              <OpsDashboard
+                onNavigate={setMainNav}
+                totals={totalPerformance}
+                /* B-547: политика отправки в блоке «Система» — по ящику выбранного рана, не дефолтная */
+                runId={selectedRun?.id}
+                runName={selectedRun?.name}
+                onOpenDraft={(draftId) => {
+                  // B-017: письма из очереди всегда approved/edited — переключаем на нужную
+                  // вкладку, иначе карточки нет в DOM и автоскролл к ней не срабатывает.
+                  const d = drafts.find((x) => x.id === draftId);
+                  const bucket =
+                    d && !["approved", "edited"].includes(d.review_status) ? "pending" : "approved";
+                  setDraftReviewTab(bucket);
+                  setFocusDraftId(draftId);
+                  setMainNav("drafts");
+                }}
+              />
+            ) : null}
+
             {mainNav === "runs" ? (
-              <Card className="rounded-2xl border-2 border-border shadow-none">
+              <Card className="rounded-lg border border-border shadow-none">
                 <CardHeader>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <CardTitle>Кампании</CardTitle>
-                      <CardDescription>Manage outreach waves inside this project</CardDescription>
+                      <CardDescription>Волны аутрича выбранного проекта</CardDescription>
                     </div>
                     <Button
                       type="button"
@@ -6863,19 +6609,9 @@ export default function AiBizOsHumanUI() {
                     >
                       {t("Новая кампания")}
                     </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={!selectedProject || selectedProject.is_archived}
-                      onClick={() => {
-                        setAmoCrmProjectId(projectPk(selectedProject));
-                        setAmoCrmRunName(`Import ${formatDateYmd(new Date())}`);
-                        setAmoCrmImportOpen(true);
-                      }}
-                      className="flex items-center gap-1.5 font-semibold border-primary/40 hover:border-primary text-primary"
-                    >
-                      <Zap className="h-4 w-4" /> {t("Import AmoCRM")}
-                    </Button>
+                    {/* Кнопка «Import AmoCRM» убрана (Алексей 10.07: Excel/Amo не используется).
+                        Бэкенд-эндпойнт /runs/import-amocrm и диалог сохранены — вернём, если
+                        появится готовая база контактов. */}
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
@@ -6890,7 +6626,7 @@ export default function AiBizOsHumanUI() {
                       <Card
                         key={r.id}
                         className={cn(
-                          "rounded-2xl border-2 shadow-none transition",
+                          "rounded-lg border shadow-none transition",
                           selectedRun?.id === r.id ? "border-primary bg-primary/5" : "border-border",
                         )}
                       >
@@ -6965,23 +6701,23 @@ export default function AiBizOsHumanUI() {
             ) : null}
 
             {mainNav === "companies" ? (
-              <Card className="rounded-2xl border-2 border-border shadow-none">
+              <Card className="rounded-lg border border-border shadow-none">
                 <CardHeader>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                     <div className="min-w-0 space-y-1.5">
                       <CardTitle>Компании</CardTitle>
                       <CardDescription>
-                        List from the collect step. Contact search status is stored on each company row after find /
-                        retry runs (this screen does not load the contacts table).
+                        Список из шага сбора. Статус поиска контактов хранится в каждой строке компании после
+                        запусков поиска / повтора (этот экран не подгружает таблицу контактов).
                       </CardDescription>
                       {companiesPanel?.collect_step_status != null || companiesPanel?.find_step_status != null ? (
                         <p className="text-xs text-muted-foreground">
-                          Collect step:{" "}
+                          Сбор:{" "}
                           <span className="font-medium text-foreground">
                             {companiesPanel?.collect_step_status ?? "—"}
                           </span>
                           {" · "}
-                          Find contacts step:{" "}
+                          Поиск контактов:{" "}
                           <span className="font-medium text-foreground">
                             {companiesPanel?.find_step_status ?? "—"}
                           </span>
@@ -6995,10 +6731,10 @@ export default function AiBizOsHumanUI() {
                         >
                           <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
                           <span>
-                            Searching{" "}
+                            Ищем{" "}
                             <span className="font-medium">«{companyBulkFindProgress.name}»</span>
                             {" — "}
-                            {companyBulkFindProgress.engine === "apollo" ? "Apollo" : "LLM"}
+                            LLM
                           </span>
                         </div>
                       ) : null}
@@ -7018,10 +6754,10 @@ export default function AiBizOsHumanUI() {
                           {continueCompanyFindLoading ? (
                             <>
                               <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                              Searching…
+                              Ищем…
                             </>
                           ) : (
-                            "Continue searching"
+                            "Продолжить поиск"
                           )}
                         </Button>
                       ) : null}
@@ -7054,10 +6790,10 @@ export default function AiBizOsHumanUI() {
                           {companyRetryAllLoading ? (
                             <>
                               <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                              Retrying all…
+                              Повторяем все…
                             </>
                           ) : (
-                            "Retry all"
+                            "Повторить все"
                           )}
                         </Button>
                       ) : null}
@@ -7069,7 +6805,7 @@ export default function AiBizOsHumanUI() {
                           type="button"
                           variant="outline"
                           size="sm"
-                          title="Label companies that still need analysis (LLM vs your campaign brief). Already analyzed rows are skipped."
+                          title="Пометить компании, которые ещё нуждаются в анализе (LLM против брифа кампании). Уже проанализированные строки пропускаются."
                           disabled={
                             companiesLoading ||
                             continueCompanyFindLoading ||
@@ -7082,10 +6818,10 @@ export default function AiBizOsHumanUI() {
                           {companyAiFitBatchLoading ? (
                             <>
                               <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                              AI analysis…
+                              AI-анализ…
                             </>
                           ) : (
-                            "AI analysis"
+                            "AI-анализ"
                           )}
                         </Button>
                       ) : null}
@@ -7114,12 +6850,12 @@ export default function AiBizOsHumanUI() {
                 </CardHeader>
                 <CardContent>
                   {!selectedRun ? (
-                    <p className="text-sm text-muted-foreground">Select a run first.</p>
+                    <p className="text-sm text-muted-foreground">Сначала выберите кампанию.</p>
                   ) : companiesListFailedRunId === Number(selectedRun.id) ? (
-                    <div className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 p-4 text-sm">
+                    <div className="flex flex-col gap-3 rounded-md border border-destructive/35 bg-destructive/5 p-4 text-sm">
                       <p className="text-muted-foreground">
-                        Could not load the companies table (network or server error). Кампания setup numbers may still show
-                        from the last successful metrics refresh.
+                        Не удалось загрузить таблицу компаний (сеть или ошибка сервера). Цифры настройки кампании
+                        могут всё ещё показывать данные последнего успешного обновления метрик.
                       </p>
                       <Button
                         type="button"
@@ -7128,14 +6864,14 @@ export default function AiBizOsHumanUI() {
                         className="w-fit"
                         onClick={() => setCompaniesRefreshNonce((n) => n + 1)}
                       >
-                        Retry
+                        Повторить
                       </Button>
                     </div>
                   ) : (companiesPanel?.companies?.length ?? 0) > 0 ? (
                     <div className="space-y-4">
                       <details className="rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground">
                         <summary className="cursor-pointer select-none font-medium text-muted-foreground outline-none hover:text-foreground">
-                          What status labels mean
+                          Что означают статусы
                         </summary>
                         <div className="mt-3 flex flex-col gap-3">
                           <span className="inline-flex flex-wrap items-start gap-1.5">
@@ -7143,72 +6879,72 @@ export default function AiBizOsHumanUI() {
                               className="inline-flex shrink-0 items-center gap-1 border border-red-950 bg-red-950/95 font-normal text-red-50 dark:border-red-800 dark:bg-red-950/90"
                             >
                               <CircleAlert className="h-3 w-3 shrink-0" aria-hidden />
-                              LLM error
+                              Ошибка LLM
                             </Badge>
                             <span>
-                              Company/website failed validation (unreachable or invalid URL). No contact search — use a
-                              real brand in a new collect round.
+                              Компания/сайт не прошли валидацию (недоступен или невалидный URL). Поиск контактов не
+                              запускался — используйте реальный бренд в новом раунде сбора.
                             </span>
                           </span>
                           <span className="inline-flex flex-wrap items-start gap-1.5">
                             <Badge variant="default" className="shrink-0 whitespace-nowrap font-normal">
-                              Contacts found
+                              Контакты найдены
                             </Badge>
                             <span>
-                              At least one matching person has a usable email in find-contacts output. If{" "}
-                              <strong>all</strong> contacts for that company become bounced or dead mailbox, the row shows{" "}
-                              <strong>Not available</strong> instead.
+                              Хотя бы у одного подходящего человека есть пригодный email в результатах поиска
+                              контактов. Если <strong>все</strong> контакты компании стали bounced или мёртвым
+                              ящиком, строка вместо этого покажет <strong>Недоступно</strong>.
                             </span>
                           </span>
                           <span className="inline-flex flex-wrap items-start gap-1.5">
                             <Badge variant="secondary" className="font-normal">
-                              Not found
+                              Не найдено
                             </Badge>
-                            <span>Find-contacts finished; no matching row for this company.</span>
+                            <span>Поиск контактов завершён; подходящей строки для этой компании нет.</span>
                           </span>
                           <span className="inline-flex flex-wrap items-start gap-1.5">
                             <Badge variant="destructive" className="font-normal">
-                              Not available
+                              Недоступно
                             </Badge>
                             <span>
-                              <strong>Not available</strong> here means no <strong>usable email</strong> for this company
-                              in find-contacts output: Apollo may return people but often without an email in the API
-                              response (plan/tier), or the site had no domain for contact search. Collecting a company
-                              (org search) and finding a person with an email are separate steps. Use{" "}
-                              <strong>Retry</strong> if the row is still open, or <strong>Remove</strong> if the company
-                              is off-target.
+                              <strong>Недоступно</strong> здесь значит, что у компании нет <strong>пригодного
+                              email</strong> в результатах поиска контактов: OSINT может найти человека, но часто без
+                              рабочего email, либо у сайта не было домена для поиска контактов. Сбор компании
+                              (поиск организации) и поиск человека с email — разные шаги. Используйте{" "}
+                              <strong>Повторить</strong>, если строка ещё открыта, или <strong>Удалить</strong>, если
+                              компания не по профилю.
                             </span>
                           </span>
                           <span className="inline-flex flex-wrap items-start gap-1.5">
                             <Badge variant="outline" className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100">
-                              Not searched yet
+                              Ещё не искали
                             </Badge>
-                            <span>Find-contacts still running or not completed — more results may arrive.</span>
+                            <span>Поиск контактов ещё идёт или не завершён — могут появиться новые результаты.</span>
                           </span>
                           <span className="inline-flex flex-wrap items-start gap-1.5">
                             <Badge variant="destructive" className="font-normal">
-                              Incorrect
+                              Не подходит
                             </Badge>
                             <span className="inline-flex flex-wrap gap-1">
-                              <span className="font-medium text-foreground">Campaign fit</span> (AI analysis): one
-                              LLM pass per company vs your campaign brief.{" "}
-                              <strong>OK</strong> = plausible target; <strong>Incorrect</strong> = off-target. Analyzed
-                              rows are stored and are not analyzed again when you use <strong>AI analysis</strong>{" "}
-                              (only rows without a label yet).
+                              <span className="font-medium text-foreground">Соответствие</span> (AI-анализ): один
+                              проход LLM на компанию против брифа кампании.{" "}
+                              <strong>OK</strong> = вероятная цель; <strong>Не подходит</strong> = мимо профиля.
+                              Проанализированные строки сохраняются и не анализируются повторно при использовании{" "}
+                              <strong>AI-анализа</strong> (только строки без метки).
                             </span>
                           </span>
                         </div>
                       </details>
-                      <div className="overflow-x-auto rounded-xl border-2 border-border pb-4">
+                      <div className="overflow-x-auto rounded-md border border-border pb-4">
                         <table className="w-full min-w-[760px] text-left text-sm">
                           <thead className="border-b border-border bg-muted/40 text-xs font-semibold text-muted-foreground">
                             <tr>
-                              <th className="px-3 py-2">Company</th>
-                              <th className="px-3 py-2">Website</th>
-                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Contact search</th>
-                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Campaign fit</th>
-                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Strategy</th>
-                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Actions</th>
+                              <th className="px-3 py-2">Компания</th>
+                              <th className="px-3 py-2">Сайт</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Поиск контактов</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Соответствие</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Стратегия</th>
+                              <th className="whitespace-nowrap px-3 py-2 align-bottom">Действия</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -7223,52 +6959,52 @@ export default function AiBizOsHumanUI() {
                                 st === "llm_error" ? (
                                   <Badge
                                     className="inline-flex items-center gap-1 border border-red-950 bg-red-950/95 font-normal text-red-50 dark:border-red-800 dark:bg-red-950/90"
-                                    title="Invalid or unreachable website — marked as LLM hallucination"
+                                    title="Невалидный или недоступный сайт — помечено как галлюцинация LLM"
                                   >
                                     <CircleAlert className="h-3 w-3 shrink-0" aria-hidden />
-                                    LLM error
+                                    Ошибка LLM
                                   </Badge>
                                 ) : st === "unknown" ? (
                                   <Badge
                                     variant="outline"
                                     className="border-muted-foreground/40 font-normal text-muted-foreground"
-                                    title="Status not synced yet — run find/retry, or open Contacts after the next workflow step"
+                                    title="Статус ещё не синхронизирован — запустите поиск/повтор, или откройте «Контакты» после следующего шага"
                                   >
-                                    Not synced
+                                    Не синхронизировано
                                   </Badge>
                                 ) : onlyBouncedOrDead ? (
                                   <Badge variant="destructive" className="font-normal">
-                                    Not available
+                                    Недоступно
                                   </Badge>
                                 ) : st === "found" ? (
                                   <Badge variant="default" className="shrink-0 whitespace-nowrap font-normal">
-                                    Contacts found
+                                    Контакты найдены
                                   </Badge>
                                 ) : st === "no_email" ? (
                                   <Badge variant="destructive" className="font-normal">
-                                    Not available
+                                    Недоступно
                                   </Badge>
                                 ) : st === "none" && unavailable ? (
                                   <Badge variant="destructive" className="font-normal">
-                                    Not available
+                                    Недоступно
                                   </Badge>
                                 ) : st === "none" ? (
                                   <Badge variant="secondary" className="font-normal">
-                                    Not found
+                                    Не найдено
                                   </Badge>
                                 ) : st === "pending" ? (
                                   <Badge
                                     variant="outline"
                                     className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100"
                                   >
-                                    Not searched yet
+                                    Ещё не искали
                                   </Badge>
                                 ) : (
                                   <Badge
                                     variant="outline"
                                     className="border-amber-500/50 font-normal text-amber-950 dark:text-amber-100"
                                   >
-                                    Not searched yet
+                                    Ещё не искали
                                   </Badge>
                                 );
                               const canRetryCompanyFind =
@@ -7313,7 +7049,7 @@ export default function AiBizOsHumanUI() {
                                             size="sm"
                                             variant="outline"
                                             onClick={() => setOsintDossierView({ title: row.name, content: cOsint })}
-                                            title="View Company OSINT"
+                                            title="Смотреть OSINT-досье компании"
                                           >
                                             📄
                                           </Button>
@@ -7331,10 +7067,10 @@ export default function AiBizOsHumanUI() {
                                           {retryingRow ? (
                                             <>
                                               <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden />
-                                              Retry
+                                              Повтор
                                             </>
                                           ) : (
-                                            "Retry"
+                                            "Повторить"
                                           )}
                                         </Button>
                                       ) : null}
@@ -7349,10 +7085,10 @@ export default function AiBizOsHumanUI() {
                                           title={
                                             typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
                                               ? row.ai_fit_reason.trim()
-                                              : "Does not match your campaign brief"
+                                              : "Не соответствует брифу кампании"
                                           }
                                         >
-                                          Incorrect
+                                          Не подходит
                                         </Badge>
                                       ) : row.ai_fit_status === "correct" ? (
                                         <Badge
@@ -7361,7 +7097,7 @@ export default function AiBizOsHumanUI() {
                                           title={
                                             typeof row.ai_fit_reason === "string" && row.ai_fit_reason.trim()
                                               ? row.ai_fit_reason.trim()
-                                              : "Plausible fit for this campaign"
+                                              : "Вероятно подходит для кампании"
                                           }
                                         >
                                           OK
@@ -7400,7 +7136,7 @@ export default function AiBizOsHumanUI() {
                                         className="h-6 shrink-0 whitespace-nowrap rounded-full px-2.5 text-xs font-medium"
                                         onClick={() => openDossier(row.name, dossier)}
                                       >
-                                        View Strategy
+                                        Смотреть стратегию
                                       </Button>
                                     ) : (
                                       <span className="text-muted-foreground">—</span>
@@ -7424,7 +7160,7 @@ export default function AiBizOsHumanUI() {
                                           })
                                         }
                                       >
-                                        Remove
+                                        Удалить
                                       </Button>
                                     ) : (
                                       "—"
@@ -7440,11 +7176,11 @@ export default function AiBizOsHumanUI() {
                           <div className="flex w-full flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
                             {companiesRangeStart > 0 && companiesRangeEnd > 0 ? (
                               <span className="text-center">
-                                {companiesRangeStart}–{companiesRangeEnd} of {companiesTotalForUi}
+                                {companiesRangeStart}–{companiesRangeEnd} из {companiesTotalForUi}
                                 {companiesListTruncated ? (
                                   <span className="text-foreground">
                                     {" "}
-                                    (showing first {companiesLoadedCount} loaded)
+                                    (показаны первые {companiesLoadedCount} загруженных)
                                   </span>
                                 ) : null}
                               </span>
@@ -7457,7 +7193,7 @@ export default function AiBizOsHumanUI() {
                                 disabled={companiesPage <= 1 || companiesLoading}
                                 onClick={() => setCompaniesPage((p) => Math.max(1, p - 1))}
                               >
-                                Previous
+                                Назад
                               </Button>
                               <Button
                                 type="button"
@@ -7466,40 +7202,40 @@ export default function AiBizOsHumanUI() {
                                 disabled={companiesPage >= companiesPageCount || companiesLoading}
                                 onClick={() => setCompaniesPage((p) => Math.min(companiesPageCount, p + 1))}
                               >
-                                Next
+                                Вперёд
                               </Button>
                             </div>
                           </div>
                         </div>
                       ) : companiesTotalForUi > 0 ? (
                         <p className="text-xs text-muted-foreground">
-                          {companiesTotalForUi}{" "}
-                          {companiesTotalForUi === 1 ? "company" : "companies"} total.
+                          Всего компаний: {companiesTotalForUi}.
                         </p>
                       ) : null}
                       </div>
                     </div>
                   ) : companiesLoading && !companiesPanel ? (
-                    <p className="text-sm text-muted-foreground">Loading companies...</p>
+                    <p className="text-sm text-muted-foreground">Загружаем компании...</p>
                   ) : companiesPanel &&
                     !companiesPanel.companies?.length &&
                     Number(companiesPanel.companies_total) === 0 &&
                     Number(workspace?.setup_summary?.companies_collected) > 0 ? (
                     <div className="space-y-2 text-sm text-muted-foreground">
                       <p>
-                        Кампания setup reports{" "}
+                        Настройка кампании показывает{" "}
                         <span className="font-medium text-foreground">
                           {workspace.setup_summary.companies_collected}
                         </span>{" "}
-                        companies in setup metrics, but the{" "}
-                        <span className="font-medium text-foreground">run_companies</span> table is empty for this run.
-                        Try Refresh metrics, reopen this run, or run the one-off legacy migration script if you upgraded
-                        from an older DB.
+                        компаний в метриках, но таблица{" "}
+                        <span className="font-medium text-foreground">run_companies</span> для этой кампании пуста.
+                        Попробуйте обновить метрики, переоткрыть кампанию, или запустить разовый скрипт миграции
+                        легаси-данных, если БД обновлялась со старой версии.
                       </p>
                     </div>
                   ) : !companiesPanel?.companies?.length ? (
                     <p className="text-sm text-muted-foreground">
-                      No companies stored for this run yet. They appear after search adds them (or restart the run).
+                      Для этой кампании пока не сохранено ни одной компании. Появятся после того, как поиск их
+                      добавит (или после перезапуска кампании).
                     </p>
                   ) : null}
                 </CardContent>
@@ -7507,17 +7243,17 @@ export default function AiBizOsHumanUI() {
             ) : null}
 
             {mainNav === "contacts" || mainNav === "drafts" ? (
-            <Card className="rounded-2xl border-2 border-border shadow-none">
+            <Card className="rounded-lg border border-border shadow-none">
               <CardHeader>
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <CardTitle>
-                      {mainNav === "drafts" ? "Review email drafts" : "Review contacts"}
+                      {mainNav === "drafts" ? "Ревью писем" : "Ревью контактов"}
                     </CardTitle>
                     <CardDescription>
                       {mainNav === "drafts"
-                        ? "A list of generated email drafts. To send a message, you must first approve it. You can send all approved messages at once."
-                        : "List of found contacts. To create a draft email, the contact must be approved."}
+                        ? "Список сгенерированных черновиков писем. Перед отправкой письмо нужно одобрить. Все одобренные можно отправить разом."
+                        : "Список найденных контактов. Чтобы создать черновик письма, контакт нужно одобрить."}
                     </CardDescription>
                   </div>
                   <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center md:max-w-none md:justify-end">
@@ -7529,34 +7265,16 @@ export default function AiBizOsHumanUI() {
                             variant="outline"
                             size="sm"
                             className="gap-1.5"
-                            title="Reconnect Google — refresh OAuth token or fix client credentials in the running API."
+                            title="Переподключить Gmail — обновить OAuth-токен отправки."
                             onClick={() => openGmailSetup()}
                             disabled={!selectedRun}
                           >
                             {!gmailSendReady ? (
-                              <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
+                              <CircleX className="h-4 w-4 shrink-0 text-danger" aria-hidden />
                             ) : (
                               <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
                             )}
-                            Connect Yandex
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="gap-1.5"
-                            title="Send the first sendable approved draft to yourself (To = From: GMAIL_SEND_AS_EMAIL when set, else primary Gmail). Does not update drafts or the database."
-                            onClick={() => void testSendFirstApproved()}
-                            disabled={!selectedRun || approvedDrafts === 0 || testSendBusy}
-                          >
-                            {testSendBusy ? (
-                              <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-                            ) : !gmailSendReady ? (
-                              <CircleX className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
-                            ) : (
-                              <Mail className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
-                            )}
-                            Test
+                            Подключить Gmail
                           </Button>
                         </>
                       ) : null}
@@ -7579,7 +7297,7 @@ export default function AiBizOsHumanUI() {
                             aria-hidden
                           />
                         )}
-                        Prompt setup
+                        Настройка промпта
                       </Button>
                       <Button
                         type="button"
@@ -7600,7 +7318,7 @@ export default function AiBizOsHumanUI() {
                             aria-hidden
                           />
                         )}
-                        Signature setup
+                        Настройка подписи
                       </Button>
                       {mainNav === "contacts" ? (
                         <>
@@ -7631,11 +7349,72 @@ export default function AiBizOsHumanUI() {
                     <Input
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      placeholder="Search company, name, email, subject..."
+                      placeholder="Поиск: компания, имя, email, тема..."
                       className="min-w-0 sm:max-w-[220px] md:max-w-sm"
                     />
                   </div>
                 </div>
+                {mainNav === "drafts" ? (
+                  <div className="flex flex-wrap items-center gap-2 pt-2 text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">Ящики отправки:</span>
+                    <span className="inline-flex items-center gap-1">
+                      {gmailSendReady ? (
+                        <CircleCheck
+                          className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-500"
+                          aria-hidden
+                        />
+                      ) : (
+                        <CircleX className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-500" aria-hidden />
+                      )}
+                      {setupIntegration?.gmail_send_as_email || "Алексей (по умолчанию)"}
+                    </span>
+                    {(setupIntegration?.gmail_mailboxes || []).map((mb) => (
+                      <span key={mb.mailbox_email} className="inline-flex items-center gap-1">
+                        {mb.connected ? (
+                          <CircleCheck
+                            className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-500"
+                            aria-hidden
+                          />
+                        ) : (
+                          <CircleX
+                            className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-500"
+                            aria-hidden
+                          />
+                        )}
+                        {mb.mailbox_email}
+                      </span>
+                    ))}
+                    {setupIntegration?.dwd_configured ? (
+                      <span className="text-muted-foreground">
+                        · ящики домена ({(setupIntegration.dwd_delegated_domains || []).join(", ")}) подключаются
+                        без OAuth-подтверждения
+                      </span>
+                    ) : null}
+                    <Input
+                      value={newMailboxEmailInput}
+                      onChange={(e) => setNewMailboxEmailInput(e.target.value)}
+                      placeholder="email нового ящика"
+                      className="h-7 w-44 text-xs"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 gap-1 px-2 text-xs"
+                      disabled={!newMailboxEmailInput.trim().includes("@")}
+                      onClick={() => {
+                        const em = newMailboxEmailInput.trim();
+                        if (em) {
+                          setNewMailboxEmailInput("");
+                          openGmailSetup(em);
+                        }
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                      Подключить ещё ящик
+                    </Button>
+                  </div>
+                ) : null}
               </CardHeader>
               <CardContent>
                 {mainNav === "contacts" ? (
@@ -7662,11 +7441,11 @@ export default function AiBizOsHumanUI() {
                       </div>
                     ) : null}
                     <div className="text-sm text-muted-foreground">
-                      {pendingContactsLeft} contacts left to review
+                      Осталось проверить контактов: {pendingContactsLeft}
                       {approvedContactsReachable > 0 ? (
                         <span className="text-muted-foreground">
                           {" "}
-                          · {approvedContactsReachable} approved (reachable)
+                          · одобрено (достижимых): {approvedContactsReachable}
                         </span>
                       ) : null}
                     </div>
@@ -7675,30 +7454,31 @@ export default function AiBizOsHumanUI() {
                     totalContactsReviewRollup > 0 &&
                     contactsVisible.length > 0 &&
                     !search.trim() ? (
-                      <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-10 text-center">
-                        <div className="text-lg font-medium">All contacts reviewed 🎉</div>
+                      <div className="rounded-lg border border-dashed border-muted-foreground/25 py-10 text-center">
+                        <div className="text-lg font-medium">Все контакты проверены 🎉</div>
                         {selectedRun?.status === "needs_review" ? (
                           <>
                             <div className="mb-4 text-sm text-muted-foreground">
-                              You can continue to generate emails
+                              Можно переходить к генерации писем
                             </div>
                             <Button onClick={continueRun} disabled={!canContinue}>
-                              Continue to email drafts
+                              К черновикам писем
                             </Button>
                             {!canContinue ? (
                               <p className="mx-auto mt-3 max-w-md text-xs text-muted-foreground">
-                                Approve or edit at least one reachable contact (bounced / dead mailbox do not
-                                count).
+                                Одобрите или отредактируйте хотя бы один достижимый контакт (bounced / мёртвый
+                                ящик не считаются).
                               </p>
                             ) : null}
                           </>
                         ) : (
                           <>
                             <div className="mb-4 text-sm text-muted-foreground">
-                              Contact review for this step is done. Open Drafts to work on emails.
+                              Проверка контактов на этом шаге завершена. Откройте «Черновики», чтобы работать с
+                              письмами.
                             </div>
                             <Button type="button" onClick={() => setMainNav("drafts")}>
-                              Open Drafts
+                              Открыть черновики
                             </Button>
                           </>
                         )}
@@ -7719,14 +7499,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={contactReviewTab === "pending"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               contactReviewTab === "pending"
                                 ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
                                 : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
                             )}
                             onClick={() => setContactReviewTab("pending")}
                           >
-                            Pending ({displayContactReviewCounts.pending})
+                            Ожидают ({displayContactReviewCounts.pending})
                           </Button>
                           <Button
                             type="button"
@@ -7735,14 +7515,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={contactReviewTab === "approved"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               contactReviewTab === "approved"
                                 ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
                                 : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
                             )}
                             onClick={() => setContactReviewTab("approved")}
                           >
-                            Approved ({displayContactReviewCounts.approved})
+                            Одобрены ({displayContactReviewCounts.approved})
                           </Button>
                           <Button
                             type="button"
@@ -7751,14 +7531,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={contactReviewTab === "rejected"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               contactReviewTab === "rejected"
                                 ? "border-neutral-500 bg-neutral-600 text-white hover:bg-neutral-600 dark:border-neutral-400 dark:bg-neutral-600 dark:hover:bg-neutral-600"
                                 : "border-neutral-600/50 bg-neutral-600/15 text-neutral-900 hover:bg-neutral-600/25 dark:border-neutral-500/45 dark:bg-neutral-900/35 dark:text-neutral-100 dark:hover:bg-neutral-900/50",
                             )}
                             onClick={() => setContactReviewTab("rejected")}
                           >
-                            Rejected ({displayContactReviewCounts.rejected})
+                            Отклонены ({displayContactReviewCounts.rejected})
                           </Button>
                           <Button
                             type="button"
@@ -7767,14 +7547,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={contactReviewTab === "bounced"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               contactReviewTab === "bounced"
                                 ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
                                 : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
                             )}
                             onClick={() => setContactReviewTab("bounced")}
                           >
-                            Bounced ({displayContactReviewCounts.bounced})
+                            Возврат ({displayContactReviewCounts.bounced})
                           </Button>
                           <Button
                             type="button"
@@ -7783,14 +7563,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={contactReviewTab === "dead_mailbox"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               contactReviewTab === "dead_mailbox"
                                 ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
                                 : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
                             )}
                             onClick={() => setContactReviewTab("dead_mailbox")}
                           >
-                            Dead mailbox ({displayContactReviewCounts.dead_mailbox})
+                            Мёртвый ящик ({displayContactReviewCounts.dead_mailbox})
                           </Button>
                           <Button
                             type="button"
@@ -7799,31 +7579,31 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={contactReviewTab === "no_email"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               contactReviewTab === "no_email"
                                 ? "border-zinc-500 bg-zinc-600 text-white hover:bg-zinc-600 dark:border-zinc-400 dark:bg-zinc-600 dark:hover:bg-zinc-600"
                                 : "border-zinc-600/50 bg-zinc-600/15 text-zinc-900 hover:bg-zinc-600/25 dark:border-zinc-500/45 dark:bg-zinc-950/40 dark:text-zinc-100 dark:hover:bg-zinc-950/55",
                             )}
                             onClick={() => setContactReviewTab("no_email")}
                           >
-                            No email ({displayContactReviewCounts.no_email})
+                            Без email ({displayContactReviewCounts.no_email})
                           </Button>
                         </div>
 
                         {!contactsActionsReady && contactsVisible.length > 0 ? (
                           <p className="text-xs text-muted-foreground" role="status">
-                            Syncing full list from server — review actions stay off until the request finishes.
+                            Синхронизируем полный список с сервером — действия ревью недоступны до завершения запроса.
                           </p>
                         ) : null}
 
                         {contactsListFailedRunId === Number(selectedRun?.id) ? (
                           <div
-                            className="flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
+                            className="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
                             role="alert"
                           >
                             <p className="max-w-md text-muted-foreground">
-                              Could not load contacts (network or server error). Tab counts may still show cached
-                              numbers from a previous session.
+                              Не удалось загрузить контакты (сеть или ошибка сервера). Счётчики вкладок могут ещё
+                              показывать кэшированные числа из прошлой сессии.
                             </p>
                             <Button
                               type="button"
@@ -7831,26 +7611,26 @@ export default function AiBizOsHumanUI() {
                               size="sm"
                               onClick={() => void refreshRunContactsOnly(selectedRun.id)}
                             >
-                              Retry
+                              Повторить
                             </Button>
                           </div>
                         ) : contactsReviewListLoading ? (
-                          <p className="rounded-2xl border border-dashed border-muted-foreground/30 py-8 text-center text-sm text-muted-foreground" role="status">
-                            Loading contacts…
+                          <p className="rounded-lg border border-dashed border-muted-foreground/30 py-8 text-center text-sm text-muted-foreground" role="status">
+                            Загружаем контакты…
                           </p>
                         ) : contactReviewTabGroups.length === 0 ? (
                           <div className="text-sm text-muted-foreground">
                             {contactReviewTab === "pending"
-                              ? "No pending contacts here — try another tab or clear search."
+                              ? "Здесь нет ожидающих контактов — попробуйте другую вкладку или сбросьте поиск."
                               : contactReviewTab === "approved"
-                                ? "No approved contacts in this filter — try Pending or delivery tabs."
+                                ? "В этом фильтре нет одобренных контактов — попробуйте «Ожидают» или вкладки доставки."
                                 : contactReviewTab === "rejected"
-                                  ? "No rejected contacts here."
+                                  ? "Здесь нет отклонённых контактов."
                                   : contactReviewTab === "bounced"
-                                    ? "No bounced contacts — check other tabs or search."
+                                    ? "Нет контактов с возвратом — проверьте другие вкладки или поиск."
                                     : contactReviewTab === "dead_mailbox"
-                                      ? "No dead mailbox contacts."
-                                      : "No contacts without a usable email address here."}
+                                      ? "Нет контактов с мёртвым ящиком."
+                                      : "Здесь нет контактов без пригодного email."}
                           </div>
                         ) : (
                           <div className="grid gap-3">
@@ -7866,7 +7646,7 @@ export default function AiBizOsHumanUI() {
                                 contactsReviewPage * WORKSPACE_TABLE_PAGE_SIZE,
                                 contactReviewTabGroups.length,
                               )}{" "}
-                              of {contactReviewTabGroups.length}
+                              из {contactReviewTabGroups.length}
                             </span>
                             <div className="flex flex-wrap gap-2">
                               <Button
@@ -7876,7 +7656,7 @@ export default function AiBizOsHumanUI() {
                                 disabled={contactsReviewPage <= 1}
                                 onClick={() => setContactsReviewPage((p) => Math.max(1, p - 1))}
                               >
-                                Previous
+                                Назад
                               </Button>
                               <Button
                                 type="button"
@@ -7887,14 +7667,13 @@ export default function AiBizOsHumanUI() {
                                   setContactsReviewPage((p) => Math.min(contactsReviewPageCount, p + 1))
                                 }
                               >
-                                Next
+                                Вперёд
                               </Button>
                             </div>
                           </div>
                         ) : contactReviewTabGroups.length > 0 ? (
                           <p className="text-xs text-muted-foreground">
-                            {contactReviewTabGroups.length} group
-                            {contactReviewTabGroups.length === 1 ? "" : "s"} total.
+                            Всего групп: {contactReviewTabGroups.length}.
                           </p>
                         ) : null}
                       </div>
@@ -7904,7 +7683,7 @@ export default function AiBizOsHumanUI() {
                     selectedRun?.id &&
                     contactsListReadyRunId === Number(selectedRun.id) ? (
                       <div className="text-center text-sm text-muted-foreground">
-                        No contacts for this run yet.
+                        Для этой кампании пока нет контактов.
                       </div>
                     ) : null}
                     {totalContactsReviewRollup > 0 &&
@@ -7937,17 +7716,17 @@ export default function AiBizOsHumanUI() {
                             aria-hidden
                           />
                         ) : null}
-                        Send all approved
+                        Отправить одобренные
                       </Button>
                     </div>
                     {draftsListFailedRunId === Number(selectedRun?.id) ? (
                       <div
-                        className="flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
+                        className="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 py-12 text-center text-sm"
                         role="alert"
                       >
                         <p className="max-w-md text-muted-foreground">
-                          Could not load email drafts (network, timeout, or server error). Cached counts in the
-                          header may still reflect an earlier load.
+                          Не удалось загрузить черновики писем (сеть, таймаут или ошибка сервера). Счётчики в
+                          шапке могут ещё показывать данные предыдущей загрузки.
                         </p>
                         <Button
                           type="button"
@@ -7957,7 +7736,7 @@ export default function AiBizOsHumanUI() {
                           aria-busy={draftsSectionFetchBusy}
                           onClick={() => void refreshRunDraftsOnly(selectedRun.id)}
                         >
-                          Retry
+                          Повторить
                         </Button>
                       </div>
                     ) : drafts.length > 0 || contactsAwaitingOutboundDraftPlaceholder.length > 0 ? (
@@ -7974,14 +7753,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={draftReviewTab === "pending"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               draftReviewTab === "pending"
                                 ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
                                 : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
                             )}
                             onClick={() => setDraftReviewTab("pending")}
                           >
-                            Pending review ({displayDraftReviewCounts.pendingReview})
+                            Ждут ревью ({displayDraftReviewCounts.pendingReview})
                           </Button>
                           <Button
                             type="button"
@@ -7990,14 +7769,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={draftReviewTab === "approved"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               draftReviewTab === "approved"
                                 ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
                                 : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
                             )}
                             onClick={() => setDraftReviewTab("approved")}
                           >
-                            Approved ({displayDraftReviewCounts.approved})
+                            Одобрены ({displayDraftReviewCounts.approved})
                           </Button>
                         </div>
 
@@ -8006,7 +7785,7 @@ export default function AiBizOsHumanUI() {
                             {contactsAwaitingOutboundDraftPlaceholder.length > 0 ? (
                               <div className="space-y-3">
                                 <div className="text-sm font-medium">
-                                  Generating ({contactsAwaitingOutboundDraftPlaceholder.length})
+                                  Генерируются ({contactsAwaitingOutboundDraftPlaceholder.length})
                                 </div>
                                 <div className="grid gap-3">
                                   {contactsAwaitingOutboundDraftPlaceholder.map((c) =>
@@ -8017,15 +7796,15 @@ export default function AiBizOsHumanUI() {
                             ) : null}
                             {draftsPending.length > 0 ? (
                               <div className="space-y-3">
-                                <div className="text-sm font-medium">Pending ({draftsPending.length})</div>
+                                <div className="text-sm font-medium">Ожидают ({draftsPending.length})</div>
                                 <div className="grid gap-3">{draftsPending.map((d) => renderDraftCard(d))}</div>
                               </div>
                             ) : null}
                             {draftsRejectedList.length > 0 ? (
-                              <details className="group rounded-2xl border-2 border-border">
+                              <details className="group rounded-lg border border-border">
                                 <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
                                   <ChevronRight className="h-4 w-4 shrink-0 transition group-open:rotate-90" />
-                                  Rejected ({draftsRejectedList.length})
+                                  Отклонены ({draftsRejectedList.length})
                                 </summary>
                                 <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
                                   {draftsRejectedList.map((d) => renderDraftCard(d))}
@@ -8036,23 +7815,24 @@ export default function AiBizOsHumanUI() {
                             draftsRejectedList.length === 0 &&
                             contactsAwaitingOutboundDraftPlaceholder.length === 0 ? (
                               <div className="text-sm text-muted-foreground">
-                                No drafts in pending review for this search — try Approved or clear search.
+                                Нет черновиков в ожидании ревью для этого поиска — попробуйте «Одобрены» или
+                                сбросьте поиск.
                               </div>
                             ) : null}
                           </>
                         ) : draftsApprovedList.length > 0 ? (
                           <div className="space-y-3">
-                            <div className="text-sm font-medium">Approved ({draftsApprovedList.length})</div>
+                            <div className="text-sm font-medium">Одобрены ({draftsApprovedList.length})</div>
                             <div className="grid gap-3">{draftsApprovedList.map((d) => renderDraftCard(d))}</div>
                           </div>
                         ) : (
                           <div className="text-sm text-muted-foreground">
-                            No approved drafts for this search — try Pending review or clear search.
+                            Нет одобренных черновиков для этого поиска — попробуйте «Ждут ревью» или сбросьте поиск.
                           </div>
                         )}
                       </div>
                     ) : (
-                      <div className="text-sm text-muted-foreground">No drafts yet.</div>
+                      <div className="text-sm text-muted-foreground">Черновиков пока нет.</div>
                     )}
                     </>
                     ) : selectedRun?.id ? (
@@ -8073,7 +7853,7 @@ export default function AiBizOsHumanUI() {
                                 aria-hidden
                               />
                             ) : null}
-                            Send all approved
+                            Отправить одобренные
                           </Button>
                         </div>
                         <div
@@ -8088,14 +7868,14 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={draftReviewTab === "pending"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               draftReviewTab === "pending"
                                 ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
                                 : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
                             )}
                             onClick={() => setDraftReviewTab("pending")}
                           >
-                            Pending review ({displayDraftReviewCounts.pendingReview})
+                            Ждут ревью ({displayDraftReviewCounts.pendingReview})
                           </Button>
                           <Button
                             type="button"
@@ -8104,21 +7884,21 @@ export default function AiBizOsHumanUI() {
                             role="tab"
                             aria-selected={draftReviewTab === "approved"}
                             className={cn(
-                              "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                              "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                               draftReviewTab === "approved"
                                 ? "border-sky-500 bg-sky-600 text-white hover:bg-sky-600 dark:border-sky-400 dark:bg-sky-600 dark:hover:bg-sky-600"
                                 : "border-sky-600/50 bg-sky-600/15 text-sky-950 hover:bg-sky-600/25 dark:border-sky-500/45 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-950/55",
                             )}
                             onClick={() => setDraftReviewTab("approved")}
                           >
-                            Approved ({displayDraftReviewCounts.approved})
+                            Одобрены ({displayDraftReviewCounts.approved})
                           </Button>
                         </div>
                         {reviewDraftsSnapModeVal === "loading" && draftsPanelLiteFiltered.length > 0 ? (
                           <>
                             {draftsSectionFetchBusy ? (
                               <p className="text-xs text-muted-foreground" role="status">
-                                Showing cached preview — loading full list…
+                                Показываем кэшированный предпросмотр — загружаем полный список…
                               </p>
                             ) : (
                               <div
@@ -8126,7 +7906,8 @@ export default function AiBizOsHumanUI() {
                                 role="status"
                               >
                                 <p className="text-xs text-amber-600 dark:text-amber-400">
-                                  Couldn&apos;t load full drafts — cached preview only (timeouts or network).
+                                  Не удалось загрузить полный список — только кэшированный предпросмотр (таймауты
+                                  или сеть).
                                 </p>
                                 <Button
                                   type="button"
@@ -8135,17 +7916,17 @@ export default function AiBizOsHumanUI() {
                                   disabled={draftsSectionFetchBusy}
                                   onClick={() => void refreshRunDraftsOnly(selectedRun.id)}
                                 >
-                                  Retry
+                                  Повторить
                                 </Button>
                               </div>
                             )}
-                            <div className="max-h-[min(60vh,480px)] space-y-2 overflow-y-auto rounded-xl border border-border p-2">
+                            <div className="max-h-[min(60vh,480px)] space-y-2 overflow-y-auto rounded-md border border-border p-2">
                               {draftsPanelLiteFiltered.map((d) => (
                                 <div
                                   key={d.id}
                                   className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2 text-sm"
                                 >
-                                  <div className="font-medium">{d.company || "Untitled"}</div>
+                                  <div className="font-medium">{d.company || "Без названия"}</div>
                                   <div className="text-muted-foreground">{d.to_email || "—"}</div>
                                   <div className="mt-0.5 line-clamp-2">{d.subject || "—"}</div>
                                   <div className="mt-1 flex flex-wrap gap-1">
@@ -8162,11 +7943,11 @@ export default function AiBizOsHumanUI() {
                                       size="sm"
                                       variant="outline"
                                       className="h-7 gap-1 text-xs"
-                                      title="Loads full draft from the server if the list is not hydrated yet."
+                                      title="Подгружает полный черновик с сервера, если список ещё не догружен."
                                       onClick={() => openEditDraft(d)}
                                     >
                                       <Pencil className="h-3 w-3 shrink-0" aria-hidden />
-                                      Edit
+                                      Править
                                     </Button>
                                   </div>
                                 </div>
@@ -8187,196 +7968,7 @@ export default function AiBizOsHumanUI() {
             </Card>
             ) : null}
 
-            {mainNav === "contact-analyzer" && selectedRun?.id ? (
-              <Card className="rounded-2xl border-2 border-border shadow-none">
-                <CardHeader>
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <CardTitle>Contact analyzer</CardTitle>
-                      <CardDescription>
-                        One row per unique email in this run. <strong>Verify</strong> runs a single Gmail search (to/from
-                        that address); results are stored and Gmail is not queried again for the same address.
-                      </CardDescription>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        disabled={
-                          !gmailSendReady ||
-                          analyzerBulkBusy ||
-                          analyzerLoading ||
-                          analyzerRows.filter((r) => r.gmail_history_status == null).length === 0
-                        }
-                        onClick={() => void verifyContactAnalyzerAll()}
-                      >
-                        {analyzerBulkBusy ? (
-                          <>
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
-                            Verifying…
-                          </>
-                        ) : (
-                          "Verify all"
-                        )}
-                      </Button>
-                    </div>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {!gmailSendReady ? (
-                    <p className="text-sm text-muted-foreground">
-                      Connect Yandex first — this tool checks your connected mailbox.
-                    </p>
-                  ) : analyzerLoading ? (
-                    <p className="text-sm text-muted-foreground">Loading…</p>
-                  ) : analyzerRows.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No contacts with an email in this run.</p>
-                  ) : (
-                    <>
-                      {analyzerBulkNote ? (
-                        <p className="text-sm text-muted-foreground">{analyzerBulkNote}</p>
-                      ) : null}
-                      <div className="overflow-x-auto rounded-xl border-2 border-border">
-                        <table className="w-full min-w-[520px] text-left text-sm">
-                          <thead className="border-b border-border bg-muted/40 text-xs font-semibold text-muted-foreground">
-                            <tr>
-                              <th className="px-3 py-2">Email</th>
-                              <th
-                                className="px-3 py-2"
-                                aria-sort={analyzerGmailHistorySortDesc ? "descending" : "ascending"}
-                              >
-                                <button
-                                  type="button"
-                                  className="inline-flex max-w-full items-center gap-1 rounded-md text-left font-semibold text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                  title={
-                                    analyzerGmailHistorySortDesc
-                                      ? "Gmail history: History detected first — click to sort the other way"
-                                      : "Gmail history: Not verified first — click to reverse order"
-                                  }
-                                  onClick={() => {
-                                    setAnalyzerGmailHistorySortDesc((d) => !d);
-                                    setAnalyzerPage(1);
-                                  }}
-                                >
-                                  Gmail history
-                                  {analyzerGmailHistorySortDesc ? (
-                                    <ArrowDownWideNarrow className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden />
-                                  ) : (
-                                    <ArrowUpNarrowWide className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden />
-                                  )}
-                                </button>
-                              </th>
-                              <th className="px-3 py-2 w-[120px]" />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {analyzerRowsPage.map((row) => {
-                              const norm = row.email_normalized;
-                              const st = row.gmail_history_status;
-                              const pending = st == null;
-                              return (
-                                <tr key={norm} className="border-b border-border/80">
-                                  <td className="px-3 py-2 align-middle">
-                                    <span className="break-all font-medium">{row.email}</span>
-                                  </td>
-                                  <td className="px-3 py-2 align-middle">
-                                    {pending ? (
-                                      <Badge variant="secondary" className="font-normal">
-                                        Not verified
-                                      </Badge>
-                                    ) : st === "no_history" ? (
-                                      <Badge variant="outline" className="font-normal">
-                                        No history
-                                      </Badge>
-                                    ) : (
-                                      <div className="flex flex-wrap items-center gap-2">
-                                        <Badge className="bg-emerald-600 font-normal hover:bg-emerald-600">
-                                          History detected
-                                        </Badge>
-                                        {!row.gmail_inbox_imported_at ? (
-                                          <Button
-                                            type="button"
-                                            size="sm"
-                                            variant="outline"
-                                            className="h-7 gap-1 rounded-full border-border px-2.5 text-xs font-normal"
-                                            disabled={Boolean(analyzerRowBusy[norm]) || analyzerBulkBusy}
-                                            onClick={() => void importContactAnalyzerInbox(norm)}
-                                          >
-                                            {analyzerRowBusy[norm] ? (
-                                              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
-                                            ) : (
-                                              <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                                            )}
-                                            Import 6 months
-                                          </Button>
-                                        ) : null}
-                                      </div>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-2 align-middle text-right">
-                                    {pending ? (
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        disabled={Boolean(analyzerRowBusy[norm]) || analyzerBulkBusy}
-                                        onClick={() => void verifyContactAnalyzerOne(norm)}
-                                      >
-                                        {analyzerRowBusy[norm] ? (
-                                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                                        ) : (
-                                          "Verify"
-                                        )}
-                                      </Button>
-                                    ) : (
-                                      <span className="text-xs text-muted-foreground">—</span>
-                                    )}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                      {analyzerRows.length > CONTACT_ANALYZER_PAGE_SIZE ? (
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm text-muted-foreground">
-                          <span>
-                            {(analyzerPage - 1) * CONTACT_ANALYZER_PAGE_SIZE + 1}–
-                            {Math.min(analyzerPage * CONTACT_ANALYZER_PAGE_SIZE, analyzerRows.length)} of{" "}
-                            {analyzerRows.length}
-                          </span>
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={analyzerPage <= 1}
-                              onClick={() => setAnalyzerPage((p) => Math.max(1, p - 1))}
-                            >
-                              Previous
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled={analyzerPage >= analyzerPageCount}
-                              onClick={() => setAnalyzerPage((p) => Math.min(analyzerPageCount, p + 1))}
-                            >
-                              Next
-                            </Button>
-                          </div>
-                        </div>
-                      ) : analyzerRows.length > 0 ? (
-                        <p className="text-xs text-muted-foreground">{analyzerRows.length} address(es) total.</p>
-                      ) : null}
-                    </>
-                  )}
-                </CardContent>
-              </Card>
-            ) : null}
-
-            {!["runs", "contacts", "drafts", "companies", "contact-analyzer"].includes(mainNav) &&
+            {!["runs", "contacts", "drafts", "companies", "ops"].includes(mainNav) &&
             selectedRun?.id ? (
               <TrackingView
                 runId={selectedRun.id}
@@ -8394,13 +7986,15 @@ export default function AiBizOsHumanUI() {
               />
             ) : null}
 
-            {!["runs", "contacts", "drafts", "companies", "contact-analyzer"].includes(mainNav) &&
+            {!["runs", "contacts", "drafts", "companies", "ops"].includes(mainNav) &&
             !selectedRun?.id ? (
-              <div className="rounded-2xl border-2 border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+              <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
                 Select a run to view this section.
               </div>
             ) : null}
           </div>
+        </div>
+      </div>
         </div>
       </div>
 
@@ -8425,57 +8019,6 @@ export default function AiBizOsHumanUI() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={amoCrmImportOpen} onOpenChange={setAmoCrmImportOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Import from AmoCRM (Excel)</DialogTitle>
-            <CardDescription>
-              Upload an Excel file with columns: Компания, Web, Имя, Фамилия, Рабочий email, Должность.
-            </CardDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Название кампании</div>
-              <Input
-                value={amoCrmRunName}
-                onChange={(e) => setAmoCrmRunName(e.target.value)}
-                placeholder="e.g. AmoCRM Import 29.05"
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Target Project</div>
-              <NativeFilterSelect
-                className="w-full"
-                value={amoCrmProjectId}
-                onValueChange={setAmoCrmProjectId}
-                options={projects.map(p => ({ value: String(projectPk(p)), label: p.name }))}
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Excel File</div>
-              <Input
-                type="file"
-                accept=".xlsx,.xls"
-                onChange={(e) => setAmoCrmImportFile(e.target.files[0])}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAmoCrmImportOpen(false)} disabled={amoCrmImportInFlight}>
-              Cancel
-            </Button>
-            <Button onClick={handleAmoCrmImport} disabled={amoCrmImportInFlight || !amoCrmFile || !amoCrmRunName}>
-              {amoCrmImportInFlight ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Zap className="mr-2 h-4 w-4" />
-              )}
-              Import
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={promptSetupOpen} onOpenChange={setPromptSetupOpen}>
         <DialogContent className="sm:max-w-2xl flex flex-col max-h-[90vh]">
           <DialogHeader>
@@ -8483,7 +8026,7 @@ export default function AiBizOsHumanUI() {
               <Zap className="h-5 w-5 text-primary" /> {t("Настройка промптов")}
             </DialogTitle>
             <CardDescription>
-              Fine-tune AI behavior and templates for this run. All fields support {"{{company}}"}, {"{{website}}"}, etc.
+              Тонкая настройка поведения ИИ и шаблонов для этой кампании. Все поля поддерживают {"{{company}}"}, {"{{website}}"} и т.д.
             </CardDescription>
           </DialogHeader>
 
@@ -8674,60 +8217,9 @@ export default function AiBizOsHumanUI() {
         </DialogContent>
       </Dialog>
 
-      {yandexSetupOpen ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <button
-            type="button"
-            className="fixed inset-0 bg-black/50"
-            aria-label="Close"
-            onClick={() => setYandexSetupOpen(false)}
-          />
-          <div className="relative z-50 max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border-2 border-border bg-card p-6 shadow-lg sm:p-8">
-            <h2 className="text-lg font-semibold">Connect Yandex</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Enter your Yandex Email and App Password. This account will be used to send all outreach emails via SMTP and read replies via IMAP.
-            </p>
-            {yandexSetupErr ? (
-              <div className="mt-4 rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-500">
-                {yandexSetupErr}
-              </div>
-            ) : null}
-            <div className="mt-4 space-y-3">
-              <div>
-                <div className="mb-1 text-xs text-muted-foreground">Yandex Email</div>
-                <Input
-                  value={yandexForm.yandexEmail}
-                  onChange={(e) => setYandexForm((f) => ({ ...f, yandexEmail: e.target.value }))}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="font-mono text-sm"
-                  placeholder="you@yandex.ru"
-                />
-              </div>
-              <div>
-                <div className="mb-1 text-xs text-muted-foreground">App Password</div>
-                <Input
-                  type="password"
-                  value={yandexForm.yandexPassword}
-                  onChange={(e) => setYandexForm((f) => ({ ...f, yandexPassword: e.target.value }))}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="font-mono text-sm"
-                />
-              </div>
-            </div>
-            <div className="mt-6 flex flex-wrap justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setYandexSetupOpen(false)} disabled={yandexSetupBusy}>
-                Cancel
-              </Button>
-              <Button type="button" onClick={() => void connectYandex()} disabled={yandexSetupBusy}>
-                {yandexSetupBusy ? "Saving..." : "Connect Yandex"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      
+      {/* Легаси-форма «Connect Yandex» удалена (B-015): отправка идёт через Gmail OAuth,
+          яндекс-путь /setup/yandex в бэкенде сохранён на случай возврата к generic SMTP. */}
+
       {globalSetupOpen && (
         <SetupRequiredGate forceOpen={true} onClose={() => setGlobalSetupOpen(false)}>
           <div />
@@ -8745,12 +8237,12 @@ export default function AiBizOsHumanUI() {
               if (!signatureSetupSaving) setSignatureSetupOpen(false);
             }}
           />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Signature setup</h2>
+          <div className="relative z-50 w-full max-w-2xl rounded-md border border-border bg-card p-6 shadow-lg">
+            <h2 className="text-lg font-semibold">Настройка подписи</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Rich-text signature for this run. It is appended when sending outreach and reply drafts. After you save, if
-              a signature is set, outreach and reply draft previews add{" "}
-              <span className="font-mono text-xs">[Signature]</span> on its own line at the end.
+              Rich-text подпись для этой кампании. Добавляется при отправке исходящих писем и ответов. После
+              сохранения, если подпись задана, предпросмотры исходящих писем и ответов добавляют{" "}
+              <span className="font-mono text-xs">[Подпись]</span> отдельной строкой в конце.
             </p>
             <div className="mt-4">
               {signatureEditorMount ? (
@@ -8764,7 +8256,7 @@ export default function AiBizOsHumanUI() {
                   className="flex min-h-[260px] items-center justify-center rounded-md border border-input bg-muted/20 text-sm text-muted-foreground"
                   aria-hidden
                 >
-                  Loading editor…
+                  Загружаем редактор…
                 </div>
               )}
             </div>
@@ -8774,20 +8266,154 @@ export default function AiBizOsHumanUI() {
                 disabled={signatureSetupSaving}
                 onClick={() => setSignatureSetupOpen(false)}
               >
-                Cancel
+                Отмена
               </Button>
               <Button type="button" disabled={signatureSetupSaving} onClick={() => void saveSignatureSetup()}>
                 {signatureSetupSaving ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
                 ) : null}
-                Save
+                Сохранить
               </Button>
             </div>
           </div>
         </div>
       ) : null}
+
+      {/* B-544: прямой редактор тела черновика в ревью — правка руками без LLM, дословно.
+          open держит модалку открытой и на время GET (editDraftLoading), пока editDraft ещё null. */}
+      <Dialog
+        open={Boolean(editDraft) || editDraftLoading}
+        onOpenChange={(open) => {
+          if (!open) closeEditDraftModal();
+        }}
+      >
+        <DialogContent className="sm:max-w-3xl flex flex-col max-h-[90vh]">
+          <DialogHeader>
+            <DialogTitle>Править письмо</DialogTitle>
+          </DialogHeader>
+          {editDraftLoading && !editDraft ? (
+            <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              Загружаем письмо…
+            </div>
+          ) : (
+            <ScrollArea className="max-h-[70vh]">
+              <div className="space-y-4 py-2 pr-3">
+                <div className="rounded-md bg-warning-soft px-3 py-2 text-sm font-medium text-warning">
+                  Сохранение ставит письму статус <span className="font-mono text-xs">edited</span> — оно
+                  автоматически встаёт в очередь отправки.
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Тема</label>
+                  <Input
+                    value={draftForm.subject}
+                    onChange={(e) => setDraftForm((f) => ({ ...f, subject: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Тело письма</label>
+                  <Tabs value={editDraftBodyMode} onValueChange={setEditDraftBodyMode}>
+                    <TabsList>
+                      <TabsTrigger value="text">Текст (дословно)</TabsTrigger>
+                      <TabsTrigger value="rich">Оформление</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="text" className="mt-2">
+                      <Textarea
+                        className="min-h-[360px] font-mono text-sm"
+                        value={draftForm.body}
+                        onChange={(e) => setDraftForm((f) => ({ ...f, body: e.target.value }))}
+                      />
+                    </TabsContent>
+                    <TabsContent value="rich" className="mt-2">
+                      {/* key включает id черновика — TipTap не должен переживать переключение между
+                          письмами; уход с этой вкладки размонтирует редактор (TabsContent), поэтому
+                          он не может тихо переписать draftForm.body поверх правок из Textarea. */}
+                      <EmailDraftRichTextEditor
+                        key={`edit-draft-rich-${editDraft?.id}`}
+                        initialBody={draftForm.body}
+                        onChange={(html) => setDraftForm((f) => ({ ...f, body: html }))}
+                      />
+                    </TabsContent>
+                  </Tabs>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Вложения</label>
+                  <DraftAssetAttachmentsField
+                    assets={assetsLibrary}
+                    assetPackets={runAssetPackets}
+                    selectedIds={draftForm.attached_asset_ids}
+                    onSelectedIdsChange={(ids) => setDraftForm((f) => ({ ...f, attached_asset_ids: ids }))}
+                  />
+                  <div className="flex flex-wrap gap-3 pt-1">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                      <input
+                        type="radio"
+                        name="applyAssetsEditScope"
+                        className="h-3.5 w-3.5 accent-primary"
+                        checked={applyAssetsEditScope === "none"}
+                        onChange={() => setApplyAssetsEditScope("none")}
+                      />
+                      только это письмо
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                      <input
+                        type="radio"
+                        name="applyAssetsEditScope"
+                        className="h-3.5 w-3.5 accent-primary"
+                        checked={applyAssetsEditScope === "pending"}
+                        onChange={() => setApplyAssetsEditScope("pending")}
+                      />
+                      применить ко всем pending рана
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                      <input
+                        type="radio"
+                        name="applyAssetsEditScope"
+                        className="h-3.5 w-3.5 accent-primary"
+                        checked={applyAssetsEditScope === "approved"}
+                        onChange={() => setApplyAssetsEditScope("approved")}
+                      />
+                      ко всем approved рана
+                    </label>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Предпросмотр</label>
+                  <EmailDraftBodyPreview
+                    body={draftForm.body}
+                    showSignaturePlaceholder={runSignatureHasMeaningfulContent(
+                      selectedRun?.sender_signature_html ?? workspace?.sender_signature_html ?? "",
+                    )}
+                    attachedAssetIds={normalizeAttachedAssetIds(draftForm.attached_asset_ids)}
+                    assetLibrary={assetsLibrary}
+                  />
+                </div>
+              </div>
+            </ScrollArea>
+          )}
+          {editDraftError ? (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <p className="min-w-0 flex-1">{editDraftError}</p>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" disabled={editDraftSaving} onClick={closeEditDraftModal}>
+              Отмена
+            </Button>
+            <Button onClick={() => void saveEditDraft()} disabled={editDraftSaving || editDraftLoading}>
+              {editDraftSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
+              Сохранить
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {selectedRun && (
-        <ManualLeadGenModal 
+        <ManualLeadGenModal
           runId={selectedRun.id}
           open={manualLeadGenOpen}
           onOpenChange={setManualLeadGenOpen}
@@ -8872,11 +8498,11 @@ export default function AiBizOsHumanUI() {
               onClick={() => setManualContactDialogOpen(false)}
               disabled={manualContactLoading}
             >
-              Cancel
+              Отмена
             </Button>
             <Button type="button" onClick={() => void saveManualContact()} disabled={manualContactLoading}>
               {manualContactLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              Save
+              Сохранить
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -8886,13 +8512,13 @@ export default function AiBizOsHumanUI() {
       <Dialog open={!!osintDossierView} onOpenChange={(open) => !open && setOsintDossierView(null)}>
         <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>OSINT Dossier: {osintDossierView?.title}</DialogTitle>
+            <DialogTitle>OSINT-досье: {osintDossierView?.title}</DialogTitle>
           </DialogHeader>
           <div className="overflow-y-auto pr-4 text-sm flex-1">
             <DossierStructuredView content={osintDossierView?.content} />
           </div>
           <DialogFooter>
-            <Button onClick={() => setOsintDossierView(null)}>Close</Button>
+            <Button onClick={() => setOsintDossierView(null)}>Закрыть</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -104,7 +104,7 @@ def apollo_llm_hints_for_run(run_id: int, run) -> tuple[list[str], list[str]] | 
     )
 
     try:
-        out = complete_prompt_json_object(prompt)
+        out = complete_prompt_json_object(prompt, task_kind="apollo_hints")
     except Exception:
         logger.exception("apollo_llm_hints: LLM call failed run_id=%s", run_id)
         return None

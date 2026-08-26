@@ -99,7 +99,7 @@ Body (excerpt):
 {excerpt}
 """
     try:
-        raw = complete_prompt_json_object(prompt)
+        raw = complete_prompt_json_object(prompt, task_kind="inbound_delivery_classify")
         if not isinstance(raw, dict):
             return None
         return _normalize_llm_delivery_out(raw)

@@ -1,5 +1,8 @@
+import logging
+
 from sqlalchemy.orm import Session
 
+from app.models.email_thread import EmailThread
 from app.repositories.contact_repo import get_contact, mark_contact_replied
 from app.repositories.email_draft_repo import get_email_draft, mark_email_draft_replied
 from app.repositories.email_event_repo import create_email_event
@@ -10,7 +13,71 @@ from app.repositories.email_thread_repo import (
     touch_email_thread,
     update_email_thread_status,
 )
+from app.services.follow_up_service import create_next_action_for_thread
 from app.services.reply_classifier import classify_reply
+
+_log = logging.getLogger(__name__)
+
+
+def apply_reply_classification(
+    db: Session,
+    thread: EmailThread,
+    body: str,
+    *,
+    create_task: bool,
+) -> dict:
+    """
+    B-138: single code path for classifying one inbound reply and persisting it onto the thread.
+    Used by both the real Gmail sync (gmail_tracking_sync_service) and the mock/dev endpoint below
+    — one code path for both, so suppression/follow-up consequences never diverge between them.
+
+    create_task=True also drives follow_up_service.create_next_action_for_thread(), which creates
+    the follow-up task AND adds cross-run suppression for not_interested/unsubscribe (dedup on
+    thread+task_type is built in there). Re-classifying an already-classified thread is intentional
+    — the dialogue can move on and there is no manual override of the class in this system, so the
+    latest inbound message wins.
+
+    create_task=False skips that call entirely — used to preserve the mock endpoint's historical
+    behavior (it never created follow-up tasks/suppression; see receive_mock_reply below).
+
+    classify_reply() strips quoted history first and returns None when nothing of the new reply
+    is left after stripping (B-138) — in that case this is a no-op, not a guess: the thread keeps
+    whatever classification it already had.
+    """
+    classification = classify_reply(body)
+    if classification is None:
+        return {
+            "thread_id": thread.id,
+            "classification": thread.classification,
+            "classification_confidence": thread.classification_confidence,
+            "classification_reason": thread.classification_reason,
+            "next_action": None,
+        }
+    thread.classification = classification["label"]
+    thread.classification_confidence = classification["confidence"]
+    thread.classification_reason = classification["reason"]
+    db.add(thread)
+    db.commit()
+    db.refresh(thread)
+
+    next_action = None
+    if create_task:
+        try:
+            next_action = create_next_action_for_thread(db, thread.id)
+        except ValueError:
+            # e.g. "unclear" has no next-action recipe in follow_up_service — not an error, just
+            # nothing to do for this class.
+            _log.debug(
+                "no next action for thread=%s classification=%s", thread.id, thread.classification,
+            )
+
+    return {
+        "thread_id": thread.id,
+        "classification": thread.classification,
+        "classification_confidence": thread.classification_confidence,
+        "classification_reason": thread.classification_reason,
+        "next_action": next_action,
+    }
 
 
 def receive_mock_reply(
@@ -49,13 +116,9 @@ def receive_mock_reply(
         provider_message_id=provider_message_id,
     )
 
-    classification = classify_reply(body)
-    thread.classification = classification["label"]
-    thread.classification_confidence = classification["confidence"]
-    thread.classification_reason = classification["reason"]
-    db.add(thread)
-    db.commit()
-    db.refresh(thread)
+    # B-138: create_task=False preserves this endpoint's historical behavior — it never created
+    # follow-up tasks/suppression, only classified. Kept deliberately, not changed silently.
+    apply_reply_classification(db, thread, body, create_task=False)
 
     update_email_thread_status(db, thread, "replied")
     touch_email_thread(db, thread)

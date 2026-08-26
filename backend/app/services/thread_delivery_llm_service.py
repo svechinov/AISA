@@ -63,7 +63,7 @@ Thread transcript (oldest messages first within the excerpt):
 {excerpt}
 """
     try:
-        raw = complete_prompt_json_object(prompt)
+        raw = complete_prompt_json_object(prompt, task_kind="thread_delivery_classify")
         if not isinstance(raw, dict):
             return None
         return _normalize_llm_delivery_out(raw)

@@ -7,7 +7,9 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.models.excluded_company import EXCLUDE_REASON_OFF_SEGMENT
 from app.models.run_company import RunCompany
+from app.repositories.excluded_company_repo import add_excluded_company
 from app.repositories.run_repo import get_run
 from app.services.llm_gateway import complete_prompt_json_object, llm_configured
 from app.services.run_context_service import build_master_prompt_text, coalesce_str, get_effective_context
@@ -127,11 +129,21 @@ def set_run_company_fit_manual(
     run_id: int,
     collect_index: int,
     status: str,
+    *,
+    exclude_cross_run: bool = True,
+    exclude_reason: str = EXCLUDE_REASON_OFF_SEGMENT,
+    exclude_note: str | None = None,
 ) -> dict:
     """Manual reject-queue override: the user's verdict beats the LLM judge's.
 
     status: "correct" | "incorrect". The ICP gate in enrich_crm_data honors the result
     (incorrect rows get no dossier/discovery spend).
+
+    B-264: a MANUAL "incorrect" is also written to the cross-run exclusion registry, so the next
+    Apollo sweep with the same filters does not collect this company again (`exclude_cross_run=False`
+    keeps the verdict inside the run — for a company that is off-segment only for THIS campaign).
+    The LLM judge's own verdict is never promoted this way: it is wrong often enough that a
+    permanent, cross-run ban must stay a human decision.
     """
     if status not in ("correct", "incorrect"):
         raise ValueError("status must be 'correct' or 'incorrect'")
@@ -158,11 +170,23 @@ def set_run_company_fit_manual(
     db.commit()
     db.refresh(r)
 
+    excluded = None
+    if status == "incorrect" and exclude_cross_run:
+        excluded = add_excluded_company(
+            db,
+            name=r.name,
+            website=r.website,
+            reason=exclude_reason,
+            note=exclude_note or f"Не наш сегмент (ручной вердикт, ран {run_id})",
+            source_run_id=run_id,
+        )
+
     return {
         "collect_index": collect_index,
         "ai_fit_status": status,
         "ai_fit_reason": "Manual override",
         "ai_fit_checked_at": now.isoformat() + "Z",
+        "excluded_company_id": getattr(excluded, "id", None),
     }
 
 

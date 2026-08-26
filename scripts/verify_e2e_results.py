@@ -1,13 +1,15 @@
 import os
 import requests
 
+VDS_HOST = os.environ.get("VDS_HOST", "<your-server-ip>")
+
 def check_results(run_id):
     headers = {
         "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }
-    
+
     # 1. Check Run Status
-    r = requests.get(f"http://95.163.223.186/api/runs/{run_id}", headers=headers)
+    r = requests.get(f"http://{VDS_HOST}/api/runs/{run_id}", headers=headers)
     run = r.json()
     print(f"Run {run_id} Status: {run.get('status')}")
     print(f"Master Email Body Sample: {run.get('master_email_body')[:200] if run.get('master_email_body') else 'N/A'}...")
@@ -15,7 +17,7 @@ def check_results(run_id):
     # 2. Check Drafts
     # We need to find contacts first or just list drafts for the run
     # There is likely an endpoint for drafts by run
-    drafts_url = f"http://95.163.223.186/api/email-drafts/run/{run_id}"
+    drafts_url = f"http://{VDS_HOST}/api/email-drafts/run/{run_id}"
     r = requests.get(drafts_url, headers=headers)
     if r.status_code == 200:
         drafts = r.json()

@@ -79,7 +79,7 @@ def search_egrul_nalog(query):
         pass
     return None
 
-def call_llm_json(prompt):
+def call_llm_json(prompt, task_kind="osint_entity_extract"):
     """Run a JSON-returning LLM call through the shared gateway and return it as a JSON string.
 
     Routes through app.services.llm_gateway (provider per LLM_PROVIDER_PRIORITY — OpenAI for the
@@ -89,7 +89,7 @@ def call_llm_json(prompt):
     """
     try:
         from app.services.llm_gateway import complete_prompt_json_object
-        obj = complete_prompt_json_object(prompt)
+        obj = complete_prompt_json_object(prompt, task_kind=task_kind)
         return json.dumps(obj, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"hardcore_osint LLM call failed: {e}")
@@ -138,23 +138,37 @@ def gather_raw_entities(company_name, domain, custom_prompt=None):
     1. Извлеки все имена ЛПР и свяжи их с ролями (CEO, Коммерческий директор, HR-директор, Директор по обучению). Если роль из ЕГРЮЛ, укажи CEO. Также обращай внимание на авторов и контакты в блоке Metadata из PDF-документов.
     2. Оцени "Свежесть" контакта (Freshness). Если есть упоминания года (2024, 2025) - высокая свежесть (score 100). Если данные старые (2020-2022) - низкая свежесть (score 30). Игнорируй людей, которые уже не работают в компании. Отсортируй массив `leaders` от самых свежих и релевантных к менее важным.
     3. Найди любые email-адреса с доменом @{domain} в выдаче. Попробуй угадать "маску" (формат) корпоративной почты.
+    4. Для каждого ЛПР укажи `source_url` — URL страницы из приведённой выдачи, где упомянут этот человек; строго из выдачи, null если в выдаче нет подходящего URL.
 
     Ответь СТРОГО в формате JSON:
     {{
         "leaders": [
-            {{"role": "CEO", "name": "Иван Иванов", "freshness_score": 90}},
-            {{"role": "HR Director", "name": "Анна Смирнова", "freshness_score": 50}}
+            {{"role": "CEO", "name": "Иван Иванов", "freshness_score": 90, "source_url": "https://hh.ru/..."}},
+            {{"role": "HR Director", "name": "Анна Смирнова", "freshness_score": 50, "source_url": null}}
         ],
         "email_mask_guess": "предполагаемая маска или null"
     }}
     """
-    
-    response = call_llm_json(prompt)
+
+    response = call_llm_json(prompt, task_kind="osint_entity_extract")
     if response:
         try:
-            return json.loads(response)
+            parsed = json.loads(response)
         except json.JSONDecodeError:
-            pass
+            return {"leaders": [], "email_mask_guess": None}
+        # Anti-hallucination: accept source_url only if it is verbatim present in the search
+        # corpus we actually handed the LLM — otherwise the model can invent a plausible-looking
+        # URL for a person it extracted from its own training knowledge, not from this evidence.
+        full_corpus = f"{roles_corpus}\n{email_corpus}\n{docs_corpus}"
+        leaders = parsed.get("leaders") if isinstance(parsed, dict) else None
+        if isinstance(leaders, list):
+            for leader in leaders:
+                if not isinstance(leader, dict):
+                    continue
+                url = leader.get("source_url")
+                if url and url not in full_corpus:
+                    leader["source_url"] = None
+        return parsed
     return {"leaders": [], "email_mask_guess": None}
 
 # ==========================================
@@ -180,7 +194,7 @@ def generate_email_permutations(name, domain, mask_guess):
         "ivan.ivanov@{domain}"
     ]
     """
-    response = call_llm_json(prompt)
+    response = call_llm_json(prompt, task_kind="osint_email_permutations")
     if response:
         try:
              return json.loads(response)
@@ -193,6 +207,10 @@ def generate_email_permutations(name, domain, mask_guess):
 # ==========================================
 
 def get_mx_record(domain):
+    # TODO(B-013 §10): app/services/email_verification_service.py._has_mx() is a second, independent
+    # MX-resolution implementation (different timeouts, tri-state bool|None with an A-record
+    # fallback vs. this hostname-or-None). Worth a shared helper later — not unified now, see that
+    # module's docstring for why.
     try:
         records = dns.resolver.resolve(domain, 'MX')
         mx_record = records[0].exchange.to_text()

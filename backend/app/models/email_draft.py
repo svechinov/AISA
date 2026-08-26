@@ -55,3 +55,26 @@ class EmailDraft(Base):
     reasoning_problem: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
     matched_program_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # B-147: which verbatim closing-paragraph variant (0-based index into persona.finales_json's
+    # resolved segment options — A=0, B=1, C=2, ...) this draft was generated with. NULL = a
+    # single-option segment (rotation not in effect for this draft) or a pre-B-147 draft.
+    finale_variant: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Alex's verdict on this draft (B-077 etap 2: critic <-> Alex calibration). Coded values in
+    # app.constants.alex_verdict.ALEX_VERDICTS; NULL = not yet reviewed. UI/fill-in is a later task.
+    alex_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    alex_verdict_why: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alex_verdict_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # B-077 etap 2: исход LLM-рубрики вкуса, отделённый от механики (для матрицы калибровки).
+    # None = рубрика не прогонялась (no_vacancy по дизайну / механический реджект до рубрики / LLM off).
+    critic_taste_pass: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    critic_relevance_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    critic_specificity_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    critic_non_spam_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    critic_cta_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    critic_clarity_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    critic_hook_grounded: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    critic_canon_used: Mapped[str | None] = mapped_column(Text, nullable=True)
+    critic_evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

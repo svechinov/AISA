@@ -148,6 +148,7 @@ def get_step_by_run_and_name(db: Session, run_id: int, step_name: str) -> Step |
 
 def mark_step_running(db: Session, step: Step, input_json: dict) -> Step:
     step.status = "running"
+    step.finished_at = None
     persist_step_input(db, step, input_json)
     db.add(step)
     db.commit()
@@ -204,3 +205,20 @@ def increment_step_retry(db: Session, step: Step) -> Step:
     db.commit()
     db.refresh(step)
     return step
+
+
+def reset_stale_running_steps(db: Session) -> int:
+    """Fail steps stuck in 'running' from a process that never reached its except block (crash
+    between mark_step_running and mark_step_failed/mark_step_completed — deploy, OOM, proxy
+    timeout). run_workflow runs synchronously inside the HTTP request, so nothing else will ever
+    move such a step out of 'running'. Returns how many were reset.
+    """
+    stale = db.query(Step).filter(Step.status == "running").all()
+    for step in stale:
+        step.status = "failed"
+        step.error_text = "прервано рестартом процесса (recovery при старте)"
+        step.finished_at = datetime.utcnow()
+        db.add(step)
+    if stale:
+        db.commit()
+    return len(stale)

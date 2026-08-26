@@ -129,7 +129,7 @@ export function DraftAssetAttachmentsField({
         ) : null}
       </div>
       {pickerOpen ? (
-        <div className="max-h-52 overflow-y-auto rounded-xl border-2 border-border bg-muted/20 p-2">
+        <div className="max-h-52 overflow-y-auto rounded-md border border-border bg-muted/20 p-2">
           {sortedList.length ? (
             <ul className="space-y-1">
               {sortedList.map((a) => (
@@ -161,7 +161,7 @@ export function DraftAssetAttachmentsField({
         </div>
       ) : null}
       {packetsOpen && usablePackets.length ? (
-        <div className="max-h-52 overflow-y-auto rounded-xl border-2 border-border bg-muted/20 p-2">
+        <div className="max-h-52 overflow-y-auto rounded-md border border-border bg-muted/20 p-2">
           <ul className="space-y-1">
             {usablePackets.map((p) => {
               const n = assetIdsFromPacket(p).length;

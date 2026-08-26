@@ -1,0 +1,54 @@
+# Серверный compose для Hetzner (<your-server>). Отличия от docker-compose.yml (локального):
+# - без Postgres/Redis: пилот живёт на SQLite, Redis кодом не используется;
+# - порты только на 127.0.0.1 — доступ с ноутбука через SSH-туннель, наружу ничего не открыто;
+# - ./data (бинд-каталог, НЕ в git): .env с секретами + SQLite. .env грузится через
+#   AI_BIZ_OS_DOTENV и переживает пересоздание контейнера (OAuth-токен дописывается в него);
+# - машина общая (Huly, livekit, respam, content) — лимиты ресурсов обязательны.
+#
+# ВАЖНО: env_bootstrap загружает .env с override=True — значения из data/.env перебивают
+# environment ниже. DATABASE_URL/GMAIL_SYNC_INTERVAL_SECONDS/GLOBAL_PASSWORD задаются в data/.env.
+name: ai-biz-os
+
+services:
+  backend:
+    build:
+      context: ../backend
+    container_name: ai-biz-os-backend
+    restart: unless-stopped
+    cpus: "1.0"
+    mem_limit: 2g
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - TZ=Asia/Nicosia
+      - AI_BIZ_OS_DOTENV=/app/data/.env
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Same-origin UI+API (nginx-ui.conf): browser only talks to :8080, /api/* is proxied to the
+  # backend container over the compose network. Needed so the UI works from any device — not just
+  # the SSH tunnel that forwards both 8000+8080 to localhost — e.g. via Tailscale from a phone.
+  ui:
+    image: nginx:alpine
+    container_name: ai-biz-os-ui
+    restart: unless-stopped
+    cpus: "0.25"
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ../frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx-ui.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

@@ -2,7 +2,7 @@
 
 Yandex Cloud Search API queries the real yandex.ru index — it surfaces VK / Telegram / OK /
 regional RU press that the US-indexed Tavily is blind to (pilot: «Шаройкина Воркутауголь» found
-0 via Tavily, 11 via Yandex). Config-gated like apollo/llm_gateway; priority fallback. A provider
+0 via Tavily, 11 via Yandex). Config-gated like llm_gateway; priority fallback. A provider
 returns [] on no-result/not-configured/error so callers can fall through; never raises.
 
 Normalized return: list[{"title": str, "url": str, "snippet": str}].
@@ -101,8 +101,22 @@ def _tavily_search(query: str, *, max_results: int, max_passages: int) -> list[d
     return out
 
 
+def tavily_search_configured() -> bool:
+    import os
+
+    return bool((os.environ.get("TAVILY_API_KEY") or "").strip())
+
+
 def search_configured() -> bool:
-    return yandex_search_configured() or "tavily" in _provider_priority()
+    """True only when a provider in the priority list is actually usable (has credentials).
+    A provider merely being listed must not count: callers gate OSINT dossier generation on
+    this, and an ungated empty corpus lets the LLM fabricate dossiers from nothing."""
+    for pid in _provider_priority():
+        if pid == "yandex" and yandex_search_configured():
+            return True
+        if pid == "tavily" and tavily_search_configured():
+            return True
+    return False
 
 
 def search_web(query: str, *, max_results: int = 8, max_passages: int = 5) -> list[dict]:
@@ -124,22 +138,32 @@ def search_web(query: str, *, max_results: int = 8, max_passages: int = 5) -> li
 
 
 _DOMAIN_SKIP = (
+    # RU aggregators/news/social
     "list-org", "rusprofile", "hh.ru", "vk.com", "t.me", "ok.ru", "youtube", "wikipedia",
     "rbc.ru", "kommersant", "tadviser", "zachestnyibiznes", "sbis.ru", "audit-it", "2gis",
     "yell.ru", "spark-interfax", "gov.ru", "interfax", "vedomosti", "cdn", "yandex", "google",
     "facebook", "instagram", "telegram", "avito", "zoon", "flamp",
+    # Global aggregators/directories/stores — never a company's own site
+    "linkedin", "crunchbase", "glassdoor", "indeed", "apollo.io", "pitchbook", "zoominfo",
+    "bloomberg", "reuters", "techcrunch", "medium.com", "github.com", "x.com", "twitter",
+    "apps.apple", "play.google", "steampowered", "itch.io", "mobygames",
 )
 
 
-def resolve_company_domain(name: str) -> str | None:
+def resolve_company_domain(name: str, language: str = "English") -> str | None:
     """Find a company's official site domain via search (unblocks discovery for sourced companies
-    that arrive without a website). Returns a bare domain or None. Skips aggregators/news/social."""
+    that arrive without a website). Returns a bare domain or None. Skips aggregators/news/social.
+    The query follows the campaign language (RU query steers Yandex into Runet)."""
     from urllib.parse import urlparse
 
     name = (name or "").strip()
     if not name:
         return None
-    for hit in search_web(f"{name} официальный сайт", max_results=6, max_passages=1):
+    if (language or "").strip().lower() == "russian":
+        query = f"{name} официальный сайт"
+    else:
+        query = f'"{name}" official website'
+    for hit in search_web(query, max_results=6, max_passages=1):
         host = (urlparse(hit.get("url", "")).netloc or "").lower().replace("www.", "")
         if host and "." in host and not any(s in host for s in _DOMAIN_SKIP):
             return host

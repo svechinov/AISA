@@ -357,6 +357,22 @@ def update_run_outreach_fields(
     return run
 
 
+def reset_stale_running_runs(db: Session) -> int:
+    """Fail runs stuck in 'running' from a process that never reached its except block (crash
+    mid-run_workflow — deploy, OOM, proxy timeout). run_workflow runs synchronously inside the
+    HTTP request that starts it, so nothing else will ever move such a run out of 'running'.
+    Returns how many were reset. No dedicated error-text column on Run — status + finished_at only.
+    """
+    stale = db.query(Run).filter(Run.status == "running").all()
+    for run in stale:
+        run.status = "failed"
+        run.finished_at = datetime.utcnow()
+        db.add(run)
+    if stale:
+        db.commit()
+    return len(stale)
+
+
 def update_run_email_style_mode(db: Session, run_id: int, email_style_mode: str | None) -> Run | None:
     from app.services.email_style_service import normalize_email_style_mode
 
@@ -374,3 +390,109 @@ def update_run_email_style_mode(db: Session, run_id: int, email_style_mode: str 
     db.commit()
     db.refresh(run)
     return run
+
+
+def clone_wave_run(
+    db: Session,
+    source_run_id: int,
+    *,
+    name: str,
+    persona_id: int | None = None,
+    persona_slug: str | None = None,
+    language: str | None = None,
+    notes: str | None = None,
+    segment: str | None = None,
+    project_id: int | None = None,
+) -> tuple[Run, list[str]]:
+    """B-545: заводить ран новой волны штатным путём, а не прямым INSERT (прецедент 17-18.08 —
+    ран 6 «Волна 2 — партия 1» завели INSERT'ом со status='active' у соседнего рана, кнопка
+    продолжения не работала). Копирует run_setups исходного рана целиком, ставит НОВЫЙ ран в
+    status="needs_review" (этого ждёт фронт у неотправлявшего рана) и НЕ запускает run_workflow —
+    ран заводится под ручной набор контактов.
+
+    Raises ValueError (-> 400 в роуте) когда:
+      - у исходного рана нет run_setup;
+      - итоговую персону не удалось определить явно (грабля проекта: run.persona_id=NULL молча
+        резолвится в персону alexey — здесь такой молчаливый дефолт не допускается).
+
+    Возвращает (новый ран, список предупреждений) — предупреждение (не блокировка), если у ящика
+    итоговой персоны нет sending_policy: письма такого рана не встанут в очередь.
+    """
+    from app.models.persona import Persona
+    from app.repositories.sending_policy_repo import get_policy_for_mailbox
+    from app.services.persona_service import get_run_persona
+    from app.services.run_context_service import get_outreach_inner_relational_only, wrap_context
+
+    source = get_run(db, source_run_id)
+    if source is None:
+        raise ValueError("Исходный ран не найден")
+    source_setup = source.run_setup
+    if source_setup is None:
+        raise ValueError("У исходного рана нет run_setup — клонировать нечего")
+
+    persona: Persona | None = None
+    if persona_id is not None:
+        persona = db.get(Persona, persona_id)
+        if persona is None:
+            raise ValueError(f"Персона id={persona_id} не найдена")
+    elif persona_slug:
+        persona = db.query(Persona).filter(Persona.slug == persona_slug).first()
+        if persona is None:
+            raise ValueError(f"Персона slug={persona_slug!r} не найдена")
+    elif getattr(source, "persona_id", None) is not None:
+        persona = get_run_persona(db, source)
+    if persona is None:
+        raise ValueError(
+            "Персона не определена явно — укажи persona_id/persona_slug (грабля проекта: "
+            "run.persona_id=NULL молча резолвится в персону alexey, здесь так делать нельзя)",
+        )
+
+    if project_id is not None and get_project(db, project_id) is None:
+        raise ValueError(f"Проект id={project_id} не найден")
+
+    inner = get_outreach_inner_relational_only(source)
+    run = create_run(
+        db,
+        project_id=project_id if project_id is not None else source.project_id,
+        workflow_name=source.workflow_name,
+        input_json={},
+        name=name,
+        notes=notes if notes is not None else source.notes,
+        segment=segment if segment is not None else source.segment,
+        context_json=wrap_context(inner),
+        master_prompt=source.master_prompt,
+    )
+    run.persona_id = persona.id
+    run.email_style_mode = source.email_style_mode
+    run.status = "needs_review"
+    db.add(run)
+
+    new_setup = RunSetup(
+        run_id=run.id,
+        prompt_setup_text=source_setup.prompt_setup_text,
+        critic_canon_text=source_setup.critic_canon_text,
+        osint_prompt=source_setup.osint_prompt,
+        reasoning_prompt=source_setup.reasoning_prompt,
+        draft_prompt=source_setup.draft_prompt,
+        company_search_prompt=source_setup.company_search_prompt,
+        deep_osint_prompt=source_setup.deep_osint_prompt,
+        osint_discovery_mode=source_setup.osint_discovery_mode,
+        language=language if language is not None else source_setup.language,
+        sender_signature_html=source_setup.sender_signature_html,
+        icp_min_employees=source_setup.icp_min_employees,
+        icp_max_employees=source_setup.icp_max_employees,
+        icp_criteria_json=source_setup.icp_criteria_json,
+    )
+    db.add(new_setup)
+    db.commit()
+    db.refresh(run)
+
+    warnings: list[str] = []
+    mailbox = (persona.primary_mailbox_email or "").strip()
+    if not mailbox or get_policy_for_mailbox(db, mailbox) is None:
+        warnings.append(
+            f"у ящика персоны «{persona.display_name}» нет политики отправки — "
+            "письма этого рана не встанут в очередь",
+        )
+
+    return run, warnings

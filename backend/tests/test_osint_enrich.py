@@ -1,4 +1,4 @@
-"""enrich_crm_data: hardcore default, named-contact discovery (F1), ICP gate (F5). 0 tokens."""
+"""enrich_crm_data: hardcore named-contact discovery (F1), ICP gate (F5), api_only default. 0 tokens."""
 
 import pytest
 
@@ -21,23 +21,44 @@ def stubs(monkeypatch):
     monkeypatch.setattr(ow, "find_valid_email",
                         lambda name, domain, mask: calls["find_valid"].append(name) or f"{name.split()[0].lower()}@{domain}")
     monkeypatch.setattr(ow, "discover_contact_email",
-                        lambda c, w, n: calls["tavily_guess"].append(n) or None)
+                        lambda c, w, n, language="English": calls["tavily_guess"].append(n) or None)
     return calls
 
 
 @pytest.fixture()
-def run_without_setup(db):
-    """Default mode (no run_setup row) = hardcore."""
+def run_hardcore(db):
+    """Force a clean hardcore-discovery setup on run 1 (find_valid_email + SMTP path).
+
+    Two things drifted since these F1/F5 tests were written:
+      * the discovery default flipped from hardcore to api_only (osint_worker.py, audit
+        2026-06-16), so hardcore must now be opted into explicitly; and
+      * the process-wide snapshot is shared, and sibling tests can leave ICP criteria
+        (icp_min/max_employees, icp_criteria_json) on run 1 — which would make
+        _apply_icp_size_filter reject the "approved" company here and break isolation.
+    So this fixture pins a fully controlled run_setup and restores it afterwards.
+    """
     saved = db.query(RunSetup).filter_by(run_id=1).first()
     state = None
     if saved is not None:
         state = {c.name: getattr(saved, c.name) for c in RunSetup.__table__.columns}
-        db.delete(saved)
-        db.commit()
-        db.expire_all()
+    else:
+        saved = RunSetup(run_id=1)
+        db.add(saved)
+    saved.osint_discovery_mode = "hardcore"
+    saved.icp_min_employees = None
+    saved.icp_max_employees = None
+    saved.icp_criteria_json = None
+    db.commit()
+    db.expire_all()
     yield
-    if state is not None:
-        db.add(RunSetup(**state))
+    restored = db.query(RunSetup).filter_by(run_id=1).first()
+    if state is None:
+        if restored is not None:
+            db.delete(restored)
+            db.commit()
+    else:
+        for k, v in state.items():
+            setattr(restored, k, v)
         db.commit()
 
 
@@ -48,7 +69,7 @@ def _mk(db, **kw):
     return row
 
 
-def test_named_contact_without_email_gets_verified_discovery(db, stubs, run_without_setup):
+def test_named_contact_without_email_gets_verified_discovery(db, stubs, run_hardcore):
     """F1 (critical): a contact WITH a name but no email must get find_valid_email for that
     person — not be bulk-invalidated."""
     ct = _mk(db, company="NamedCo (test)", website="namedco.test", name="Ivan Petrov",
@@ -68,7 +89,7 @@ def test_named_contact_without_email_gets_verified_discovery(db, stubs, run_with
         db.delete(ct); db.delete(rc); db.commit()
 
 
-def test_icp_gate_skips_rejected_company_with_name_variants(db, stubs, run_without_setup):
+def test_icp_gate_skips_rejected_company_with_name_variants(db, stubs, run_hardcore):
     """F5: gate matches via entity keys (website too), so a name variant can't leak spend."""
     rc_bad = RunCompany(run_id=1, collect_index=9102, name="ООО  Гейт Ко (test)",
                         website="gateco.test", ai_fit_status="incorrect", extra_json={})
@@ -100,11 +121,13 @@ def test_api_only_mode_still_uses_tavily_guess(db, stubs):
     """Explicit Cloud Safe mode keeps the legacy unverified path."""
     setup = db.query(RunSetup).filter_by(run_id=1).first()
     created = False
+    original_mode = None
     if setup is None:
         setup = RunSetup(run_id=1, osint_discovery_mode="api_only")
         db.add(setup)
         created = True
     else:
+        original_mode = setup.osint_discovery_mode
         setup.osint_discovery_mode = "api_only"
     db.commit()
     ct = _mk(db, company="CloudCo (test)", website="cloudco.test", name="C D", email=None,
@@ -117,4 +140,6 @@ def test_api_only_mode_still_uses_tavily_guess(db, stubs):
         db.delete(ct)
         if created:
             db.delete(setup)
+        else:
+            setup.osint_discovery_mode = original_mode
         db.commit()

@@ -1,10 +1,12 @@
 import os
 import paramiko
 
+VDS_HOST = os.environ.get("VDS_HOST", "<your-server-ip>")
+
 def run_migration():
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect('95.163.223.186', username='root', password=os.environ.get("VDS_PASS", ""))
+    ssh.connect(VDS_HOST, username='root', password=os.environ.get("VDS_PASS", ""))
     
     sql = """
     ALTER TABLE run_setups ADD COLUMN IF NOT EXISTS osint_prompt TEXT;

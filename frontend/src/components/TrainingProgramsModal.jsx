@@ -12,10 +12,17 @@ import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
 import { GraduationCap, Trash2, Plus, Loader2, Pencil, X, Paperclip } from "lucide-react";
 
-/** Каталог тренинговых программ (Feature 1): матчер подставляет программу в слот «Решение»
- *  письма; привязанный PDF-ассет автоматически прикрепляется к черновику при матче. */
-export function TrainingProgramsModal({ apiBase }) {
-  const [open, setOpen] = useState(false);
+/** Каталог офферов (бывш. «тренинговые программы» — наследие старой системы): матчер
+ *  подставляет оффер в слот «Решение» письма. Управляется извне через open/onOpenChange
+ *  (вход — «Настройки» в сайдбаре, B-028); без этих пропсов рендерит собственную кнопку. */
+export function TrainingProgramsModal({ apiBase, open: openProp, onOpenChange }) {
+  const controlled = openProp !== undefined;
+  const [openState, setOpenState] = useState(false);
+  const open = controlled ? openProp : openState;
+  const setOpen = (v) => {
+    if (onOpenChange) onOpenChange(v);
+    if (!controlled) setOpenState(v);
+  };
   const [programs, setPrograms] = useState([]);
   const [assets, setAssets] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -118,30 +125,32 @@ export function TrainingProgramsModal({ apiBase }) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" size="sm" className="gap-2 shrink-0">
-          <GraduationCap className="h-4 w-4" />
-          Программы
-        </Button>
-      </DialogTrigger>
+      {!controlled ? (
+        <DialogTrigger asChild>
+          <Button variant="outline" size="sm" className="gap-2 shrink-0">
+            <GraduationCap className="h-4 w-4" />
+            Офферы
+          </Button>
+        </DialogTrigger>
+      ) : null}
       <DialogContent className="max-w-4xl max-h-[85vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Каталог тренинговых программ</DialogTitle>
+          <DialogTitle>Каталог офферов</DialogTitle>
           <p className="text-sm text-muted-foreground">
-            Матчер подбирает программу под боль компании и подставляет её в слот «Решение» письма.
-            Привязанный PDF прикрепляется к черновику автоматически. Пустой каталог = общий оффер из промпта (как раньше).
+            Матчер подбирает оффер под боль компании и подставляет его в слот «Решение» письма.
+            Пустой каталог = письма используют общий оффер из промпта кампании.
           </p>
         </DialogHeader>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1 min-h-0">
           {/* List side */}
           <div className="overflow-y-auto pr-2 space-y-3">
-            <h3 className="font-semibold text-sm">Активные программы ({programs.length})</h3>
+            <h3 className="font-semibold text-sm">Активные офферы ({programs.length})</h3>
             {loading ? (
               <div className="flex justify-center p-4"><Loader2 className="animate-spin h-5 w-5" /></div>
             ) : programs.length === 0 ? (
               <div className="text-sm text-muted-foreground p-4 border border-dashed rounded-lg text-center">
-                Каталог пуст — письма используют общий оффер из Prompt Setup.
+                Каталог пуст — письма используют общий оффер из промпта кампании.
               </div>
             ) : (
               programs.map((p) => (
@@ -176,9 +185,9 @@ export function TrainingProgramsModal({ apiBase }) {
           </div>
 
           {/* Form side */}
-          <form onSubmit={handleSave} className="flex flex-col gap-2.5 bg-muted/30 p-4 rounded-xl border overflow-y-auto">
+          <form onSubmit={handleSave} className="flex flex-col gap-2.5 bg-muted/30 p-4 rounded-md border overflow-y-auto">
             <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-sm">{editingId ? `Правка #${editingId}` : "Новая программа"}</h3>
+              <h3 className="font-semibold text-sm">{editingId ? `Правка #${editingId}` : "Новый оффер"}</h3>
               {editingId && (
                 <Button type="button" variant="ghost" size="sm" className="h-7 gap-1" onClick={cancelEdit}>
                   <X className="h-3.5 w-3.5" /> Отмена
@@ -188,20 +197,20 @@ export function TrainingProgramsModal({ apiBase }) {
 
             <div className="space-y-1">
               <label className="text-xs font-medium">Название *</label>
-              <Input required placeholder="Системные продажи B2B" value={form.name}
+              <Input required placeholder="Быстрое закрытие одной ключевой роли" value={form.name}
                      onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
 
             <div className="space-y-1">
               <label className="text-xs font-medium">Описание</label>
-              <Textarea rows={2} placeholder="Что это за программа и какой результат даёт"
+              <Textarea rows={2} placeholder="Что это за оффер и какой результат даёт клиенту"
                         value={form.description}
                         onChange={(e) => setForm({ ...form, description: e.target.value })} />
             </div>
 
             <div className="space-y-1">
               <label className="text-xs font-medium">Целевые боли (по одной на строку) *</label>
-              <Textarea rows={3} placeholder={"слабые продажи\nнет системы в продажах\nнизкая конверсия"}
+              <Textarea rows={3} placeholder={"долгий найм\nоткрыто несколько ролей параллельно\nне хватает senior-кандидатов"}
                         value={form.target_pains}
                         onChange={(e) => setForm({ ...form, target_pains: e.target.value })} />
             </div>
@@ -209,40 +218,29 @@ export function TrainingProgramsModal({ apiBase }) {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <label className="text-xs font-medium">Аудитория</label>
-                <Input placeholder="коммерческие директора" value={form.audience}
+                <Input placeholder="фаундеры и лиды студий 10–30 чел." value={form.audience}
                        onChange={(e) => setForm({ ...form, audience: e.target.value })} />
               </div>
               <div className="space-y-1">
                 <label className="text-xs font-medium">Формат</label>
-                <Input placeholder="2-дневный тренинг" value={form.format}
+                <Input placeholder="contingency-поиск" value={form.format}
                        onChange={(e) => setForm({ ...form, format: e.target.value })} />
               </div>
             </div>
 
             <div className="space-y-1">
               <label className="text-xs font-medium">Буллиты для письма (по одному на строку)</label>
-              <Textarea rows={3} placeholder={"воронка и стандарты работы\nрост конверсии за 6 недель"}
+              <Textarea rows={3} placeholder={"первый кандидат через 24–72 часа после согласования условий\nкандидаты приходят уже мотивированными"}
                         value={form.bullets}
                         onChange={(e) => setForm({ ...form, bullets: e.target.value })} />
             </div>
 
-            <div className="space-y-1">
-              <label className="text-xs font-medium">PDF-материал (из Assets)</label>
-              <select
-                className="w-full h-9 rounded-md border bg-background px-2 text-sm"
-                value={form.asset_id}
-                onChange={(e) => setForm({ ...form, asset_id: e.target.value })}
-              >
-                <option value="">— без вложения —</option>
-                {assets.map((a) => (
-                  <option key={a.id} value={a.id}>{a.name || a.filename || `Asset #${a.id}`}</option>
-                ))}
-              </select>
-            </div>
+            {/* Поле «PDF-материал» скрыто (решение 10.07): вложений в холодных письмах нет,
+                материалы — только после ответа. asset_id в форме и бэкенде сохранён. */}
 
             <Button type="submit" className="mt-1 w-full" disabled={saving}>
               {saving ? <Loader2 className="animate-spin h-4 w-4 mr-2" /> : <Plus className="h-4 w-4 mr-2" />}
-              {editingId ? "Сохранить изменения" : "Добавить программу"}
+              {editingId ? "Сохранить изменения" : "Добавить оффер"}
             </Button>
           </form>
         </div>

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
 if TYPE_CHECKING:
+    from app.models.persona import Persona
     from app.models.run_master_email_variant import RunMasterEmailVariant
     from app.models.run_outreach_context import RunOutreachContext
     from app.models.run_setup import RunSetup
@@ -70,3 +71,10 @@ class Run(Base):
     )
     # Professional profile slug (see email_style_service.VALID_PROFESSIONAL_PROFILES); drives outbound voice.
     email_style_mode: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+    # B-071: sender persona for this run's outreach (self-intro, verbatim finales, geo-map).
+    # NULL -> the "alexey" persona (current single-tenant default; decision 8, B-071 handoff).
+    persona_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("personas.id"), nullable=True, index=True,
+    )
+    persona: Mapped["Persona | None"] = relationship("Persona")

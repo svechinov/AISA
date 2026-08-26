@@ -37,6 +37,17 @@ from app.models.contact_personalization import ContactPersonalization, ContactPe
 from app.models.template_variable import TemplateVariable  # noqa: F401
 from app.models.training_program import TrainingProgram  # noqa: F401 — register training_programs
 from app.models.company_evidence import CompanyEvidence  # noqa: F401 — register company_evidence
+# Explicit imports so create_all covers these on a FRESH database: without them the tables
+# are registered with Base.metadata only when service modules happen to be imported first
+# (separate asyncio task at startup — no ordering guarantee; masked by existing DBs).
+from app.models.system_setting import SystemSetting  # noqa: F401 — register system_settings
+from app.models.smtp_account import SmtpAccount  # noqa: F401 — register smtp_accounts
+from app.models.sending_policy import SendingPolicy  # noqa: F401 — register sending_policies
+from app.models.send_queue import SendQueueItem  # noqa: F401 — register send_queue
+from app.models.suppression_entry import SuppressionEntry  # noqa: F401 — register suppression_list
+from app.models.excluded_company import ExcludedCompany  # noqa: F401 — register excluded_companies (B-264)
+from app.models.draft_instruct_log import DraftInstructLog  # noqa: F401 — register draft_instruct_log (B-018)
+from app.models.persona import Persona  # noqa: F401 — register personas (B-071)
 
 
 def _ensure_contacts_gmail_history_columns() -> None:
@@ -91,6 +102,134 @@ def _ensure_contacts_email_health_columns() -> None:
                 )
 
 
+def _ensure_contacts_email_verification_columns() -> None:
+    insp = inspect(engine)
+    if "contacts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("contacts")}
+    with engine.begin() as conn:
+        if "email_verification_status" not in columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE contacts ADD COLUMN email_verification_status "
+                    "VARCHAR(50) NOT NULL DEFAULT 'unknown'",
+                ),
+            )
+        if "email_verified_at" not in columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE contacts ADD COLUMN email_verified_at DATETIME"))
+            else:
+                conn.execute(text("ALTER TABLE contacts ADD COLUMN email_verified_at TIMESTAMP"))
+        if "email_verification_source" not in columns:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN email_verification_source VARCHAR(50)"))
+
+
+def _seed_default_sending_policy() -> None:
+    """Insert the alex@ mailbox policy on a fresh DB (idempotent). Warm-up: 5/day → +5/week → cap 25.
+
+    daily_cap is the *ceiling* the ramp grows into (effective_daily_cap = min(daily_cap, ramp_cap) in
+    sending_gates.py) — it must be seeded at 25, not 5, or the ramp is dead code and sending never
+    exceeds 5/day (backlog B-013 §3, was wrong before 2026-07-08).
+    """
+    from datetime import date
+
+    from app.config import settings
+    from app.models.sending_policy import SendingPolicy
+
+    insp = inspect(engine)
+    if "sending_policies" not in insp.get_table_names():
+        return
+    mailbox = (settings.GMAIL_SEND_AS_EMAIL or "alex@alexstaff.agency").strip().lower()
+    db = SessionLocal()
+    try:
+        if db.query(SendingPolicy).filter(SendingPolicy.mailbox_email == mailbox).first():
+            return
+        db.add(
+            SendingPolicy(
+                mailbox_email=mailbox,
+                daily_cap=25,
+                hourly_cap=2,
+                min_gap_minutes=45,
+                gap_jitter_minutes=45,
+                send_days_first_touch="tue,wed,thu",
+                send_days_follow_up="mon,tue,wed,thu",
+                window_start="09:00",
+                window_end="12:30",
+                timezone="Asia/Nicosia",
+                warmup_ramp_json={
+                    "start": 5,
+                    "step_per_week": 5,
+                    "cap": 25,
+                    "started_on": date.today().isoformat(),
+                },
+                follow_up_after_business_days=4,
+                max_touches=2,
+                enabled=True,
+            ),
+        )
+        db.commit()
+        _logger.info("sending_policies: seeded default policy for %s", mailbox)
+    except Exception:
+        _logger.exception("seed default sending policy failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _fix_stale_warmup_daily_cap() -> None:
+    """One-time repair for rows written before 2026-07-08 with the old (wrong) seed: daily_cap=5
+    while warmup_ramp_json targets cap=25. Since effective_daily_cap = min(daily_cap, ramp_cap), that
+    combination permanently clamps sending at 5/day — the ramp never had any effect. Only bumps rows
+    that still hold that exact stale pair, so a deliberately-lowered cap is left alone."""
+    from app.models.sending_policy import SendingPolicy
+
+    insp = inspect(engine)
+    if "sending_policies" not in insp.get_table_names():
+        return
+    db = SessionLocal()
+    try:
+        rows = db.query(SendingPolicy).filter(SendingPolicy.daily_cap == 5).all()
+        fixed = 0
+        for row in rows:
+            ramp = row.warmup_ramp_json or {}
+            if isinstance(ramp, dict) and int(ramp.get("cap", 0) or 0) == 25:
+                row.daily_cap = 25
+                db.add(row)
+                fixed += 1
+        if fixed:
+            db.commit()
+            _logger.info("sending_policies: fixed stale warm-up daily_cap on %d row(s)", fixed)
+    except Exception:
+        _logger.exception("fix stale warm-up daily_cap failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _reset_stale_running_after_restart() -> None:
+    """Startup recovery: run_workflow (backend/app/services/orchestrator.py) executes synchronously
+    inside POST /runs/{id}/start, so a process restart (deploy, OOM, proxy timeout) mid-run never
+    reaches the except block that would call mark_step_failed/update_run_status(..., "failed") —
+    the run/step is left at status='running' forever, since nothing else transitions it out. Fail
+    anything still 'running' at startup. Never lets a bad row block app boot."""
+    from app.repositories.run_repo import reset_stale_running_runs
+    from app.repositories.step_repo import reset_stale_running_steps
+
+    db = SessionLocal()
+    try:
+        n_steps = reset_stale_running_steps(db)
+        n_runs = reset_stale_running_runs(db)
+        if n_steps or n_runs:
+            _logger.info(
+                "startup recovery: reset stale running steps=%d runs=%d", n_steps, n_runs,
+            )
+    except Exception:
+        _logger.exception("startup recovery for stale running steps/runs failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _ensure_email_drafts_feature1_columns() -> None:
     """reasoning_problem / reasoning_solution / matched_program_json (Feature 1 + 5-slot meta)."""
     insp = inspect(engine)
@@ -104,6 +243,63 @@ def _ensure_email_drafts_feature1_columns() -> None:
             conn.execute(text("ALTER TABLE email_drafts ADD COLUMN reasoning_solution TEXT"))
         if "matched_program_json" not in columns:
             conn.execute(text("ALTER TABLE email_drafts ADD COLUMN matched_program_json JSON"))
+
+
+def _ensure_email_drafts_alex_verdict_columns() -> None:
+    """Alex's verdict on a draft (B-077 etap 2: critic <-> Alex calibration)."""
+    insp = inspect(engine)
+    if "email_drafts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("email_drafts")}
+    with engine.begin() as conn:
+        if "alex_verdict" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN alex_verdict VARCHAR(20)"))
+        if "alex_verdict_why" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN alex_verdict_why TEXT"))
+        if "alex_verdict_at" not in columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE email_drafts ADD COLUMN alex_verdict_at DATETIME"))
+            else:
+                conn.execute(text("ALTER TABLE email_drafts ADD COLUMN alex_verdict_at TIMESTAMP"))
+
+
+def _ensure_email_drafts_critic_taste_columns() -> None:
+    """LLM taste-rubric outcome, separated from mechanics (B-077 etap 2: calibration matrix)."""
+    insp = inspect(engine)
+    if "email_drafts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("email_drafts")}
+    with engine.begin() as conn:
+        if "critic_taste_pass" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_taste_pass BOOLEAN"))
+        if "critic_relevance_score" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_relevance_score INTEGER"))
+        if "critic_specificity_score" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_specificity_score INTEGER"))
+        if "critic_non_spam_score" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_non_spam_score INTEGER"))
+        if "critic_cta_score" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_cta_score INTEGER"))
+        if "critic_clarity_score" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_clarity_score INTEGER"))
+        if "critic_hook_grounded" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_hook_grounded BOOLEAN"))
+        if "critic_canon_used" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_canon_used TEXT"))
+        if "critic_evidence_json" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN critic_evidence_json JSON"))
+
+
+def _ensure_email_drafts_finale_variant_column() -> None:
+    """B-147: which verbatim closing-paragraph variant (0-based index) this draft was generated
+    with, for A/B/C rotation reply-rate analysis (Persona.finales_json segment -> list of options)."""
+    insp = inspect(engine)
+    if "email_drafts" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("email_drafts")}
+    with engine.begin() as conn:
+        if "finale_variant" not in columns:
+            conn.execute(text("ALTER TABLE email_drafts ADD COLUMN finale_variant INTEGER"))
 
 
 def _ensure_email_drafts_tracking_columns() -> None:
@@ -165,6 +361,20 @@ def _ensure_projects_is_archived_column() -> None:
                     "ALTER TABLE projects ADD COLUMN is_archived BOOLEAN NOT NULL DEFAULT FALSE",
                 ),
             )
+
+
+def _ensure_runs_persona_id_column() -> None:
+    """create_all() does not add new columns to existing tables — migrate here (B-071). Nullable,
+    no NOT NULL: empty persona_id is the "alexey" default at the code level (persona_service.py),
+    not a DB-level default."""
+    insp = inspect(engine)
+    if "runs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("runs")}
+    if "persona_id" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE runs ADD COLUMN persona_id INTEGER"))
 
 
 def _ensure_assets_extended_columns() -> None:
@@ -383,6 +593,21 @@ def _ensure_email_threads_classification_columns() -> None:
             conn.execute(text("ALTER TABLE email_threads ADD COLUMN classification_confidence VARCHAR(20)"))
         if "classification_reason" not in columns:
             conn.execute(text("ALTER TABLE email_threads ADD COLUMN classification_reason VARCHAR(500)"))
+
+
+def _ensure_suppression_list_expires_at_column() -> None:
+    """B-138: not_interested suppression is a 6-month cooldown, not permanent — NULL stays forever
+    (unsubscribe/dead_mailbox/bounced/manual keep their existing forever semantics)."""
+    insp = inspect(engine)
+    if "suppression_list" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("suppression_list")}
+    with engine.begin() as conn:
+        if "expires_at" not in columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE suppression_list ADD COLUMN expires_at DATETIME"))
+            else:
+                conn.execute(text("ALTER TABLE suppression_list ADD COLUMN expires_at TIMESTAMP"))
 
 
 def _ensure_personalization_and_generation_meta_columns() -> None:
@@ -678,6 +903,30 @@ def _ensure_run_setups_icp_columns() -> None:
             conn.execute(text("ALTER TABLE run_setups ADD COLUMN icp_max_employees INTEGER"))
         if "icp_criteria_json" not in columns:
             conn.execute(text("ALTER TABLE run_setups ADD COLUMN icp_criteria_json JSON"))
+
+
+def _ensure_send_queue_reschedule_reason_column() -> None:
+    """Why the last transient reschedule pushed this item to a new slot (B-026)."""
+    insp = inspect(engine)
+    if "send_queue" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("send_queue")}
+    if "last_reschedule_reason" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE send_queue ADD COLUMN last_reschedule_reason VARCHAR(255)"))
+
+
+def _ensure_run_setups_critic_canon_column() -> None:
+    """Canon of judgement (B-077 etap 2): critic_canon_text, editable without a deploy."""
+    insp = inspect(engine)
+    if "run_setups" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_setups")}
+    if "critic_canon_text" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE run_setups ADD COLUMN critic_canon_text TEXT"))
 
 
 def _migrate_run_setups_from_legacy() -> None:
@@ -1098,13 +1347,20 @@ def ensure_schema() -> None:
     _ensure_run_input_goal_column()
     _migrate_run_setups_from_legacy()
     _ensure_run_setups_icp_columns()
+    _ensure_run_setups_critic_canon_column()
+    _ensure_send_queue_reschedule_reason_column()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()
+    _ensure_email_drafts_finale_variant_column()
     _ensure_email_drafts_feature1_columns()
+    _ensure_email_drafts_alex_verdict_columns()
+    _ensure_email_drafts_critic_taste_columns()
     _ensure_contacts_email_health_columns()
+    _ensure_contacts_email_verification_columns()
     _ensure_contacts_gmail_history_columns()
     _ensure_contacts_leadgen_columns()
     _ensure_projects_is_archived_column()
+    _ensure_runs_persona_id_column()
     _ensure_email_threads_classification_columns()
     _ensure_email_messages_rfc_message_id_column()
     _ensure_gmail_processed_messages_table()
@@ -1134,6 +1390,10 @@ def ensure_schema() -> None:
     _backfill_personalization_json()
     _migrate_steps_trim_contacts_json_blob()
     _ensure_run_scoped_performance_indexes()
+    _ensure_suppression_list_expires_at_column()
+    _seed_default_sending_policy()
+    _fix_stale_warmup_daily_cap()
+    _reset_stale_running_after_restart()
     _logger.info("ensure_schema: done")
 
 

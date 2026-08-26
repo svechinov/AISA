@@ -68,6 +68,83 @@ async def _run_leadgen_orchestrator() -> None:
     await leadgen_background_orchestrator()
 
 
+async def _gmail_background_sync_loop(interval_sec: int) -> None:
+    from app.services.gmail_oauth import google_client_configured, google_refresh_token_value
+    from app.services.gmail_tracking_sync_service import sync_gmail_all_open_runs
+
+    await asyncio.sleep(8.0)
+    while True:
+        if not google_client_configured() or not google_refresh_token_value():
+            await asyncio.sleep(float(interval_sec))
+            continue
+
+        def _sync_once() -> None:
+            db = SessionLocal()
+            try:
+                sync_gmail_all_open_runs(db)
+            except Exception:
+                _log.exception("Background Gmail sync failed")
+            finally:
+                db.close()
+
+        # Must not block the asyncio loop — long Gmail I/O would stall every HTTP handler (e.g. GET /runs/:id/companies).
+        await asyncio.to_thread(_sync_once)
+        await asyncio.sleep(float(interval_sec))
+
+
+async def _send_queue_worker_loop(interval_sec: int, schema_task: asyncio.Task | None = None) -> None:
+    """Release due, gate-passing drafts on cadence. Disabled when SEND_QUEUE_INTERVAL_SECONDS=0."""
+    from app.services.sending_scheduler import run_queue_tick_in_thread
+
+    # Do not tick until migrations have created the send_queue tables (avoids "no such table" on cold DB).
+    if schema_task is not None:
+        try:
+            await schema_task
+        except Exception:
+            _log.exception("schema task failed; send-queue worker will still start")
+    await asyncio.sleep(10.0)
+    while True:
+        # DB + Gmail I/O off the event loop — same discipline as the Gmail sync worker.
+        await asyncio.to_thread(run_queue_tick_in_thread)
+        await asyncio.sleep(float(interval_sec))
+
+
+async def _telegram_poller_loop(schema_task: asyncio.Task | None = None) -> None:
+    """Long-poll Telegram getUpdates and file inbound messages. Off unless TELEGRAM_POLLER_ENABLED."""
+    from app.services.telegram_poller import run_poll_tick_in_thread
+
+    # Offset lives in system_settings — wait for schema so the first tick doesn't hit a cold DB.
+    if schema_task is not None:
+        try:
+            await schema_task
+        except Exception:
+            _log.exception("schema task failed; telegram poller will still start")
+    await asyncio.sleep(6.0)
+    while True:
+        try:
+            # getUpdates long-polls (blocking up to TELEGRAM_POLL_TIMEOUT_SEC) — keep it off the loop.
+            await asyncio.to_thread(run_poll_tick_in_thread)
+        except Exception:
+            _log.exception("telegram poller tick failed")
+            await asyncio.sleep(5.0)
+        await asyncio.sleep(1.0)
+
+
+async def _status_snapshot_loop(interval_sec: int, schema_task: asyncio.Task | None = None) -> None:
+    """Periodic status.json for the read-only General-topic agent. Off when interval is 0."""
+    from app.services.status_snapshot import run_status_snapshot_tick_in_thread
+
+    if schema_task is not None:
+        try:
+            await schema_task
+        except Exception:
+            _log.exception("schema task failed; status snapshot worker will still start")
+    await asyncio.sleep(15.0)
+    while True:
+        await asyncio.to_thread(run_status_snapshot_tick_in_thread)
+        await asyncio.sleep(float(interval_sec))
+
+
 async def _register_routes_task(app: FastAPI) -> None:
     from app.routes_register import attach_api_routers, import_api_routers
 
@@ -84,7 +161,58 @@ async def lifespan(_app: FastAPI):
     orchestrator_task = asyncio.create_task(_run_leadgen_orchestrator())
     _app.state.orchestrator_task = orchestrator_task
 
+    gmail_interval = int(getattr(settings, "GMAIL_SYNC_INTERVAL_SECONDS", 0) or 0)
+    gmail_task: asyncio.Task | None = None
+    if gmail_interval > 0:
+        gmail_task = asyncio.create_task(_gmail_background_sync_loop(gmail_interval))
+        _app.state.gmail_task = gmail_task
+
+    send_queue_interval = int(getattr(settings, "SEND_QUEUE_INTERVAL_SECONDS", 0) or 0)
+    send_queue_task: asyncio.Task | None = None
+    if send_queue_interval > 0:
+        send_queue_task = asyncio.create_task(
+            _send_queue_worker_loop(send_queue_interval, schema_task),
+        )
+        _app.state.send_queue_task = send_queue_task
+
+    telegram_poller_task: asyncio.Task | None = None
+    if getattr(settings, "TELEGRAM_POLLER_ENABLED", False) and (settings.TELEGRAM_BOT_TOKEN or "").strip():
+        telegram_poller_task = asyncio.create_task(_telegram_poller_loop(schema_task))
+        _app.state.telegram_poller_task = telegram_poller_task
+
+    status_snapshot_interval = int(getattr(settings, "STATUS_SNAPSHOT_INTERVAL_SECONDS", 0) or 0)
+    status_snapshot_task: asyncio.Task | None = None
+    if status_snapshot_interval > 0:
+        status_snapshot_task = asyncio.create_task(
+            _status_snapshot_loop(status_snapshot_interval, schema_task),
+        )
+        _app.state.status_snapshot_task = status_snapshot_task
+
     yield
+    if status_snapshot_task and not status_snapshot_task.done():
+        status_snapshot_task.cancel()
+        try:
+            await status_snapshot_task
+        except asyncio.CancelledError:
+            pass
+    if telegram_poller_task and not telegram_poller_task.done():
+        telegram_poller_task.cancel()
+        try:
+            await telegram_poller_task
+        except asyncio.CancelledError:
+            pass
+    if send_queue_task and not send_queue_task.done():
+        send_queue_task.cancel()
+        try:
+            await send_queue_task
+        except asyncio.CancelledError:
+            pass
+    if gmail_task and not gmail_task.done():
+        gmail_task.cancel()
+        try:
+            await gmail_task
+        except asyncio.CancelledError:
+            pass
     if routes_task and not routes_task.done():
         routes_task.cancel()
         try:
@@ -119,12 +247,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/"):
             path = "/" + path
             
-        _log.warning(f"AuthMiddleware checking path: {full_path} (normalized: {path})")
+        _log.debug(f"AuthMiddleware checking path: {full_path} (normalized: {path})")
         
         # Paths that bypass auth (normalized)
+        # /oauth/google: the browser is redirected here by Google — it can never carry
+        # the app bearer token, so the OAuth flow must bypass auth.
         skip_paths = [
             "/health", "/ready", "/docs", "/redoc", "/openapi.json", "/favicon.ico",
-            "/setup/status", "/auth/login"
+            "/setup/status", "/auth/login", "/oauth/google"
         ]
         
         if any(path.startswith(p) for p in skip_paths):
@@ -137,7 +267,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             
         token = auth_header.split(" ")[1]
         if token != settings.GLOBAL_PASSWORD:
-            _log.warning(f"AuthMiddleware invalid token for {full_path}. Got: {token[:4]}..., Expected: {settings.GLOBAL_PASSWORD[:4]}...")
+            _log.warning(f"AuthMiddleware invalid token for {full_path}")
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
             
         return await call_next(request)

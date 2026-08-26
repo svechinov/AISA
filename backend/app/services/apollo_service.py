@@ -21,6 +21,7 @@ from app.repositories.run_company_repo import list_run_companies_sparse
 from app.services.apollo_llm_hints import apollo_llm_hints_for_run
 from app.services.human_ui_activity import push_human_ui_activity, push_human_ui_activity_once
 from app.services.company_website_check import normalize_company_website_url
+from app.services.contact_name_check import annotate_surname_check
 from app.services.run_context_service import coalesce_str, get_effective_context
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,34 @@ def keyword_tags_from_context(ctx: dict[str, str]) -> list[str]:
     if not tags:
         tags = ["business"]
     return tags
+
+
+# B-274: second-pass titles for companies where the run's own narrow title list found nobody. The
+# 29.07 add-on wave (Bonfire, Gardens) returned 0-1 people for the run titles, while a direct Apollo
+# query with these hiring-side titles surfaced live people with verified addresses — the data was
+# there, we were asking for the wrong roles (confirms B-241). Kept small and generic on purpose: it
+# is a fallback, not a widening of the campaign's targeting.
+FALLBACK_PERSON_TITLES: tuple[str, ...] = (
+    "head of people",
+    "head of talent",
+    "head of hr",
+    "talent acquisition",
+    "recruiting",
+    "recruiter",
+    "people operations",
+    "hr manager",
+    "hr director",
+    "chief of staff",
+    "studio head",
+    "co-founder",
+)
+
+
+def fallback_person_titles(primary_titles: list[str]) -> list[str]:
+    """Second-pass titles: the standing hiring-side list minus whatever the first pass already
+    tried (no point re-asking Apollo the same question)."""
+    tried = {str(t).strip().lower() for t in primary_titles if str(t or "").strip()}
+    return [t for t in FALLBACK_PERSON_TITLES if t not in tried]
 
 
 def person_titles_from_context(ctx: dict[str, str]) -> list[str]:
@@ -154,7 +183,60 @@ def _organizations_from_apollo_search_payload(data: dict[str, Any]) -> list[dict
     return []
 
 
-def search_organizations_json(keyword_tags: list[str], *, page: int, per_page: int) -> dict:
+def apollo_org_filters_from_run_setup(run_setup: Any) -> dict[str, list[str]]:
+    """Derive Apollo org-search filters from RunSetup.icp_criteria_json / icp_min_employees / icp_max_employees.
+
+    Total: never raises, regardless of how malformed run_setup / icp_criteria_json is.
+    - locations: run_setup.icp_criteria_json["regions"] — stripped, deduped, capped at 20; [] if unset/malformed
+      (no location filter applied).
+    - num_employees_ranges: one "{lo},{hi}" range from icp_min_employees / icp_max_employees; falls back to the
+      legacy ≤100 buckets when neither bound is set (keeps existing behavior for runs without a band — no silent
+      widening of the search).
+    """
+    locations: list[str] = []
+    crit = getattr(run_setup, "icp_criteria_json", None)
+    if isinstance(crit, dict):
+        regions = crit.get("regions")
+        if isinstance(regions, list):
+            seen: set[str] = set()
+            for r in regions:
+                if not isinstance(r, str):
+                    continue
+                r = r.strip()
+                if not r or r in seen:
+                    continue
+                seen.add(r)
+                locations.append(r)
+                if len(locations) >= 20:
+                    break
+
+    def _bound(v: Any) -> int | None:
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else None
+
+    lo = _bound(getattr(run_setup, "icp_min_employees", None))
+    hi = _bound(getattr(run_setup, "icp_max_employees", None))
+    if lo is not None and hi is not None:
+        if lo > hi:
+            lo, hi = hi, lo
+        num_employees_ranges = [f"{lo},{hi}"]
+    elif lo is not None:
+        num_employees_ranges = [f"{lo},100000"]
+    elif hi is not None:
+        num_employees_ranges = [f"1,{hi}"]
+    else:
+        num_employees_ranges = list(_APOLLO_ORG_NUM_EMPLOYEES_RANGES_UP_TO_100)
+
+    return {"locations": locations, "num_employees_ranges": num_employees_ranges}
+
+
+def search_organizations_json(
+    keyword_tags: list[str],
+    *,
+    page: int,
+    per_page: int,
+    locations: list[str] | None = None,
+    num_employees_ranges: list[str] | None = None,
+) -> dict:
     """Company search via ``POST /organizations/search`` (JSON body)."""
     tags = [str(t).strip() for t in keyword_tags if t and str(t).strip()]
     per = min(max(1, int(per_page)), 100)
@@ -162,8 +244,12 @@ def search_organizations_json(keyword_tags: list[str], *, page: int, per_page: i
     body: dict[str, Any] = {
         "page": pg,
         "per_page": per,
-        "organization_num_employees_ranges": list(_APOLLO_ORG_NUM_EMPLOYEES_RANGES_UP_TO_100),
+        "organization_num_employees_ranges": (
+            list(num_employees_ranges) if num_employees_ranges else list(_APOLLO_ORG_NUM_EMPLOYEES_RANGES_UP_TO_100)
+        ),
     }
+    if locations:
+        body["organization_locations"] = list(locations)
     if tags:
         body["q_organization_keyword_tags"] = tags[:20]
     else:
@@ -257,9 +343,24 @@ def try_collect_companies_via_apollo(
         settings.APOLLO_MAX_ORG_PAGE_SIZE,
         50 if continuation else 25,
     )
+    run_setup = getattr(run, "run_setup", None)
+    org_filters = apollo_org_filters_from_run_setup(run_setup)
+    geo_desc = ", ".join(org_filters["locations"]) if org_filters["locations"] else "не задан"
+    size_desc = ", ".join(org_filters["num_employees_ranges"])
+    push_human_ui_activity(
+        db,
+        run_id,
+        f"Apollo: гео-фильтр — {geo_desc}; диапазон размера компании — {size_desc}.",
+    )
     push_human_ui_activity(db, run_id, "Apollo: запрос поиска организаций…")
     try:
-        data = search_organizations_json(tags, page=1, per_page=per_page)
+        data = search_organizations_json(
+            tags,
+            page=1,
+            per_page=per_page,
+            locations=org_filters["locations"],
+            num_employees_ranges=org_filters["num_employees_ranges"],
+        )
     except Exception:
         logger.exception("Apollo organization search failed; falling back to LLM")
         push_human_ui_activity(
@@ -377,8 +478,25 @@ def try_find_contacts_via_apollo(db, run_id: int, run, step_input: dict) -> dict
                 )
                 continue
 
-            pdata = search_people_json(domain, titles, per_page=min(per_co, 25, remaining))
+            page_size = min(per_co, 25, remaining)
+            pdata = search_people_json(domain, titles, per_page=page_size)
             people = pdata.get("people")
+            if not isinstance(people, list) or not people:
+                # B-274 second pass: the run's narrow title list found nobody at this company —
+                # retry once with the standing hiring-side titles before giving up. Never falls back
+                # to an LLM: empty from Apollo means empty (the LLM used to invent a plausible
+                # person + address here, and a catch-all domain then verified it).
+                extra_titles = fallback_person_titles(titles)
+                if extra_titles:
+                    pdata = search_people_json(domain, extra_titles, per_page=page_size)
+                    people = pdata.get("people")
+                if isinstance(people, list) and people:
+                    push_human_ui_activity(
+                        db,
+                        run_id,
+                        f"Apollo: «{name}» — по должностям рана никого; нашли вторым проходом "
+                        f"(head of people / recruiting / talent).",
+                    )
             if not isinstance(people, list) or not people:
                 continue
 
@@ -403,14 +521,21 @@ def try_find_contacts_via_apollo(db, run_id: int, run, step_input: dict) -> dict
                     fn = (m.get("first_name") or "").strip()
                     ln = (m.get("last_name") or "").strip()
                     full = f"{fn} {ln}".strip() or "—"
+                # B-275: keep Apollo's own linkedin_url on the contact and cross-check the surname
+                # against it — Apollo returns a corrupted last name often enough ("Stephen
+                # Gamescom" for Stephen Bell) that a mismatch must reach the human, not the letter.
                 contacts.append(
-                    {
-                        "company": name,
-                        "website": website,
-                        "name": full,
-                        "role": role,
-                        "email": email,
-                    }
+                    annotate_surname_check(
+                        {
+                            "company": name,
+                            "website": website,
+                            "name": full,
+                            "role": role,
+                            "email": email,
+                            "linkedin": (m.get("linkedin_url") or "").strip() or None,
+                            "source": "apollo",
+                        }
+                    )
                 )
                 remaining -= 1
                 if remaining <= 0:

@@ -38,7 +38,7 @@ def setup(db):
 
 def test_apply_program_match_keeps_reasoning_strings_and_returns_meta(db, setup, monkeypatch):
     """F7: reasoning slots stay str→str; ids/fit live in the returned meta record only."""
-    monkeypatch.setattr(pm, "complete_prompt_json_object", lambda p: {
+    monkeypatch.setattr(pm, "complete_prompt_json_object", lambda p, task_kind=None: {
         "program_id": setup["prog"].id, "fit_score": 80,
         "solution_text": "Решение: Прог", "rationale": "ok",
     })

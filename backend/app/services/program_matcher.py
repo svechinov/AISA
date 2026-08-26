@@ -65,7 +65,8 @@ def match_program(
     problem: str,
     dossier: str = "",
     person_osint: Any = None,
-    language: str = "Russian",
+    vacancy_signals: Any = None,
+    language: str = "English",
 ) -> dict[str, Any] | None:
     """One LLM call: choose the best-fitting active program for this pain, or none.
 
@@ -89,14 +90,15 @@ def match_program(
 
         task = (
             f"ALWAYS WRITE solution_text AND rationale IN {language}.\n\n"
-            "You are matching a corporate training program to a prospect's confirmed pain.\n"
-            "1. Pick the ONE catalog program whose target_pains best match the prospect pain. "
+            "You are matching one of the sender's catalog offers to a prospect's confirmed pain.\n"
+            "1. Pick the ONE catalog offer whose target_pains best match the prospect pain "
+            "(vacancy_signals, when present, are strong evidence of an active hiring pain). "
             "If none is a genuinely good fit, return program_id=null (do NOT force a weak match).\n"
             "2. fit_score: honest 0-100 fit (90+ exact pain match; <55 weak/generic).\n"
-            "3. solution_text: 2-3 sentences for the email's solution slot — name the program "
+            "3. solution_text: 2-3 sentences for the email's solution slot — name the offer "
             "explicitly, tie it to THIS prospect's pain, and weave in 1-2 of its bullets. "
             "Concrete and specific, no generic consulting language.\n"
-            "4. rationale: one sentence — why this program fits this pain (internal, not for the email)."
+            "4. rationale: one sentence — why this offer fits this pain (internal, not for the email)."
         )
         data: dict[str, Any] = {
             "prospect_pain": problem,
@@ -106,9 +108,11 @@ def match_program(
             data["company_dossier_excerpt"] = dossier[:2000]
         if person_osint:
             data["person_osint"] = person_osint
+        if vacancy_signals:
+            data["vacancy_signals"] = vacancy_signals
 
         prompt = build_prompt(task=task, data=data, rules=[], output_schema=MATCH_SCHEMA)
-        out = complete_prompt_json_object(prompt)
+        out = complete_prompt_json_object(prompt, task_kind="program_match")
     except Exception as e:
         logger.warning(f"Program matcher failed (keeping generic offer): {e}")
         return None

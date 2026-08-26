@@ -236,12 +236,34 @@ def get_prompt_setup_text(run) -> str:
     return ""
 
 
-def get_sender_signature_html(run) -> str | None:
-    """HTML signature — only ``run_setups.sender_signature_html`` (migrated from runs.sender_signature_html on startup)."""
+def get_critic_canon_text(run) -> str:
+    """Canon of judgement (B-077 etap 2) — only ``run_setups.critic_canon_text``. Empty when unset;
+    the caller (validate_outbound_email) falls back to DEFAULT_CRITIC_CANON in that case."""
     rs = getattr(run, "run_setup", None)
-    if rs is not None and rs.sender_signature_html is not None:
-        return rs.sender_signature_html
-    return None
+    if rs is not None:
+        return (rs.critic_canon_text or "").strip()
+    return ""
+
+
+def get_sender_signature_html(run) -> str | None:
+    """HTML signature — only ``run_setups.sender_signature_html`` (migrated from runs.sender_signature_html on startup).
+
+    CAN-SPAM (B-128 Phase 1a): resolves persona_service.CAN_SPAM_ADDRESS_PLACEHOLDER against
+    settings.CAN_SPAM_POSTAL_ADDRESS, so every consumer (send path, tracking-strip preview) sees
+    the real address once configured. sending_gates blocks send while it's still empty (Phase 1c);
+    this function does not gate — it only substitutes.
+    """
+    rs = getattr(run, "run_setup", None)
+    if rs is None or rs.sender_signature_html is None:
+        return None
+    sig = rs.sender_signature_html
+    from app.services.persona_service import CAN_SPAM_ADDRESS_PLACEHOLDER
+
+    if CAN_SPAM_ADDRESS_PLACEHOLDER in sig:
+        from app.config import settings
+
+        sig = sig.replace(CAN_SPAM_ADDRESS_PLACEHOLDER, (settings.CAN_SPAM_POSTAL_ADDRESS or "").strip())
+    return sig
 
 
 def build_pack_step_zero_input(run) -> dict:
@@ -275,16 +297,19 @@ def build_collect_companies_input_for_round(
                 ' This pass is "Continue outreach" — prioritize growing the list: new regions, '
                 "adjacent categories, indie or B2B brands, not repeats of names already in INPUT DATA."
             )
-            # Rotate angles so the model does not keep suggesting the same 20 brands every pass.
+            # Rotate industry-agnostic angles so the model does not keep suggesting the same
+            # 20 names every pass. The actual segment/vertical comes from the run brief
+            # (master_prompt / prompt_setup_text), never from hardcoded verticals here.
             themes = [
-                "This round: prioritize companies headquartered or primarily selling in **different US states/regions** "
-                "than those already implied by INPUT DATA (avoid repeating the same metro clusters).",
-                "This round: prioritize **indie brands**, **promotional product vendors**, **print shops**, "
-                "and **B2B distributors** that may not be household names.",
-                "This round: prioritize **sporting goods**, **outdoor**, **museum gift shops**, **tourism retail**, "
-                "and **event merchandising** channels.",
-                "This round: prioritize **e-commerce native brands**, **Etsy-scale makers**, **wholesale marketplaces**, "
-                "and **private-label** programs.",
+                "This round: prioritize companies based in **different countries, regions, or cities** "
+                "than those already implied by INPUT DATA (avoid repeating the same geographic clusters), "
+                "while staying inside the geography defined by the run brief.",
+                "This round: prioritize **smaller or less famous companies** that still match the run brief "
+                "— niche players, independents, and newer entrants rather than household names.",
+                "This round: prioritize **adjacent sub-segments or specializations within the run brief's "
+                "target profile** that the list has not covered yet.",
+                "This round: prioritize companies with **recent public activity** (launches, funding, "
+                "expansion, hiring) that makes them timely to contact, still matching the run brief.",
             ]
             base["diversity_guidance"] = themes[round_idx % len(themes)]
         base["expansion_note"] = note

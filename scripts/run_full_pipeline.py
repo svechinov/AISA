@@ -2,8 +2,10 @@ import os
 import requests
 import sys
 
+VDS_HOST = os.environ.get("VDS_HOST", "<your-server-ip>")
+
 def execute_step(run_id, step_name):
-    url = f"http://95.163.223.186/api/steps/run/{run_id}/execute/{step_name}"
+    url = f"http://{VDS_HOST}/api/steps/run/{run_id}/execute/{step_name}"
     headers = {
         "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }

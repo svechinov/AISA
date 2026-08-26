@@ -10,8 +10,8 @@ export function Button({ className, variant = "default", size = "default", ...pr
         variant === "destructive" && "bg-destructive text-destructive-foreground hover:bg-destructive/90",
         variant === "secondary" && "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         variant === "ghost" && "bg-transparent text-foreground hover:bg-accent hover:text-accent-foreground",
-        size === "default" && "h-10 px-4 py-2",
-        size === "sm" && "h-9 rounded-md px-3",
+        size === "default" && "h-9 px-3.5 py-2",
+        size === "sm" && "h-8 rounded-md px-3 text-[13px]",
         className,
       )}
       {...props}

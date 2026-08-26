@@ -1,8 +1,10 @@
 import requests
 import os
 
+VDS_HOST = os.environ.get("VDS_HOST", "<your-server-ip>")
+
 def test_import():
-    url = "http://95.163.223.186/api/runs/import-amocrm"
+    url = f"http://{VDS_HOST}/api/runs/import-amocrm"
     data = {
         "run_name": "E2E Test 29.05 Script",
         "project_id": 1

@@ -97,7 +97,19 @@ def test_agent_b_corpus_tiers_and_dedups(monkeypatch):
     import app.services.search_service as ss_mod
     monkeypatch.setattr(ss_mod, "search_web", fake_search)
 
-    corpus = db_osint._person_search_corpus("Ольга Шаройкина", "Воркутауголь", "пресс-служба")
+    corpus = db_osint._person_search_corpus(
+        "Ольга Шаройкина", "Воркутауголь", "пресс-служба", language="Russian",
+    )
     assert "vk.com/a" in corpus and "t.me/b" in corpus
     assert corpus.count("vk.com/a") == 1  # deduped across tiers
     assert seen_queries[0].startswith("Ольга Шаройкина Воркутауголь интервью")  # RU keywords, strict first
+
+
+def test_agent_b_english_query_ladder():
+    """Non-Russian campaigns get English keywords and global social domains in the ladder."""
+    import app.services.deep_lpr_osint as db_osint
+
+    queries = db_osint._person_queries("Jane Doe", "Nekki", "CEO", "English")
+    assert queries[0].startswith("Jane Doe Nekki interview OR podcast")
+    assert any("linkedin.com" in q for q in queries)
+    assert not any("vk.com" in q for q in queries)

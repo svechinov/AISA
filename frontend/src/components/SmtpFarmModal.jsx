@@ -11,8 +11,16 @@ import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { Server, Trash2, Plus, Loader2 } from "lucide-react";
 
-export function SmtpFarmModal({ apiBase }) {
-  const [open, setOpen] = useState(false);
+/** Ферма SMTP-ящиков (ротация при масштабировании). Сейчас скрыта в «Настройки» (B-028):
+ *  ящик один (Gmail). Управляется извне через open/onOpenChange; без пропсов — своя кнопка. */
+export function SmtpFarmModal({ apiBase, open: openProp, onOpenChange }) {
+  const controlled = openProp !== undefined;
+  const [openState, setOpenState] = useState(false);
+  const open = controlled ? openProp : openState;
+  const setOpen = (v) => {
+    if (onOpenChange) onOpenChange(v);
+    if (!controlled) setOpenState(v);
+  };
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -88,17 +96,20 @@ export function SmtpFarmModal({ apiBase }) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" size="sm" className="gap-2 shrink-0">
-          <Server className="h-4 w-4" />
-          SMTP Farm
-        </Button>
-      </DialogTrigger>
+      {!controlled ? (
+        <DialogTrigger asChild>
+          <Button variant="outline" size="sm" className="gap-2 shrink-0">
+            <Server className="h-4 w-4" />
+            SMTP-ящики
+          </Button>
+        </DialogTrigger>
+      ) : null}
       <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>SMTP Farm / Mail-in-a-Box Balancer</DialogTitle>
+          <DialogTitle>Ферма SMTP-ящиков</DialogTitle>
           <p className="text-sm text-muted-foreground">
-            Add multiple sender emails to distribute load and avoid spam limits. The system automatically rotates through active accounts.
+            Несколько ящиков-отправителей для распределения нагрузки при масштабировании; система
+            сама ротирует активные аккаунты. Сейчас отправка идёт с одного ящика Gmail.
           </p>
         </DialogHeader>
 
@@ -142,7 +153,7 @@ export function SmtpFarmModal({ apiBase }) {
           </div>
 
           {/* Form side */}
-          <form onSubmit={handleAdd} className="flex flex-col gap-3 bg-muted/30 p-4 rounded-xl border">
+          <form onSubmit={handleAdd} className="flex flex-col gap-3 bg-muted/30 p-4 rounded-md border">
             <h3 className="font-semibold text-sm">Add New Box</h3>
             
             <div className="space-y-1">

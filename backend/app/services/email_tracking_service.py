@@ -14,10 +14,16 @@ from app.repositories.email_draft_repo import (
 )
 from app.repositories.email_event_repo import create_email_event
 from app.repositories.research_task_repo import create_research_task, find_pending_replacement_task
+from app.services.outreach_notify import notify
 from app.services.research_task_input import build_find_replacement_input_json
 
 
-def register_replied_event(db: Session, draft_id: int, payload_json: dict | None = None) -> dict:
+def register_replied_event(
+    db: Session,
+    draft_id: int,
+    payload_json: dict | None = None,
+    classification: str | None = None,
+) -> dict:
     draft = get_email_draft(db, draft_id)
     if not draft:
         raise ValueError(f"Draft {draft_id} not found")
@@ -52,6 +58,11 @@ def register_replied_event(db: Session, draft_id: int, payload_json: dict | None
         provider_message_id=draft.provider_message_id,
         payload_json=payload_json or {},
     )
+
+    contact_ref = contact.email if contact else f"contact #{draft.contact_id}"
+    # B-138: include the reply classification when the caller has one (real Gmail sync does).
+    class_suffix = f" (класс: {classification})" if classification else ""
+    notify(f"📩 Run #{draft.run_id}: ответ от {contact_ref}{class_suffix}")
 
     return {
         "draft_id": draft.id,
@@ -102,6 +113,11 @@ def register_bounced_event(
         payload_json=payload_json or {},
         error_message=error_message,
     )
+
+    contact_ref = contact.email if contact else f"contact #{draft.contact_id}"
+    reason = (error_message or "").strip()
+    reason_suffix = f": {reason[:200]}" if reason else ""
+    notify(f"↩️ Run #{draft.run_id}: bounce у {contact_ref}{reason_suffix}")
 
     return {
         "draft_id": draft.id,

@@ -61,7 +61,7 @@ def _parse_companies_from_text(text: str, *, task_hint: str) -> list[dict[str, A
         rules=[],
         output_schema=COMPANIES_SCHEMA,
     )
-    out = complete_prompt_json_object(prompt)
+    out = complete_prompt_json_object(prompt, task_kind="company_source_extract")
     raw = out.get("companies") if isinstance(out, dict) else None
     companies: list[dict[str, Any]] = []
     for c in raw or []:

@@ -30,6 +30,34 @@ def _opt_str(v: Any) -> str | None:
     return s if s else None
 
 
+def critic_taste_column_values(src: dict) -> dict[str, Any]:
+    """Map the LLM taste-rubric outcome (B-077 etap 2) to its typed columns.
+
+    ``src`` is either a validate_outbound_email() result or a generation_meta_json dict — both
+    carry the same ``critic_scores``/``critic_taste_pass``/``critic_hook_grounded``/
+    ``critic_canon_used``/``critic_evidence`` keys.
+    """
+    from app.services.email_validation_service import CRITIC_RUBRIC_KEYS
+
+    scores = src.get("critic_scores")
+    if not isinstance(scores, dict):
+        scores = {}
+    taste_pass = src.get("critic_taste_pass")
+    hook_grounded = src.get("critic_hook_grounded")
+    evidence = src.get("critic_evidence")
+    return {
+        "critic_taste_pass": taste_pass if isinstance(taste_pass, bool) else None,
+        "critic_relevance_score": _coerce_int(scores.get(CRITIC_RUBRIC_KEYS[0])),
+        "critic_specificity_score": _coerce_int(scores.get(CRITIC_RUBRIC_KEYS[1])),
+        "critic_non_spam_score": _coerce_int(scores.get(CRITIC_RUBRIC_KEYS[2])),
+        "critic_cta_score": _coerce_int(scores.get(CRITIC_RUBRIC_KEYS[3])),
+        "critic_clarity_score": _coerce_int(scores.get(CRITIC_RUBRIC_KEYS[4])),
+        "critic_hook_grounded": hook_grounded if isinstance(hook_grounded, bool) else None,
+        "critic_canon_used": _opt_str(src.get("critic_canon_used")),
+        "critic_evidence_json": evidence if isinstance(evidence, dict) else None,
+    }
+
+
 def generation_meta_dict_to_column_values(meta: dict) -> dict[str, Any]:
     """Map pipeline generation_meta_json shape to ORM column kwargs (no generation_meta_json key)."""
     r = meta.get("reasoning") if isinstance(meta.get("reasoning"), dict) else {}
@@ -56,6 +84,9 @@ def generation_meta_dict_to_column_values(meta: dict) -> dict[str, Any]:
         "matched_program_json": (
             meta.get("matched_program") if isinstance(meta.get("matched_program"), dict) else None
         ),
+        # B-147: which closing-paragraph variant (0-based index) was rotated into this draft.
+        "finale_variant": _coerce_int(meta.get("finale_variant")),
+        **critic_taste_column_values(meta),
     }
 
 
@@ -89,9 +120,20 @@ def build_generation_meta_json_from_columns(draft: Any) -> dict:
         "solution": getattr(draft, "reasoning_solution", None) or "",
     }
     vr = getattr(draft, "validation_retries", None)
+    scores_cols = (
+        "critic_relevance_score", "critic_specificity_score", "critic_non_spam_score",
+        "critic_cta_score", "critic_clarity_score",
+    )
+    scores_vals = [getattr(draft, c, None) for c in scores_cols]
+    critic_scores = None
+    if any(v is not None for v in scores_vals):
+        from app.services.email_validation_service import CRITIC_RUBRIC_KEYS
+
+        critic_scores = dict(zip(CRITIC_RUBRIC_KEYS, scores_vals))
     return {
         "reasoning": reasoning,
         "matched_program": getattr(draft, "matched_program_json", None),
+        "finale_variant": getattr(draft, "finale_variant", None),
         "style_mode": getattr(draft, "generation_style_mode", None) or "",
         "validation_score": getattr(draft, "validation_score", None),
         "validation_issues": issues,
@@ -100,6 +142,11 @@ def build_generation_meta_json_from_columns(draft: Any) -> dict:
         "validation_retries": int(vr) if vr is not None else 0,
         "pipeline_source": getattr(draft, "pipeline_source", None) or "",
         "prompt_setup_text_used": getattr(draft, "prompt_setup_text_used", None),
+        "critic_taste_pass": getattr(draft, "critic_taste_pass", None),
+        "critic_scores": critic_scores,
+        "critic_hook_grounded": getattr(draft, "critic_hook_grounded", None),
+        "critic_canon_used": getattr(draft, "critic_canon_used", None),
+        "critic_evidence": getattr(draft, "critic_evidence_json", None),
     }
 
 
@@ -114,11 +161,13 @@ def effective_generation_meta_json(draft: Any) -> dict | None:
 
 
 def effective_generation_meta_json_for_list(draft: Any) -> dict | None:
-    """GET /email-drafts/run list rows: omit ``prompt_setup_text_used`` (duplicates top-level field)."""
+    """GET /email-drafts/run list rows: omit ``prompt_setup_text_used`` (duplicates top-level field)
+    and ``critic_canon_used``/``critic_evidence`` (heavy/duplicative — not needed in list payloads)."""
     meta = effective_generation_meta_json(draft)
     if not isinstance(meta, dict) or not meta:
         return None
-    slim = {k: v for k, v in meta.items() if k != "prompt_setup_text_used"}
+    _excluded = ("prompt_setup_text_used", "critic_canon_used", "critic_evidence")
+    slim = {k: v for k, v in meta.items() if k not in _excluded}
     return slim if slim else None
 
 

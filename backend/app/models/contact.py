@@ -48,6 +48,12 @@ class Contact(Base):
     email_health: Mapped[str] = mapped_column(String(50), nullable=False, default="unknown")
     last_contact_event_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Address deliverability check before send (unknown|valid|risky|dead). Distinct from email_health,
+    # which reflects observed bounce/dead events after sending. See email_verification_service.
+    email_verification_status: Mapped[str] = mapped_column(String(50), nullable=False, default="unknown")
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    email_verification_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     # Gmail inbox history check (Contact analyzer); NULL = not verified yet.
     gmail_history_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     gmail_history_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

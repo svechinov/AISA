@@ -28,6 +28,20 @@ from app.services.run_context_service import get_prompt_setup_text
 
 logger = logging.getLogger(__name__)
 
+
+def _surname_unverified(db: Session, contact: Contact) -> bool:
+    """B-275: contact whose surname disagrees with its own LinkedIn profile — a letter must not be
+    generated for it until a human confirms the name (editing the contact clears the flag)."""
+    from app.services.contact_name_check import contact_surname_unverified
+    from app.utils.contact_source_payload import effective_contact_source_json
+
+    try:
+        return contact_surname_unverified(effective_contact_source_json(db, contact))
+    except Exception:  # never let a source-payload read block generation
+        logger.warning("surname flag read failed for contact_id=%s", getattr(contact, "id", None))
+        return False
+
+
 # Three full, distinct bodies (no manual string-mixing); each passes per-variant validation.
 FALLBACK_MASTER_VARIANTS: list[dict[str, str]] = [
     {
@@ -200,6 +214,13 @@ def _compose_outreach_email_payload_for_contact(
         return None
     if not (contact.email or "").strip():
         return None
+    if _surname_unverified(db, contact):
+        logger.info(
+            "Skip draft for contact_id=%s: surname not confirmed against LinkedIn (B-275) — "
+            "edit the contact to confirm the name",
+            contact.id,
+        )
+        return None
 
     prompt_saved = get_prompt_setup_text(run)
     if prompt_saved:
@@ -325,6 +346,12 @@ def materialize_outreach_draft_for_sendable_contact(
     if contact.status != "valid":
         return None
     if not (contact.email or "").strip():
+        return None
+    if _surname_unverified(db, contact):
+        logger.info(
+            "Skip draft for contact_id=%s: surname not confirmed against LinkedIn (B-275)",
+            contact.id,
+        )
         return None
 
     existing: EmailDraft | None = find_draft_by_contact_id(db, contact.run_id, contact.id)

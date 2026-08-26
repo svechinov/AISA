@@ -2,14 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Lock, Loader2 } from "lucide-react";
-
-const ENV_API = import.meta.env.VITE_API_BASE?.trim();
-const API_BASE =
-  ENV_API && ENV_API.length > 0
-    ? ENV_API.replace(/\/$/, "")
-    : import.meta.env.DEV
-      ? "/api"
-      : "http://127.0.0.1:8000";
+import { API_BASE } from "@/lib/apiBase";
 
 export default function LoginGate({ children }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -78,7 +71,7 @@ export default function LoginGate({ children }) {
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-background p-4">
       <form
         onSubmit={handleLogin}
-        className="w-full max-w-sm rounded-2xl border-2 border-border bg-card p-6 shadow-lg"
+        className="w-full max-w-sm rounded-lg border border-border bg-card p-6 shadow-lg"
       >
         <div className="mb-6 flex flex-col items-center text-center">
           <div className="mb-4 rounded-full bg-primary/10 p-3">

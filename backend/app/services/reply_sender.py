@@ -17,6 +17,7 @@ from app.repositories.reply_draft_repo import (
     mark_reply_draft_sent,
     mark_reply_draft_sending,
 )
+from app.repositories.send_queue_repo import get_by_draft as get_send_queue_item_by_draft
 from app.utils.attached_asset_ids import normalize_attached_asset_ids
 from app.utils.draft_attached_assets import effective_attached_asset_ids_for_reply_draft
 from app.services.asset_attachment_service import (
@@ -30,12 +31,16 @@ from app.services.asset_packet_service import (
     render_assets_block_for_email,
 )
 
+from app.services.contact_gmail_history_service import mark_history_detected_after_outbound_send
 from app.services.email_provider import send_email_via_provider
 from app.services.outbound_email_body import (
     append_additional_assets_section_to_email_html,
     append_signature_html_after,
+    inline_images_for_email_html,
     normalize_draft_body_for_email_html,
+    pick_signature_language,
 )
+from app.services.persona_service import ANASTASIA_SLUG, get_run_persona
 from app.services.run_context_service import get_sender_signature_html
 
 logger = logging.getLogger(__name__)
@@ -81,7 +86,10 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     validate_packet_for_reply_send(reply_draft, packet)
 
     run = get_run(db, reply_draft.run_id)
+    persona = get_run_persona(db, run) if run else None
+    anastasia_style = bool(persona and persona.slug == ANASTASIA_SLUG)
     sig_html = get_sender_signature_html(run) if run else None
+    lang = pick_signature_language(base_body, getattr(run.run_setup, "language", None) if run else None)
 
     eff_reply_ids = effective_attached_asset_ids_for_reply_draft(db, reply_draft)
     draft_ids = normalize_attached_asset_ids(eff_reply_ids)
@@ -108,7 +116,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
 
     if not merged:
         br = str(base_body or "").strip()
-        base = normalize_draft_body_for_email_html(base_body) if br else ""
+        base = normalize_draft_body_for_email_html(base_body, anastasia_style=anastasia_style) if br else ""
         has_sig = bool(str(sig_html or "").strip())
         base = append_additional_assets_section_to_email_html(
             base,
@@ -116,7 +124,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
             eff_reply_ids,
             trailing_rule_if_no_signature_below=not has_sig,
         )
-        final_body = append_signature_html_after(base, sig_html)
+        final_body = append_signature_html_after(base, sig_html, language=lang)
         return {
             "base_body": base_body,
             "final_body": final_body,
@@ -129,6 +137,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
             "packet_block": "",
             "attached_packet_id": packet.id if packet else None,
             "skipped_attachments": [],
+            "inline_images": inline_images_for_email_html(final_body),
         }
 
     sendable, link_only, skipped = resolve_sendable_attachments_for_asset_ids(db, merged)
@@ -139,7 +148,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
     packet_block = render_assets_block_for_email(link_only)
     combined = _combine_body(base_body, packet_block)
     cr = str(combined or "").strip()
-    base = normalize_draft_body_for_email_html(combined) if cr else ""
+    base = normalize_draft_body_for_email_html(combined, anastasia_style=anastasia_style) if cr else ""
     has_sig = bool(str(sig_html or "").strip())
     base = append_additional_assets_section_to_email_html(
         base,
@@ -148,7 +157,7 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
         trailing_rule_if_no_signature_below=not has_sig,
         exclude_asset_ids=mime_exclude,
     )
-    final_body = append_signature_html_after(base, sig_html)
+    final_body = append_signature_html_after(base, sig_html, language=lang)
 
     public_candidates = [_public_attachment_candidate(m) for m in sendable]
     real_attachments = [
@@ -172,11 +181,26 @@ def build_reply_send_payload(db: Session, reply_draft: ReplyDraft) -> dict:
         "packet_block": packet_block,
         "attached_packet_id": packet.id if packet else None,
         "skipped_attachments": skipped,
+        "inline_images": inline_images_for_email_html(final_body),
     }
 
 
 def build_final_reply_body(db: Session, reply_draft: ReplyDraft) -> str:
     return build_reply_send_payload(db, reply_draft)["final_body"]
+
+
+def _resolve_reply_mailbox(db: Session, thread, run) -> str | None:
+    """A reply must go out from the same mailbox as the original outbound send (B-071 stage B):
+    the original draft's send_queue mailbox_email when known, else the run's persona primary
+    mailbox. None when neither resolves — send_email_via_provider then falls back to the global
+    mailbox (Alexey), same as before this stage."""
+    if thread.draft_id:
+        item = get_send_queue_item_by_draft(db, thread.draft_id)
+        if item and (item.mailbox_email or "").strip():
+            return item.mailbox_email.strip()
+    persona = get_run_persona(db, run)
+    mailbox = (getattr(persona, "primary_mailbox_email", None) or "").strip()
+    return mailbox or None
 
 
 def send_one_reply_draft(db: Session, draft_id: int) -> dict:
@@ -207,11 +231,15 @@ def send_one_reply_draft(db: Session, draft_id: int) -> dict:
             data, fn, mt = materialize_attachment(meta)
             attachment_payloads.append({"filename": fn, "content": data, "mime_type": mt})
 
+        run = get_run(db, draft.run_id)
         result = send_email_via_provider(
             to_email=(draft.to_email or "").strip(),
             subject=draft.subject,
             body=final_body,
             attachments=attachment_payloads if attachment_payloads else None,
+            db=db,
+            mailbox_email=_resolve_reply_mailbox(db, thread, run),
+            inline_images=payload.get("inline_images"),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(
@@ -330,6 +358,14 @@ def send_one_reply_draft(db: Session, draft_id: int) -> dict:
             draft.id,
         )
 
+    if (result.get("provider") or "").strip().lower() == "gmail":
+        try:
+            mark_history_detected_after_outbound_send(db, draft.run_id, draft.to_email)
+        except Exception:
+            logger.exception(
+                "post-send: mark_history_detected_after_outbound_send (reply_draft_id=%s)",
+                draft.id,
+            )
 
     return {
         "reply_draft_id": draft.id,

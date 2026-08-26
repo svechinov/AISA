@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import SendQueuePanel from "@/components/SendQueuePanel";
 import { EmailDraftBodyPreview } from "@/components/EmailDraftBodyPreview";
 import { EmailDraftRichTextEditor } from "@/components/EmailDraftRichTextEditor";
 import {
@@ -57,21 +58,14 @@ import {
   sortThreadPanelLiteRows,
 } from "@/lib/runPanelLite";
 import { fetchAllPagedItems } from "@/lib/paginatedApi";
-import { formatDateTimeYmdHms, formatDateYmd } from "@/lib/formatDate";
+import { fmtInTz, fmtDateInTz } from "@/lib/timeTz";
 import { t } from "@/lib/i18n";
+import { API_BASE } from "@/lib/apiBase";
 
 /** Match backend `looks_like_html_fragment`: render as HTML when sanitizer applies. */
 function threadMessageBodyLooksLikeHtml(s) {
   return /<\s*[a-zA-Z!/]/.test(String(s ?? "").trim());
 }
-
-const ENV_API = import.meta.env.VITE_API_BASE?.trim();
-const API_BASE =
-  ENV_API && ENV_API.length > 0
-    ? ENV_API.replace(/\/$/, "")
-    : import.meta.env.DEV
-      ? "/api"
-      : "http://127.0.0.1:8000";
 
 /** Background refresh while Tracking is mounted — gentler than 3s to avoid piling up with Human UI polls. */
 const TRACKING_POLL_MS_ACTIVE = 10_000;
@@ -165,14 +159,14 @@ function trackingAbdSnapMode(snap) {
 function TrackingCardsPlaceholder({ mode, kind }) {
   if (mode === "empty") {
     return (
-      <div className="rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
+      <div className="rounded-lg border border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground">
         {t("No")} {kind} {t("data for this run.")}
       </div>
     );
   }
   return (
     <div
-      className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
+      className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-muted-foreground/25 py-14 text-center text-sm text-muted-foreground"
       role="status"
       aria-live="polite"
     >
@@ -193,10 +187,10 @@ function ThreadCardFromLite({ row }) {
     <div
       className={
         isThreadDeadMailbox
-          ? "flex flex-col gap-3 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
+          ? "flex flex-col gap-3 rounded-lg border border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
           : isThreadBounced
-            ? "flex flex-col gap-3 rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-5 dark:border-amber-600/40 dark:bg-amber-950/25 sm:flex-row sm:items-center sm:justify-between"
-            : "flex flex-col gap-3 rounded-2xl border-2 border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+            ? "flex flex-col gap-3 rounded-lg border border-amber-600/45 bg-amber-950/15 p-5 dark:border-amber-600/40 dark:bg-amber-950/25 sm:flex-row sm:items-center sm:justify-between"
+            : "flex flex-col gap-3 rounded-lg border border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
       }
     >
       <div>
@@ -231,7 +225,7 @@ function ThreadCardFromLite({ row }) {
             <Badge
               variant="outline"
               className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
-              title={`${t("Reminder")}: ${formatDateTimeYmdHms(row.remind_at)}`}
+              title={`${t("Reminder")}: ${fmtInTz(row.remind_at)}`}
             >
               <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
               {t("Remind later")}
@@ -266,7 +260,7 @@ function ThreadCardFromLite({ row }) {
             {t("Out")} {row.msg_out} · {t("In")} {row.msg_in}
           </span>
           {row.last_message_at ? (
-            <span>{t("Last")}: {formatDateYmd(row.last_message_at)}</span>
+            <span>{t("Last")}: {fmtDateInTz(row.last_message_at)}</span>
           ) : null}
         </div>
       </div>
@@ -711,21 +705,14 @@ export default function TrackingView({
   }, [threadModalId]);
 
   const eventTone = (type) => {
-    if (type === "sent")
-      return "border-2 border-green-200 bg-green-100 text-green-700 dark:border-green-800 dark:bg-green-950/40 dark:text-green-200";
-    if (type === "queued")
-      return "border-2 border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-600 dark:bg-slate-900/50 dark:text-slate-200";
-    if (type === "replied")
-      return "border-2 border-blue-200 bg-blue-100 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-200";
-    if (type === "bounced")
-      return "border-2 border-yellow-200 bg-yellow-100 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/40 dark:text-yellow-100";
-    if (type === "dead_mailbox")
-      return "border-2 border-red-700/50 bg-red-950/10 text-red-600 dark:border-red-700/40 dark:bg-red-950/20 dark:text-red-400";
-    if (type === "failed")
-      return "border-2 border-red-200 bg-red-100 text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200";
-    if (type === "reply_sent")
-      return "border-2 border-teal-200 bg-teal-100 text-teal-800 dark:border-teal-700 dark:bg-teal-950/40 dark:text-teal-200";
-    return "border-2 border-border bg-muted text-muted-foreground";
+    if (type === "sent") return "border border-success/30 bg-success-soft text-success";
+    if (type === "queued") return "border border-neutral/30 bg-neutral-soft text-neutral";
+    if (type === "replied") return "border border-info/30 bg-info-soft text-info";
+    if (type === "bounced") return "border border-warning/30 bg-warning-soft text-warning";
+    if (type === "dead_mailbox") return "border border-danger/40 bg-danger-soft text-danger";
+    if (type === "failed") return "border border-danger/30 bg-danger-soft text-danger";
+    if (type === "reply_sent") return "border border-info/30 bg-info-soft text-info";
+    return "border border-border bg-muted text-muted-foreground";
   };
 
   const eventIcon = (type) => {
@@ -1753,6 +1740,7 @@ export default function TrackingView({
 
   return (
     <div className="space-y-6">
+      {!singleTabMode ? <SendQueuePanel /> : null}
       {!singleTabMode ? (
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
@@ -1778,7 +1766,7 @@ export default function TrackingView({
       ) : null}
 
       {error ? (
-        <div className="flex items-start gap-2 rounded-xl border-2 border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
           <p className="min-w-0 flex-1">{error}</p>
           <button
             type="button"
@@ -1793,64 +1781,64 @@ export default function TrackingView({
 
       {!singleTabMode && summary ? (
         <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Sent</div>
               <div className="mt-1 text-2xl font-semibold">{summary.drafts_sent || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Replies</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_replied || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Failed</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_failed || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Bounced</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_bounced || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Dead mailboxes</div>
               <div className="mt-1 text-2xl font-semibold">{summary.events_dead_mailbox || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Replacement tasks</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_email_tasks_open || 0}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reply rate</div>
               <div className="mt-1 text-2xl font-semibold">{replyRate}%</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">Replies / sent</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">{t("Repl. drafts")}</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_drafts_generated ?? 0}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">{t("By replacement contacts")}</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Repl. sent</div>
               <div className="mt-1 text-2xl font-semibold">{summary.replacement_drafts_sent ?? 0}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">Replacement drafts</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Threads</div>
               <div className="mt-1 text-2xl font-semibold">{summary.threads_total ?? 0}</div>
@@ -1859,7 +1847,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Inbox / Out</div>
               <div className="mt-1 text-2xl font-semibold">
@@ -1868,7 +1856,7 @@ export default function TrackingView({
               <div className="mt-0.5 text-[11px] text-muted-foreground">Messages</div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reply drafts</div>
               <div className="mt-1 text-2xl font-semibold">{summary.reply_drafts_generated ?? 0}</div>
@@ -1878,7 +1866,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Reminders</div>
               <div className="mt-1 text-2xl font-semibold">{summary.reminders_total ?? 0}</div>
@@ -1888,7 +1876,7 @@ export default function TrackingView({
               </div>
             </CardContent>
           </Card>
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Asset packets</div>
               <div className="mt-1 text-2xl font-semibold">{summary.asset_packets_draft ?? 0}</div>
@@ -1907,7 +1895,7 @@ export default function TrackingView({
         className="w-full"
       >
         {!singleTabMode ? (
-          <TabsList className="flex h-auto min-h-10 w-full flex-wrap gap-1 rounded-2xl border-2 border-border bg-muted/30 p-1">
+          <TabsList className="flex h-auto min-h-10 w-full flex-wrap gap-1 rounded-lg border border-border bg-muted/30 p-1">
             <TabsTrigger value="events">Events</TabsTrigger>
             <TabsTrigger value="threads">Threads</TabsTrigger>
             <TabsTrigger value="replies">Reply drafts</TabsTrigger>
@@ -1920,7 +1908,7 @@ export default function TrackingView({
         ) : null}
 
         <TabsContent value="events" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Events</CardTitle>
               <CardDescription>
@@ -1940,7 +1928,7 @@ export default function TrackingView({
                   role="tab"
                   aria-selected={eventBucketTab === "active"}
                   className={cn(
-                    "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                    "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                     eventBucketTab === "active"
                       ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
                       : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
@@ -1956,7 +1944,7 @@ export default function TrackingView({
                   role="tab"
                   aria-selected={eventBucketTab === "bounced"}
                   className={cn(
-                    "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                    "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                     eventBucketTab === "bounced"
                       ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
                       : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
@@ -1972,7 +1960,7 @@ export default function TrackingView({
                   role="tab"
                   aria-selected={eventBucketTab === "dead_mailbox"}
                   className={cn(
-                    "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                    "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                     eventBucketTab === "dead_mailbox"
                       ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
                       : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
@@ -1997,10 +1985,10 @@ export default function TrackingView({
                       key={draftId}
                       className={
                         chainEndsDeadMailbox
-                          ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
+                          ? "rounded-lg border border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
                           : chainEndsBounced
-                            ? "rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-4 dark:border-amber-600/40 dark:bg-amber-950/25"
-                            : "rounded-2xl border-2 border-border bg-muted/25 p-4"
+                            ? "rounded-lg border border-amber-600/45 bg-amber-950/15 p-4 dark:border-amber-600/40 dark:bg-amber-950/25"
+                            : "rounded-lg border border-border bg-muted/25 p-4"
                       }
                     >
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -2062,7 +2050,7 @@ export default function TrackingView({
                           {draftEvents.map((event, index) => (
                             <div key={event.id}>
                               <div
-                                className={`flex items-center justify-between gap-3 rounded-2xl border-2 p-3 ${
+                                className={`flex items-center justify-between gap-3 rounded-lg border p-3 ${
                                   chainEndsDeadMailbox
                                     ? "border-red-700/35 bg-red-950/15 dark:border-red-700/30 dark:bg-red-950/25"
                                     : chainEndsBounced
@@ -2071,7 +2059,7 @@ export default function TrackingView({
                                 }`}
                               >
                                 <div className="flex items-center gap-3">
-                                  <div className={`rounded-xl p-2 ${eventTone(event.event_type)}`}>
+                                  <div className={`rounded-md p-2 ${eventTone(event.event_type)}`}>
                                     {eventIcon(event.event_type)}
                                   </div>
                                   <div>
@@ -2081,7 +2069,7 @@ export default function TrackingView({
                                     <div className="text-xs text-muted-foreground">Event #{event.id}</div>
                                   </div>
                                 </div>
-                                <Badge variant="secondary">{formatDateYmd(event.created_at)}</Badge>
+                                <Badge variant="secondary">{fmtDateInTz(event.created_at)}</Badge>
                               </div>
                               {index < draftEvents.length - 1 ? <Separator className="my-2" /> : null}
                             </div>
@@ -2113,10 +2101,10 @@ export default function TrackingView({
                       key={g.draftId}
                       className={
                         g.chainEndsDeadMailbox
-                          ? "rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
+                          ? "rounded-lg border border-red-700/50 bg-red-950/10 p-4 dark:border-red-700/40 dark:bg-red-950/20"
                           : g.chainEndsBounced
-                            ? "rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-4 dark:border-amber-600/40 dark:bg-amber-950/25"
-                            : "rounded-2xl border-2 border-border bg-muted/25 p-4"
+                            ? "rounded-lg border border-amber-600/45 bg-amber-950/15 p-4 dark:border-amber-600/40 dark:bg-amber-950/25"
+                            : "rounded-lg border border-border bg-muted/25 p-4"
                       }
                     >
                       <div className="flex flex-wrap items-center gap-2">
@@ -2158,7 +2146,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="threads" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Threads</CardTitle>
               <CardDescription>
@@ -2179,7 +2167,7 @@ export default function TrackingView({
                 role="tab"
                 aria-selected={threadBucketTab === "active"}
                 className={cn(
-                  "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                  "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                   threadBucketTab === "active"
                     ? "border-green-500 bg-green-600 text-white hover:bg-green-600 dark:border-green-400 dark:bg-green-600 dark:hover:bg-green-600"
                     : "border-green-600/50 bg-green-600/15 text-green-900 hover:bg-green-600/25 dark:border-green-600/45 dark:bg-green-950/40 dark:text-green-100 dark:hover:bg-green-950/55",
@@ -2195,7 +2183,7 @@ export default function TrackingView({
                 role="tab"
                 aria-selected={threadBucketTab === "bounced"}
                 className={cn(
-                  "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                  "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                   threadBucketTab === "bounced"
                     ? "border-amber-500 bg-amber-600 text-white hover:bg-amber-600 dark:border-amber-400 dark:bg-amber-600 dark:hover:bg-amber-600"
                     : "border-amber-600/50 bg-amber-600/15 text-amber-950 hover:bg-amber-600/25 dark:border-amber-500/45 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/55",
@@ -2211,7 +2199,7 @@ export default function TrackingView({
                 role="tab"
                 aria-selected={threadBucketTab === "dead_mailbox"}
                 className={cn(
-                  "h-8 shrink-0 rounded-lg border-2 px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
+                  "h-8 shrink-0 rounded-lg border px-2.5 text-xs font-semibold sm:h-9 sm:px-3 sm:text-sm",
                   threadBucketTab === "dead_mailbox"
                     ? "border-red-500 bg-red-600 text-white hover:bg-red-600 dark:border-red-400 dark:bg-red-600 dark:hover:bg-red-600"
                     : "border-red-700/50 bg-red-950/20 text-red-900 hover:bg-red-950/30 dark:border-red-700/45 dark:bg-red-950/35 dark:text-red-100 dark:hover:bg-red-950/50",
@@ -2246,10 +2234,10 @@ export default function TrackingView({
                   key={t.id}
                   className={
                     isThreadDeadMailbox
-                      ? "flex flex-col gap-3 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
+                      ? "flex flex-col gap-3 rounded-lg border border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 sm:flex-row sm:items-center sm:justify-between"
                       : isThreadBounced
-                        ? "flex flex-col gap-3 rounded-2xl border-2 border-amber-600/45 bg-amber-950/15 p-5 dark:border-amber-600/40 dark:bg-amber-950/25 sm:flex-row sm:items-center sm:justify-between"
-                        : "flex flex-col gap-3 rounded-2xl border-2 border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
+                        ? "flex flex-col gap-3 rounded-lg border border-amber-600/45 bg-amber-950/15 p-5 dark:border-amber-600/40 dark:bg-amber-950/25 sm:flex-row sm:items-center sm:justify-between"
+                        : "flex flex-col gap-3 rounded-lg border border-border bg-muted/30 p-5 sm:flex-row sm:items-center sm:justify-between"
                   }
                 >
                     <div>
@@ -2293,7 +2281,7 @@ export default function TrackingView({
                           <Badge
                             variant="outline"
                             className="gap-1 border-amber-600/60 bg-amber-500/15 font-normal text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100"
-                            title={`Reminder: ${formatDateTimeYmdHms(threadRemind.remind_at)}`}
+                            title={`Reminder: ${fmtInTz(threadRemind.remind_at)}`}
                           >
                             <Clock className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden />
                             Remind later
@@ -2331,7 +2319,7 @@ export default function TrackingView({
                           Out {counts.out} · In {counts.in}
                         </span>
                         {t.last_message_at ? (
-                          <span>Last: {formatDateYmd(t.last_message_at)}</span>
+                          <span>Last: {fmtDateInTz(t.last_message_at)}</span>
                         ) : null}
                       </div>
                     </div>
@@ -2438,7 +2426,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="replies" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Reply drafts</CardTitle>
               <CardDescription>
@@ -2460,7 +2448,7 @@ export default function TrackingView({
               const showPreviewBlock = Boolean(replyPreviewExpanded[rd.id] && hasPreviewData);
               const canRegenReply = ["draft", "failed"].includes(rd.status);
               return (
-                <div key={rd.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
+                <div key={rd.id} className="space-y-3 rounded-lg border border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0 flex-1">
                         <div className="font-medium">{c?.company || `Contact #${rd.contact_id}`}</div>
@@ -2594,9 +2582,9 @@ export default function TrackingView({
                       </div>
                     </div>
                     {showPreviewBlock ? (
-                      <div className="space-y-2 rounded-xl border-2 border-border bg-muted/20 p-3 text-xs">
+                      <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3 text-xs">
                         {pv.will_lock_packet ? (
-                          <div className="rounded-md border-2 border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-900 dark:text-amber-100">
+                          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-900 dark:text-amber-100">
                             This packet will be locked after successful send.
                           </div>
                         ) : null}
@@ -2698,7 +2686,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="reminders" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <div>
                 <CardTitle>Reminders</CardTitle>
@@ -2716,7 +2704,7 @@ export default function TrackingView({
               const isOverdue =
                 canAct && (r.status === "scheduled" || r.status === "snoozed") && remindDate < new Date();
               return (
-                <div key={r.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
+                <div key={r.id} className="space-y-3 rounded-lg border border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{r.title}</div>
@@ -2731,7 +2719,7 @@ export default function TrackingView({
                           <Badge variant="outline">{r.status}</Badge>
                           <Badge variant="secondary">{r.priority}</Badge>
                           <span className="text-xs text-muted-foreground">
-                            Remind: {formatDateTimeYmdHms(r.remind_at)}
+                            Remind: {fmtInTz(r.remind_at)}
                           </span>
                           {isOverdue ? (
                             <Badge variant="destructive" className="font-normal">
@@ -2792,7 +2780,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="assets-library" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Assets</CardTitle>
               <CardDescription>
@@ -2801,7 +2789,7 @@ export default function TrackingView({
             </CardHeader>
             <CardContent className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <div className="rounded-2xl border-2 border-border bg-muted/25 p-4">
+              <div className="rounded-lg border border-border bg-muted/25 p-4">
                 <div className="mb-3 text-sm font-medium">Add link</div>
                 <p className="mb-3 text-xs text-muted-foreground">
                   Register a public URL (deck on Google Drive, Notion, etc.).
@@ -2837,7 +2825,7 @@ export default function TrackingView({
                 </div>
               </div>
 
-              <div className="rounded-2xl border-2 border-border bg-muted/25 p-4">
+              <div className="rounded-lg border border-border bg-muted/25 p-4">
                 <div className="mb-3 text-sm font-medium">Add file</div>
                 {cdnR2UploadReady ? (
                   <p className="mb-3 text-xs text-muted-foreground">
@@ -2918,7 +2906,7 @@ export default function TrackingView({
             </div>
           <div className="grid gap-3">
             {assets.map((a) => (
-              <div key={a.id} className="rounded-2xl border-2 border-border bg-muted/30 p-5">
+              <div key={a.id} className="rounded-lg border border-border bg-muted/30 p-5">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="outline">{a.asset_type}</Badge>
                     <Badge variant="secondary">{a.status}</Badge>
@@ -2956,7 +2944,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="asset-packets" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Packets</CardTitle>
               <CardDescription>
@@ -2976,7 +2964,7 @@ export default function TrackingView({
                   })),
                 ];
                 return (
-                  <div className="space-y-3 rounded-2xl border-2 border-dashed border-border bg-muted/15 p-4">
+                  <div className="space-y-3 rounded-lg border border-dashed border-border bg-muted/15 p-4">
                     <div className="font-medium">New packet</div>
                     <p className="text-xs text-muted-foreground">
                       Title required. Assets are optional; you can edit after creation.
@@ -3069,7 +3057,7 @@ export default function TrackingView({
                   })),
                 ];
                 return (
-                  <div key={p.id} className="space-y-3 rounded-2xl border-2 border-border bg-muted/30 p-5">
+                  <div key={p.id} className="space-y-3 rounded-lg border border-border bg-muted/30 p-5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="font-medium">{p.title}</div>
@@ -3148,7 +3136,7 @@ export default function TrackingView({
                       ) : null}
                     </div>
                     {isEditingPacket ? (
-                      <div className="rounded-xl border-2 border-indigo-500/30 bg-muted/20 p-3">
+                      <div className="rounded-md border border-indigo-500/30 bg-muted/20 p-3">
                         <div className="mb-3 grid gap-2">
                           <div className="text-xs font-medium text-muted-foreground">Title</div>
                           <Input
@@ -3176,7 +3164,7 @@ export default function TrackingView({
                           {packetEditState.draftAssets.map((item, idx) => (
                             <li
                               key={`${item.asset_id ?? "row"}-${idx}`}
-                              className="flex flex-col gap-2 rounded-lg border-2 border-border/60 bg-background/80 p-2 sm:flex-row sm:items-center sm:justify-between"
+                              className="flex flex-col gap-2 rounded-lg border border-border/60 bg-background/80 p-2 sm:flex-row sm:items-center sm:justify-between"
                             >
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
@@ -3288,7 +3276,7 @@ export default function TrackingView({
                         ) : null}
                       </div>
                     ) : inner.length ? (
-                      <div className="rounded-xl border-2 border-border/80 bg-muted/30 p-3">
+                      <div className="rounded-md border border-border/80 bg-muted/30 p-3">
                         <div className="mb-2 text-xs font-medium text-muted-foreground">Contents</div>
                         <ul className="space-y-2 text-sm">
                           {inner.map((item, idx) => (
@@ -3339,7 +3327,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="dead" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Dead mailboxes</CardTitle>
               <CardDescription>
@@ -3355,7 +3343,7 @@ export default function TrackingView({
               return (
                 <div
                   key={contact.id}
-                  className="flex flex-col gap-4 rounded-2xl border-2 border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 lg:flex-row lg:items-center lg:justify-between"
+                  className="flex flex-col gap-4 rounded-lg border border-red-700/50 bg-red-950/10 p-5 dark:border-red-700/40 dark:bg-red-950/20 lg:flex-row lg:items-center lg:justify-between"
                 >
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -3401,7 +3389,7 @@ export default function TrackingView({
         </TabsContent>
 
         <TabsContent value="queue" className="mt-4">
-          <Card className="rounded-2xl border-2 border-border bg-card shadow-none">
+          <Card className="rounded-lg border border-border bg-card shadow-none">
             <CardHeader>
               <CardTitle>Re-search queue</CardTitle>
               <CardDescription>
@@ -3412,7 +3400,7 @@ export default function TrackingView({
             {replacementQueueTasks.map((task) => (
               <div
                 key={task.id}
-                className="flex flex-col gap-4 rounded-2xl border-2 border-border bg-muted/30 p-5 lg:flex-row lg:items-center lg:justify-between"
+                className="flex flex-col gap-4 rounded-lg border border-border bg-muted/30 p-5 lg:flex-row lg:items-center lg:justify-between"
               >
                   <div>
                     <div className="font-medium">{task.company || "Unknown company"}</div>
@@ -3453,7 +3441,7 @@ export default function TrackingView({
             aria-label="Close"
             onClick={() => setReplyEditing(null)}
           />
-          <div className="relative z-50 w-full max-w-2xl rounded-xl border-2 border-border bg-card p-6 shadow-lg">
+          <div className="relative z-50 w-full max-w-2xl rounded-md border border-border bg-card p-6 shadow-lg">
             <h2 className="text-lg font-semibold">Edit reply draft</h2>
             <div className="mt-4 grid gap-3">
               <Input
@@ -3497,7 +3485,7 @@ export default function TrackingView({
             aria-label="Close"
             onClick={() => setThreadModalId(null)}
           />
-          <div className="relative z-50 flex max-h-[85vh] w-full max-w-5xl flex-col gap-4 rounded-2xl border-2 border-border bg-card p-5 shadow-lg">
+          <div className="relative z-50 flex max-h-[85vh] w-full max-w-5xl flex-col gap-4 rounded-lg border border-border bg-card p-5 shadow-lg">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <h3 className="text-lg font-semibold">Thread #{threadModalId}</h3>
@@ -3536,7 +3524,7 @@ export default function TrackingView({
                         variant="outline"
                         disabled={threadDeliveryLlmBusy}
                         title="Re-analyze thread with LLM (bounce vs dead mailbox vs none)"
-                        className="h-8 w-8 border-2 border-green-700/80 bg-green-600 text-white hover:bg-green-700 hover:text-white dark:border-green-500 dark:bg-green-600 dark:hover:bg-green-700"
+                        className="h-8 w-8 border border-green-700/80 bg-green-600 text-white hover:bg-green-700 hover:text-white dark:border-green-500 dark:bg-green-600 dark:hover:bg-green-700"
                         aria-label="Analyze delivery with LLM"
                         onClick={() => void analyzeThreadDeliveryWithLlm()}
                       >
@@ -3558,7 +3546,7 @@ export default function TrackingView({
                               ? "Already bounced"
                               : "Mark thread as Bounced (irreversible)"
                         }
-                        className="h-8 w-8 border-2 border-amber-600/80 bg-amber-500 text-white hover:bg-amber-600 hover:text-white dark:border-amber-500 dark:bg-amber-600 dark:hover:bg-amber-700"
+                        className="h-8 w-8 border border-amber-600/80 bg-amber-500 text-white hover:bg-amber-600 hover:text-white dark:border-amber-500 dark:bg-amber-600 dark:hover:bg-amber-700"
                         aria-label="Mark as bounced"
                         onClick={() => setThreadManualMarkConfirm("bounced")}
                       >
@@ -3576,7 +3564,7 @@ export default function TrackingView({
                               ? "Already dead mailbox"
                               : "Mark thread as Dead mailbox (irreversible)"
                         }
-                        className="h-8 w-8 border-2 border-red-700/80 bg-red-600 text-white hover:bg-red-700 hover:text-white dark:border-red-600 dark:bg-red-700 dark:hover:bg-red-800"
+                        className="h-8 w-8 border border-red-700/80 bg-red-600 text-white hover:bg-red-700 hover:text-white dark:border-red-600 dark:bg-red-700 dark:hover:bg-red-800"
                         aria-label="Mark as dead mailbox"
                         onClick={() => setThreadManualMarkConfirm("dead_mailbox")}
                       >
@@ -3643,7 +3631,7 @@ export default function TrackingView({
                             size="sm"
                             disabled={fixDisabled}
                             title={fixTitle}
-                            className="border-2 border-green-800/60 bg-green-700 text-white hover:bg-green-800 hover:text-white dark:border-green-600 dark:bg-green-700 dark:hover:bg-green-800"
+                            className="border border-green-800/60 bg-green-700 text-white hover:bg-green-800 hover:text-white dark:border-green-600 dark:bg-green-700 dark:hover:bg-green-800"
                             onClick={() => {
                               if (fixDisabled) return;
                               setThreadDeliveryLlmResult(null);
@@ -3686,7 +3674,7 @@ export default function TrackingView({
                   {activeForThread ? (
                     <div className="space-y-2">
                       <p className="text-sm text-muted-foreground">
-                        Active: {formatDateTimeYmdHms(activeForThread.remind_at)} —{" "}
+                        Active: {fmtInTz(activeForThread.remind_at)} —{" "}
                         <span className="font-medium text-foreground">{activeForThread.status}</span>
                       </p>
                       <div className="flex flex-wrap gap-2">
@@ -3741,7 +3729,7 @@ export default function TrackingView({
                   return (
                   <div
                     key={m.id}
-                    className={`max-w-[95%] rounded-2xl border-2 p-3 text-sm ${
+                    className={`max-w-[95%] rounded-lg border p-3 text-sm ${
                       m.direction === "outbound"
                         ? "ml-auto border-primary/30 bg-primary/5"
                         : "mr-auto border-muted-foreground/25 bg-muted/40"
@@ -3749,7 +3737,7 @@ export default function TrackingView({
                   >
                     <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <Badge variant="outline">{m.direction}</Badge>
-                      <span>{formatDateTimeYmdHms(m.created_at)}</span>
+                      <span>{fmtInTz(m.created_at)}</span>
                     </div>
                     <div className="font-medium">{m.subject}</div>
                     <div className="mt-1 text-xs text-muted-foreground">
@@ -3793,7 +3781,7 @@ export default function TrackingView({
               if (!threadMarkBusy) setThreadManualMarkConfirm(null);
             }}
           />
-          <div className="relative z-[61] w-full max-w-md rounded-2xl border-2 border-border bg-card p-6 shadow-lg">
+          <div className="relative z-[61] w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-lg">
             <h4 className="text-base font-semibold">
               {threadManualMarkConfirm === "bounced" ? "Mark as Bounced?" : "Mark as Dead mailbox?"}
             </h4>

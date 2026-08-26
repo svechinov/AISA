@@ -20,7 +20,7 @@ export function RunSetupHourlySendsChart({ counts }) {
   const total = arr.reduce((a, b) => a + b, 0);
 
   return (
-    <div className="w-full rounded-2xl border-2 border-border bg-card px-3 py-2 shadow-none">
+    <div className="w-full rounded-lg border border-border bg-card px-3 py-2 shadow-none">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
         <span className="text-sm font-medium leading-tight text-foreground">{t("Sends — last 24 hours")}</span>
         <span className="text-[11px] text-muted-foreground">

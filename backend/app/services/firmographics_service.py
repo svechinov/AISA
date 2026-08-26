@@ -1,6 +1,6 @@
 """Firmographics providers (Phase 6): resolve a company's employee_count / OKVED / INN to drive
 the deterministic ICP size-filter. Priority-ordered fallback like llm_gateway; each provider is
-config-gated like apollo_configured(). A provider returns a normalized dict or None (not configured
+config-gated like llm_gateway. A provider returns a normalized dict or None (not configured
 OR no result); exceptions are swallowed so enrichment never breaks.
 
 Normalized return shape:

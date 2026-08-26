@@ -160,6 +160,14 @@ const ru = {
   "Searching via Tavily + LLM...": "Ищем через Tavily + LLM...",
   "Found contacts": "Найдены контакты",
   "No contacts found": "Контакты не найдены",
+
+  "OSINT Sources": "Источники OSINT",
+
+  // Manual Contact Add Modal
+  "Add Contact (Manual)": "Добавить контакт вручную",
+  "Manually enter contact details to be added to the run's contact list.": "Введите данные контакта вручную, чтобы добавить его в список контактов кампании.",
+  "Name": "Имя",
+  "Role": "Должность",
 };
 
 export function t(key, lang = "ru") {

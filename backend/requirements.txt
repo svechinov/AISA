@@ -19,3 +19,4 @@ duckduckgo-search
 litellm
 tenacity
 headroom-ai
+cryptography

@@ -320,7 +320,8 @@ def add_manual_contact_route(
         email=payload.email.strip() if payload.email else None,
         linkedin=payload.linkedin.strip() if payload.linkedin else None,
         status="valid",
-        review_status="pending"
+        review_status="pending",
+        source_json={"source": "manual"},
     )
     
     return contact_read_with_ai_fit(db, c)

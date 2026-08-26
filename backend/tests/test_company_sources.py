@@ -32,7 +32,7 @@ class _FakeTavily:
 def test_extract_url_parses_companies(db, cleanup, monkeypatch):
     monkeypatch.setattr(cse, "get_tavily_client",
                         lambda: _FakeTavily(extract_text="1. Альфа 2. Бета"))
-    monkeypatch.setattr(cse, "complete_prompt_json_object", lambda p: {"companies": [
+    monkeypatch.setattr(cse, "complete_prompt_json_object", lambda p, task_kind=None: {"companies": [
         {"name": "Альфа", "website": "alfa.test", "note": "топ-1"},
         {"name": "Бета", "website": "", "note": ""},
         {"name": "", "website": "skip.test"},  # no name -> dropped
@@ -64,7 +64,7 @@ def test_tenders_extract_buyers(db, cleanup, monkeypatch):
     monkeypatch.setattr(ss, "search_web", lambda q, **k: [
         {"title": "Закупка", "url": "https://zakupki.gov.ru/x", "snippet": "Заказчик: ПАО Гамма, тренинг продаж"},
     ])
-    monkeypatch.setattr(cse, "complete_prompt_json_object", lambda p: {"companies": [
+    monkeypatch.setattr(cse, "complete_prompt_json_object", lambda p, task_kind=None: {"companies": [
         {"name": "ПАО Гамма", "website": "", "note": "закупает тренинг продаж"},
     ]})
     data = cse.extract_companies_from_tenders("тренинг продаж")

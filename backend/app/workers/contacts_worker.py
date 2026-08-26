@@ -67,10 +67,25 @@ def find_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict
     rules = get_effective_rules_from_run(db, run_id, "find_contacts")
     task = build_find_contacts_task(run)
 
-    # With APOLLO_API_KEY set, find_contacts uses Apollo only — never LLM for this step.
+    # --- Apollo-first contact discovery (opt-in via APOLLO_API_KEY) ---
+    # Apollo returns decision-maker names + verified work emails directly.
+    #
+    # B-274: with Apollo configured, EMPTY MEANS EMPTY — never fall through to LLM extraction. The
+    # LLM does not "find" contacts, it writes plausible ones: a name invented from the domain plus
+    # a guessed address, which then passes verification on a catch-all domain and reaches a letter
+    # as a real decision-maker. Apollo's own second pass over wider titles (B-274, apollo_service)
+    # is the answer to "the run's titles found nobody", not a generative fallback. The LLM path
+    # below stays only for runs with no Apollo key at all.
     if apollo_configured():
-        apollo_out = try_find_contacts_via_apollo(db, run_id, run, step_input)
-        return apollo_out if apollo_out is not None else {"contacts": []}
+        try:
+            apollo_out = try_find_contacts_via_apollo(db, run_id, run, step_input)
+        except Exception:
+            logger.exception("Apollo contact discovery failed — returning no contacts (LLM not used)")
+            return {"contacts": []}
+        if not (apollo_out and apollo_out.get("contacts")):
+            logger.info("Apollo returned no contacts — returning empty (LLM extraction not used, B-274)")
+            return {"contacts": []}
+        return apollo_out
 
     companies = step_input.get("companies") if isinstance(step_input, dict) else None
     if not isinstance(companies, list):
@@ -98,7 +113,16 @@ def find_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict
         },
     )
 
-    return generate_json(prompt)
+    out = generate_json(prompt)
+    # B-445/decision 11.08: this branch only runs with no Apollo key at all (B-274) — the LLM
+    # invents plausible contacts from the company list rather than finding them in a search
+    # corpus. Tag so it can never be mistaken for a grounded source (apollo/osint) downstream.
+    contacts_out = out.get("contacts") if isinstance(out, dict) else None
+    if isinstance(contacts_out, list):
+        for c in contacts_out:
+            if isinstance(c, dict) and "source" not in c:
+                c["source"] = "llm_generated"
+    return out
 
 
 def validate_contacts(db: Session, run_id: int, workflow_name: str, step_input: dict) -> dict:

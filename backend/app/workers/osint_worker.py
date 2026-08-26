@@ -28,6 +28,24 @@ def _osint_company_limit() -> int | None:
     except ValueError:
         return None
 
+
+def _vacancy_radar_enabled() -> bool:
+    """Vacancy radar is on by default (it is the recruiting trigger); VACANCY_RADAR_ENABLED=0 disables."""
+    raw = os.environ.get("VACANCY_RADAR_ENABLED", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _vacancy_radar_company_limit() -> int | None:
+    """Optional per-call cap, mirrors OSINT_MAX_COMPANIES. Env: VACANCY_RADAR_MAX_COMPANIES=N."""
+    raw = os.environ.get("VACANCY_RADAR_MAX_COMPANIES", "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+        return n if n > 0 else None
+    except ValueError:
+        return None
+
 def _apply_icp_size_filter(db: Session, run, companies: list) -> None:
     """Resolve firmographics for each not-yet-judged company and reject those outside the Run's
     ICP band/criteria (employee count + icp_criteria_json). Stores firmographics in the KV and a
@@ -97,8 +115,14 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
     companies = db.query(RunCompany).filter(RunCompany.run_id == run_id).all()
     contacts = db.query(Contact).filter(Contact.run_id == run_id).all()
 
+    run_language = "English"
+    if run.run_setup and (run.run_setup.language or "").strip():
+        run_language = run.run_setup.language.strip()
+
     companies_processed = 0
     emails_found = 0
+    vacancy_companies_processed = 0
+    vacancy_companies_with_signals = 0
     company_limit = _osint_company_limit()
     if company_limit is not None:
         logger.info(f"OSINT company limit active: at most {company_limit} companies this call")
@@ -150,14 +174,49 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                     persist_run_company_extra(db, company, kv)
                     companies_processed += 1
 
+        # Vacancy radar (v1): "they are hiring right now" is the highest-value hook for a
+        # recruiting campaign. Runs inside the ICP gate (rejected companies cost nothing),
+        # only for companies without a stored signal; None results are not persisted so
+        # they retry next run (same rule as the dossier above).
+        if (
+            _vacancy_radar_enabled()
+            and not kv.get("vacancy_signals")
+            and (company.name or "").strip()
+        ):
+            vr_limit = _vacancy_radar_company_limit()
+            if vr_limit is None or vacancy_companies_processed < vr_limit:
+                from app.services.vacancy_radar import collect_vacancy_signals
+
+                signals = collect_vacancy_signals(company.name, company.website)
+                vacancy_companies_processed += 1
+                if signals:
+                    kv["vacancy_signals"] = signals
+                    persist_run_company_extra(db, company, kv)
+                    vacancy_companies_with_signals += 1
+                    logger.info(
+                        f"Vacancy radar: {company.name} is hiring — {signals.get('summary', '')}"
+                    )
+
+    # Radar used to go silent when it found nothing — a "0 signals across the whole run" run
+    # looked identical to "radar didn't run at all" in the logs (B-062 defect). Always log the
+    # outcome, even when the count is zero.
+    if _vacancy_radar_enabled():
+        logger.info(
+            "Vacancy radar summary: %s companies scanned, %s with signals, %s with zero.",
+            vacancy_companies_processed,
+            vacancy_companies_with_signals,
+            vacancy_companies_processed - vacancy_companies_with_signals,
+        )
+
     # 2. Enrich Contacts (missing emails)
-    # Verified-LPR discovery (hardcore: ЕГРЮЛ/dorks + SMTP-verified email) is now the default path.
-    # The unverified Tavily email-guess path runs only when osint_discovery_mode is explicitly
-    # "api_only" (UI "Cloud Safe"). Runs without a run_setup (e.g. the live import) get the
-    # verified path. Either way this loop only touches contacts that lack an email.
-    mode = "hardcore"
-    if run.run_setup and run.run_setup.osint_discovery_mode == "api_only":
-        mode = "api_only"
+    # api_only (search-based email discovery) is the effective default: the hardcore path
+    # (ЕГРЮЛ/dorks + raw SMTP RCPT on port 25) is RU-specific and unusable where outbound
+    # port 25 is blocked — with hardcore as default every email silently came back
+    # "invalid" (audit 2026-06-16 #6). Hardcore is opt-in via osint_discovery_mode.
+    # Either way this loop only touches contacts that lack an email.
+    mode = "api_only"
+    if run.run_setup and run.run_setup.osint_discovery_mode == "hardcore":
+        mode = "hardcore"
 
     for contact in contacts:
         if contact.status == "needs_discovery" or not contact.email:
@@ -174,7 +233,7 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                     # Sourced companies (ratings/tenders) often arrive without a website. Resolve
                     # the official domain via search so discovery+SMTP can proceed; persist it.
                     from app.services.search_service import resolve_company_domain
-                    domain = resolve_company_domain(company_name)
+                    domain = resolve_company_domain(company_name, language=run_language)
                     if domain:
                         contact.website = domain
                         logger.info(f"Resolved domain for {company_name}: {domain}")
@@ -203,6 +262,7 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                         contact.status = "valid"
                         contact.source_json = {
                             **(contact.source_json or {}),
+                            "source": (contact.source_json or {}).get("source", "osint"),
                             "email_verification": "verified",
                         }
                         emails_found += 1
@@ -232,6 +292,8 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                                 # so validate keeps it and the Agent B gate admits this contact.
                                 contact.source_json = {
                                     **contact.source_json,
+                                    "source": contact.source_json.get("source", "osint"),
+                                    "source_url": leader.get("source_url"),
                                     "freshness_score": leader.get('freshness_score', 0),
                                     "email_verification": "verified",
                                 }
@@ -247,6 +309,8 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
                                     email=v_email,
                                     status="valid",
                                     source_json={
+                                        "source": "osint",
+                                        "source_url": leader.get("source_url"),
                                         "freshness_score": leader.get('freshness_score', 0),
                                         "email_verification": "verified",
                                     }
@@ -261,18 +325,31 @@ def enrich_crm_data(db: Session, run_id: int, workflow_name: str, step_input: di
             else:
                 if name and company_name:
                     logger.info(f"Discovering email for {name} at {company_name}")
-                    email = discover_contact_email(company_name, website, name)
-                    if email and "@" in email:
+                    email = discover_contact_email(company_name, website, name, language=run_language)
+                    # The search-based guess grabs the first email in the snippets, which is often a
+                    # personal address (gmail) or an unrelated third party (e.g. a talent agency).
+                    # Accept it only when its domain matches the company's own domain; otherwise the
+                    # contact stays invalid rather than emailing a wrong/personal address.
+                    company_domain = get_domain(website) if website else None
+                    email_domain = email.rsplit("@", 1)[1].lower().strip(". ") if email and "@" in email else None
+                    if email_domain and company_domain and email_domain == company_domain.lower():
                         contact.email = email
                         contact.status = "valid"
                         emails_found += 1
                     else:
-                        contact.status = "invalid" # Could not find
+                        if email_domain:
+                            logger.info(
+                                f"Discarded guessed email for {name}: domain {email_domain} "
+                                f"!= company domain {company_domain}"
+                            )
+                        contact.status = "invalid"  # No email on the company domain
                     
     db.commit()
     
     return {
         "status": "enriched",
         "companies_processed": companies_processed,
-        "emails_found": emails_found
+        "emails_found": emails_found,
+        "vacancy_radar_checked": vacancy_companies_processed,
+        "vacancy_radar_with_signals": vacancy_companies_with_signals,
     }

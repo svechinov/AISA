@@ -15,19 +15,16 @@ from app.services.template_renderer import render_template
 
 DEFAULT_NEED_INFO_SUBJECT = "Re: {{thread_subject}}"
 
+# Neutral fallbacks used only when no reply templates are seeded for the project.
+# Keep them industry-agnostic and unsigned: the campaign persona/signature comes from
+# run_setup (sender_signature_html) and seeded templates, never from hardcoded defaults.
 DEFAULT_NEED_INFO_BODY = """Hi {{name}},
 
 Thanks for your reply.
 
-Here is a bit more information about the project:
-- adult animated series
-- ready for platform discussion
-- additional materials available on request
+Happy to share more details about how we could help {{company}} — I can send a short overview or answer specific questions, whichever is easier.
 
-Happy to send more details if useful.
-
-Best,
-Pavel"""
+What would be most useful for you?"""
 
 DEFAULT_INTERESTED_SUBJECT = "Re: {{thread_subject}}"
 
@@ -35,14 +32,7 @@ DEFAULT_INTERESTED_BODY = """Hi {{name}},
 
 Great to hear from you.
 
-Happy to share more materials and discuss next steps. Let me know what would be most useful:
-- screener
-- deck
-- episode information
-- call
-
-Best,
-Pavel"""
+Happy to discuss next steps — would a short 15-minute call this week work? I can also send more details by email first if you prefer."""
 
 
 def _build_reply_subject_body_for_thread(db: Session, thread) -> tuple[str, str]:

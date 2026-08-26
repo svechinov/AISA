@@ -38,8 +38,9 @@ def catalog(db):
 def _stub(monkeypatch, response):
     calls = {}
 
-    def fake(prompt):
+    def fake(prompt, task_kind=None):
         calls["prompt"] = prompt
+        calls["task_kind"] = task_kind
         if isinstance(response, Exception):
             raise response
         return response

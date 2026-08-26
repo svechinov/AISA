@@ -2,43 +2,94 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Inter (variable, latin+cyrillic) — self-hosted: прод живёт за туннелем/Tailscale, CDN недоступен */
+@font-face {
+  font-family: "InterVariable";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "InterVariable";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
+}
+
+/* Дизайн-токены B-028, вариант A («школа Huly/Linear»):
+   светлая тема — основная; плотный спокойный UI, тонкие границы, индиго-акцент.
+   Статусная палитра (success/warning/danger/info/neutral + *-soft фон) — единственный
+   источник цветов для бейджей/чипов: ad-hoc violet/pink/amber больше не используем. */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 240 10% 99%;
+    --foreground: 222 8% 15%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
+    --card-foreground: 222 8% 15%;
+    --primary: 234 56% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 7% 95%;
+    --secondary-foreground: 222 8% 22%;
+    --muted: 240 7% 95%;
+    --muted-foreground: 222 5% 45%;
+    --accent: 231 50% 94%;
+    --accent-foreground: 233 42% 45%;
+    --destructive: 4 71% 41%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 6% 91%;
+    --input: 240 6% 86%;
+    --ring: 234 56% 60%;
+
+    --success: 150 65% 30%;
+    --success-soft: 146 42% 94%;
+    --warning: 40 100% 30%;
+    --warning-soft: 45 90% 92%;
+    --danger: 4 71% 41%;
+    --danger-soft: 8 76% 96%;
+    --info: 233 42% 51%;
+    --info-soft: 231 62% 96%;
+    --neutral: 222 7% 40%;
+    --neutral-soft: 220 6% 94%;
+
+    --sidebar: 240 8% 96%;
   }
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 6.5%;
-    --card-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --destructive: 0 62.8% 50.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 20%;
-    --input: 217.2 32.6% 20%;
-    --ring: 224.3 76.3% 58%;
+    --background: 228 10% 10%;
+    --foreground: 220 12% 92%;
+    --card: 228 9% 13%;
+    --card-foreground: 220 12% 92%;
+    --primary: 234 60% 70%;
+    --primary-foreground: 232 30% 15%;
+    --secondary: 228 8% 18%;
+    --secondary-foreground: 220 12% 88%;
+    --muted: 228 8% 17%;
+    --muted-foreground: 222 8% 62%;
+    --accent: 232 25% 22%;
+    --accent-foreground: 233 70% 82%;
+    --destructive: 4 65% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 228 8% 21%;
+    --input: 228 8% 25%;
+    --ring: 234 60% 70%;
+
+    --success: 150 50% 55%;
+    --success-soft: 152 35% 14%;
+    --warning: 42 85% 60%;
+    --warning-soft: 42 60% 13%;
+    --danger: 4 75% 64%;
+    --danger-soft: 6 45% 15%;
+    --info: 233 70% 78%;
+    --info-soft: 232 35% 19%;
+    --neutral: 222 8% 68%;
+    --neutral-soft: 228 7% 18%;
+
+    --sidebar: 228 10% 8%;
   }
   body {
     @apply bg-background text-foreground antialiased;
+    font-feature-settings: "calt", "case";
   }
 }
 

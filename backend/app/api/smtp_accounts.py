@@ -19,8 +19,17 @@ class SmtpAccountCreate(BaseModel):
     daily_limit: int = 50
     is_active: bool = True
 
-class SmtpAccountResponse(SmtpAccountCreate):
+# Read schema deliberately has no `password` field: credentials are write-only
+# and must never be returned by the API (they are consumed by generic_smtp_service).
+class SmtpAccountResponse(BaseModel):
     id: int
+    email: str
+    smtp_server: str
+    smtp_port: int
+    imap_server: str
+    imap_port: int
+    daily_limit: int
+    is_active: bool
     sent_today: int
     last_used_at: Optional[datetime.datetime] = None
     reset_at: Optional[datetime.datetime] = None

@@ -1,12 +1,14 @@
 import os
 import requests
 
+VDS_HOST = os.environ.get("VDS_HOST", "<your-server-ip>")
+
 def check_contacts(run_id):
     headers = {
         "Authorization": f"Bearer {os.environ.get('GLOBAL_PASSWORD', '')}"
     }
-    
-    url = f"http://95.163.223.186/api/runs/{run_id}/companies"
+
+    url = f"http://{VDS_HOST}/api/runs/{run_id}/companies"
     r = requests.get(url, headers=headers)
     if r.status_code == 200:
         data = r.json()

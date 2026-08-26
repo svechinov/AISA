@@ -7,9 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models.excluded_company import EXCLUDE_REASON_OFF_SEGMENT
 from app.repositories.project_repo import get_project
 from app.repositories.run_human_ui_repo import get_event_chain_collapsed_map
 from app.repositories.run_repo import (
+    clone_wave_run,
     close_run,
     create_run,
     get_run,
@@ -45,6 +47,8 @@ from app.schemas.run import (
     RetryCompanyFindBody,
     RetryCompanyFindResult,
     RunCardRead,
+    RunCloneWaveBody,
+    RunCloneWaveResult,
     RunEditFormRead,
     RunProjectPatch,
     RunCompaniesRead,
@@ -348,6 +352,11 @@ def analyze_one_company_fit_route(
 
 class SetCompanyFitBody(BaseModel):
     status: str  # "correct" | "incorrect"
+    # B-264: an "incorrect" verdict also bans the company across runs by default. Set False when the
+    # company is off-segment only for THIS campaign.
+    exclude_cross_run: bool = True
+    exclude_reason: str = EXCLUDE_REASON_OFF_SEGMENT
+    exclude_note: str | None = None
 
 
 @router.patch(
@@ -363,11 +372,21 @@ def set_company_fit_route(
     """Reject-queue manual override: set campaign-fit verdict by hand (beats the LLM judge).
 
     The ICP gate in enrich skips "incorrect" companies (no dossier / contact-discovery spend).
+    B-264: "incorrect" also lands the company on the cross-run exclusion registry unless the caller
+    passes ``exclude_cross_run=false`` — the next Apollo sweep will not collect it again.
     """
     if not run_exists(db, run_id):
         raise HTTPException(status_code=404, detail="Run not found")
     try:
-        data = set_run_company_fit_manual(db, run_id, collect_index, payload.status)
+        data = set_run_company_fit_manual(
+            db,
+            run_id,
+            collect_index,
+            payload.status,
+            exclude_cross_run=payload.exclude_cross_run,
+            exclude_reason=payload.exclude_reason,
+            exclude_note=payload.exclude_note,
+        )
     except ValueError as e:
         code = 404 if "not found" in str(e).lower() else 400
         raise HTTPException(status_code=code, detail=str(e)) from e
@@ -607,6 +626,38 @@ def start_run_route(payload: RunStart, db: Session = Depends(get_db)):
     if not r:
         raise HTTPException(status_code=500, detail="Run not found after start")
     return run_read_from_orm(r)
+
+
+@router.post("/{run_id}/clone-wave", response_model=RunCloneWaveResult)
+def clone_wave_run_route(run_id: int, payload: RunCloneWaveBody, db: Session = Depends(get_db)):
+    """B-545: завести ран новой волны штатным путём — копия run_setup + персона исходного рана,
+    без прямого INSERT и без запуска workflow (см. run_repo.clone_wave_run)."""
+    try:
+        run, warnings = clone_wave_run(
+            db,
+            run_id,
+            name=payload.name,
+            persona_id=payload.persona_id,
+            persona_slug=payload.persona_slug,
+            language=payload.language,
+            notes=payload.notes,
+            segment=payload.segment,
+            project_id=payload.project_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    persona = run.persona
+    mailbox = (getattr(persona, "primary_mailbox_email", None) or "").strip() or None
+    return RunCloneWaveResult(
+        id=run.id,
+        name=run.name,
+        status=run.status,
+        persona_slug=getattr(persona, "slug", None),
+        mailbox_email=mailbox,
+        language=run.run_setup.language if run.run_setup else "Russian",
+        warnings=warnings,
+    )
 
 
 @router.post("/{run_id}/continue", response_model=RunRead)

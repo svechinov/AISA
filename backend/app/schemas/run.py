@@ -56,6 +56,9 @@ class AnalyzeCompanyFitResult(BaseModel):
     ai_fit_status: Literal["correct", "incorrect"]
     ai_fit_reason: str
     ai_fit_checked_at: str
+    # B-264: id of the cross-run exclusion-registry row created by a manual "incorrect" verdict
+    # (None for "correct", for the LLM judge, and when the caller opted out of cross-run exclusion).
+    excluded_company_id: int | None = None
 
 
 class AnalyzeFitPendingBody(BaseModel):
@@ -293,6 +296,30 @@ class RunProjectPatch(BaseModel):
     """Move run to another project (sidebar list is keyed by project_id)."""
 
     project_id: int = Field(..., ge=1)
+
+
+class RunCloneWaveBody(BaseModel):
+    """B-545: clone a wave run the штатный way (POST /runs/{run_id}/clone-wave) — copies run_setup
+    + persona from the source run instead of a hand-rolled INSERT. No field defaults to NULL
+    persona (грабля проекта: run.persona_id=NULL молча резолвится в alexey)."""
+
+    name: str
+    persona_id: int | None = None
+    persona_slug: str | None = None
+    language: str | None = None
+    notes: str | None = None
+    segment: str | None = None
+    project_id: int | None = None
+
+
+class RunCloneWaveResult(BaseModel):
+    id: int
+    name: str
+    status: str
+    persona_slug: str | None = None
+    mailbox_email: str | None = None
+    language: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TotalPerformanceRead(BaseModel):

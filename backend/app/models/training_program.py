@@ -1,7 +1,8 @@
-"""Training-program catalog: the concrete offers the matcher plugs into the email `solution` slot.
+"""Offer catalog: the concrete offers the matcher plugs into the email `solution` slot.
 
-Each row is one FG program (или программа партнёра) with the pains it targets and an optional
-PDF asset (assets.id) that gets auto-attached to generated drafts when the program is matched.
+Each row is one sender offer (a program, service package, or case-backed segment pitch) with
+the pains it targets and an optional PDF asset (assets.id) that gets auto-attached to
+generated drafts when the offer is matched.
 """
 
 from datetime import datetime

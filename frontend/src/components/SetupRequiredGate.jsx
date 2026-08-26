@@ -3,14 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Check, ChevronDown, ChevronUp, Download, Loader2, RefreshCw } from "lucide-react";
-
-const ENV_API = import.meta.env.VITE_API_BASE?.trim();
-const API_BASE =
-  ENV_API && ENV_API.length > 0
-    ? ENV_API.replace(/\/$/, "")
-    : import.meta.env.DEV
-      ? "/api"
-      : "http://127.0.0.1:8000";
+import { API_BASE } from "@/lib/apiBase";
 
 /** Cold Docker / slow import — 25s was too tight and blocked the gate on healthy APIs. */
 const SETUP_STATUS_TIMEOUT_MS = 60000;
@@ -28,6 +21,7 @@ async function fetchJsonWithTimeout(url, init, timeoutMs) {
 
 const LLM_DEFS = [
   { id: "claude", label: "Claude (Anthropic)" },
+  { id: "gemini", label: "Gemini (Google)" },
   { id: "openai", label: "ChatGPT (OpenAI)" },
   { id: "perplexity", label: "Perplexity" },
   { id: "grok", label: "Grok (xAI)" },
@@ -52,6 +46,7 @@ function buildEnvSnippet(llmRows, cdnProvider, cdnKey) {
     "",
     `LLM_PROVIDER_PRIORITY=${priority.join(",")}`,
     `ANTHROPIC_API_KEY=${keyById.claude ?? ""}`,
+    `GEMINI_API_KEY=${keyById.gemini ?? ""}`,
     `OPENAI_API_KEY=${keyById.openai ?? ""}`,
     `PERPLEXITY_API_KEY=${keyById.perplexity ?? ""}`,
     `XAI_API_KEY=${keyById.grok ?? ""}`,
@@ -254,7 +249,7 @@ export default function SetupRequiredGate({ children, forceOpen, onClose }) {
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background p-4">
-      <div className="flex max-h-[92vh] w-full max-w-lg flex-col overflow-y-auto overflow-x-hidden rounded-2xl border-2 border-border bg-card shadow-lg">
+      <div className="flex max-h-[92vh] w-full max-w-lg flex-col overflow-y-auto overflow-x-hidden rounded-lg border border-border bg-card shadow-lg">
         <div className="shrink-0 border-b border-border px-5 py-4">
           <h1 className="text-lg font-semibold leading-tight">Configuration required</h1>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -295,7 +290,7 @@ export default function SetupRequiredGate({ children, forceOpen, onClose }) {
           <div className="space-y-6 py-4 text-sm">
             {/* Checklist: verification progress */}
             {status && !loadErr ? (
-              <section className="space-y-3 rounded-xl border border-border bg-muted/15 p-3">
+              <section className="space-y-3 rounded-md border border-border bg-muted/15 p-3">
                 <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Integration check
                 </h2>
@@ -405,7 +400,7 @@ export default function SetupRequiredGate({ children, forceOpen, onClose }) {
                     {llmRows.map((row, i) => (
                       <li
                         key={row.id}
-                        className="flex flex-col gap-2 rounded-xl border border-border bg-muted/20 p-3 sm:flex-row sm:items-center"
+                        className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 p-3 sm:flex-row sm:items-center"
                       >
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="text-xs font-medium">{row.label}</div>
@@ -454,7 +449,7 @@ export default function SetupRequiredGate({ children, forceOpen, onClose }) {
                   <p className="text-xs text-muted-foreground">
                     Provider and API key (see <code className="text-[11px]">backend/.env.example</code> for R2 fields).
                   </p>
-                  <div className="space-y-2 rounded-xl border border-border bg-muted/20 p-3">
+                  <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
                     {CDN_OPTIONS.map((opt) => (
                       <label key={opt.id} className="flex cursor-pointer items-center gap-2 text-xs">
                         <input

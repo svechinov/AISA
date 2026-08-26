@@ -407,6 +407,21 @@ def mark_contact_email_health(
     db.add(contact)
     db.commit()
     db.refresh(contact)
+    # A DEAD mailbox is a permanent cross-run do-not-contact signal — suppress the address so no run
+    # (or follow-up) writes to it again. A soft 'bounced' (full mailbox, transient DSN) is NOT
+    # permanent and must not suppress a still-valid lead.
+    if email_health == "dead_mailbox" and (contact.email or "").strip():
+        try:
+            from app.repositories.suppression_repo import add_suppression
+
+            add_suppression(
+                db, contact.email, reason="dead_mailbox",
+                source_run_id=contact.run_id, note="email_health marked dead_mailbox",
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("suppress on dead_mailbox failed")
     return contact
 
 
@@ -449,6 +464,18 @@ def bulk_create_contacts(
             db.refresh(contact)
 
     return contacts
+
+
+def _clear_surname_flag(db: Session, contact: Contact) -> None:
+    """Drop the B-275 "surname not verified" marks from a contact's source payload (no-op when the
+    contact was never flagged)."""
+    from app.services.contact_name_check import FLAG_KEY, NOTE_KEY
+
+    sj = effective_contact_source_json(db, contact)
+    if not isinstance(sj, dict) or not (FLAG_KEY in sj or NOTE_KEY in sj):
+        return
+    cleaned = {k: v for k, v in sj.items() if k not in (FLAG_KEY, NOTE_KEY)}
+    persist_contact_source(db, contact, cleaned)
 
 
 def update_contact_review(
@@ -497,6 +524,10 @@ def update_contact_fields(
 
     contact.review_status = "edited"
     contact.reviewed_at = datetime.utcnow()
+
+    # B-275: editing a contact IS the human confirmation of its name — clear the "surname not
+    # verified against LinkedIn" flag so the generation gate in email_worker lets it through.
+    _clear_surname_flag(db, contact)
 
     sync_contact_personalization_row(db, contact)
     db.add(contact)

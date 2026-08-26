@@ -16,7 +16,9 @@ from app.services.contact_persistence_service import (
     persist_validated_contacts,
 )
 from app.utils.contact_identity import contact_identity_key_from_dict
+from app.repositories.email_draft_repo import list_email_drafts_by_run
 from app.services.email_draft_persistence_service import persist_generated_emails
+from app.services.outreach_notify import notify
 from app.services.run_context_service import build_collect_companies_input_for_round
 from app.services.workflow_registry import WORKFLOWS
 from app.setup_milestones import (
@@ -307,6 +309,11 @@ def build_step_input(db: Session, run_id: int, step_name: str) -> dict:
     previous_step = get_step_by_run_and_name(db, run_id, previous_step_name)
 
     if not previous_step:
+        # enrich_crm_data is a side-effect enrichment step: the accumulating setup phase
+        # (collect→find→validate loop) never creates its row, and its output is meta only —
+        # downstream steps read companies/contacts from the DB, not from this payload.
+        if previous_step_name == "enrich_crm_data":
+            return {}
         raise ValueError(f"Previous step {previous_step_name} not found")
 
     if previous_step_name == "collect_companies":
@@ -395,10 +402,13 @@ def run_workflow(db: Session, run_id: int, *, continuation: bool = False):
         # later behind an explicit per-run/setting flag. See engine_reconciliation_plan Фаза 1.
         run = get_run(db, run_id)
         update_run_status(db, run, "needs_review")
+        run_label = f" «{run.name}»" if run.name else ""
+        notify(f"🔎 Run #{run_id}{run_label}: ресёрч готов, выборка ждёт ревью")
         return
     except Exception:
         run = get_run(db, run_id)
         update_run_status(db, run, "failed")
+        notify(f"⚠️ Run #{run_id}: упал на ресёрче")
         raise
 
 
@@ -413,13 +423,27 @@ def continue_workflow_after_review(db: Session, run_id: int):
     update_run_status(db, run, "running")
 
     try:
+        # OSINT enrichment must run before generation: the email pipeline grounds its
+        # hook/problem slots in osint_dossier / person_osint, and without this step those
+        # are silently empty (audit 2026-06-16 #4). Auto-run is the default; set
+        # AUTO_ENRICH_DISABLED=1 to advance the pipeline manually step by step.
+        from app.utils.env_utils import env_truthy
+
+        if not env_truthy("AUTO_ENRICH_DISABLED"):
+            enrich_step = get_step_by_run_and_name(db, run_id, "enrich_crm_data")
+            if not enrich_step or enrich_step.status != "completed":
+                execute_step(db, run_id, "enrich_crm_data")
+
         run = get_run(db, run_id)
         if not (list(getattr(run, "master_email_variants", None) or []) if run else []):
             execute_step(db, run_id, "generate_master_email_draft")
         execute_step(db, run_id, "generate_emails")
         run = get_run(db, run_id)
         update_run_status(db, run, "drafts_ready")
+        draft_count = len(list_email_drafts_by_run(db, run_id))
+        notify(f"✉️ Run #{run_id}: {draft_count} черновиков готово, ждут ревью")
     except Exception:
         run = get_run(db, run_id)
         update_run_status(db, run, "failed")
+        notify(f"⚠️ Run #{run_id}: упал на генерации черновиков")
         raise

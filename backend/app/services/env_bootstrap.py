@@ -83,15 +83,17 @@ def _likely_docker_single_dir_layout() -> bool:
 
 LLM_KEY_BY_PROVIDER: dict[str, str] = {
     "claude": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
     "openai": "OPENAI_API_KEY",
     "perplexity": "PERPLEXITY_API_KEY",
     "grok": "XAI_API_KEY",
+    "kimi": "OLLAMA_ANTHROPIC_TOKEN",
 }
 
 VALID_LLM = frozenset(LLM_KEY_BY_PROVIDER)
 VALID_CDN = frozenset({"cloudflare", "akamai", "cloudfront", "gcp_cdn"})
 
-_DEFAULT_LLM_PRIORITY: tuple[str, ...] = ("claude", "openai", "perplexity", "grok")
+_DEFAULT_LLM_PRIORITY: tuple[str, ...] = ("claude", "gemini", "openai", "perplexity", "grok")
 
 
 def llm_providers_ready_from_environ() -> list[str]:
@@ -224,6 +226,7 @@ def llm_configured_from_environ() -> bool:
     load_env_from_file()
     return bool(
         os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("GEMINI_API_KEY", "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
         or os.environ.get("PERPLEXITY_API_KEY", "").strip()
         or os.environ.get("XAI_API_KEY", "").strip()
@@ -303,8 +306,8 @@ def build_setup_hints(
 
     if not llm_ok:
         hints.append(
-            "LLM: set at least one of ANTHROPIC_API_KEY, OPENAI_API_KEY, PERPLEXITY_API_KEY, XAI_API_KEY "
-            "(exact names — copy from backend/.env.example).",
+            "LLM: set at least one of ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, "
+            "PERPLEXITY_API_KEY, XAI_API_KEY (exact names — copy from backend/.env.example).",
         )
 
     if not cdn_ok:
