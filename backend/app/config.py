@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     TELEGRAM_GROUP_CHAT_ID: str = ""
     # Owner DM chat id — fallback target for notifications and always-allowed sender for the poller.
     TELEGRAM_OWNER_CHAT_ID: str = Field(
-        default="90016189",
+        default="",
         validation_alias=AliasChoices("TELEGRAM_OWNER_CHAT_ID", "OUTREACH_TG_CHAT_ID"),
         description="Owner personal chat id (env may use TELEGRAM_OWNER_CHAT_ID or OUTREACH_TG_CHAT_ID).",
     )
