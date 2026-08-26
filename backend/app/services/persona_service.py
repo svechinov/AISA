@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 ALEXEY_SLUG = "alexey"
 STEPAN_SLUG = "stepan"
 ANASTASIA_SLUG = "anastasia"
+NODA12_SLUG = "noda12"
 
 # --- Geo-map (B-063 constants, migrated verbatim from geo_segment_service.py) ---
 
@@ -337,6 +338,73 @@ def anastasia_persona_kwargs() -> dict[str, Any]:
         "finales_json": None,
         "proof_anchors_json": None,
         "primary_mailbox_email": "account-manager@alexstaff.agency",
+    }
+
+
+# --- NODA12 persona (fork-transition Phase 1, Task 7): outreach for NODA12 (tangible systems-
+# simulation platform, noda12.com) run on the forked engine, isolated from the AlexStaff
+# recruiting personas above. RU-only for now (decision F, HANDOFF_fork-transition_2026-08-26.md):
+# no English variant until the product itself is localized. no_signal_template_enabled=False (see
+# email_kind_for, Task 5) — there is no recruiting-industry fallback to freeze into a §2.3 template,
+# so every letter is freely authored and judged by the normal taste rubric. Single geo segment
+# ("default"): the product has no Cyprus-style city nuance to route on for a RU-only campaign. ---
+
+NODA12_GEO_MAP_JSON: dict[str, Any] = {
+    "default_segment": "default",
+    "cyprus_no_city_segment": None,
+    "cyprus_keywords": [],
+    "city_segments": {},
+    "ex_cis_keywords": [],
+    "address_context_keywords": [],
+    "negation_context_keywords": [],
+    "modifiers": {},
+}
+
+# CTA text verbatim from Noda12/doc/web-mvp-offer.md "## CTA": a free pilot session in exchange
+# for a filled feedback form (10 minutes after the session) — the only offer actually validated by
+# the product docs (critical-path.md: the bottleneck is getting real people into the room, not a
+# bigger ask). No unverified claims (team size, founding story, case studies) — unlike alexey's
+# finale, NODA12 has no equivalent verified track record to draw on yet.
+NODA12_FINALES_JSON: dict[str, Any] = {
+    "segments": {
+        "default": {
+            "label": "Russia/CIS (RU)",
+            "prompt_ordinal": 1,
+            "variants": {
+                "ru": (
+                    "Готов провести пилотную сессию с вашей группой — бесплатно, 45-60 минут, "
+                    "нужен только ноутбук с браузером. Единственная просьба — заполнить короткий "
+                    "бланк обратной связи после (10 минут). Когда вам было бы удобно?"
+                ),
+            },
+        },
+    },
+    "fallbacks": {},
+}
+
+NODA12_SIGNATURE_HTML = (
+    "<p>Алексей<br>"
+    "NODA12<br>"
+    '<a href="mailto:aleksei.svechinov@gmail.com">aleksei.svechinov@gmail.com</a> · '
+    '<a href="https://noda12.com">noda12.com</a></p>'
+)
+
+
+def noda12_persona_kwargs() -> dict[str, Any]:
+    """Persona field values for the "noda12" row — used by seed_noda12_preset.py to upsert the DB
+    row. Not a runtime fallback like alexey's: an ordinary DB row referenced via runs.persona_id."""
+    return {
+        "slug": NODA12_SLUG,
+        "display_name": "NODA12",
+        "self_intro": "Осязаемое моделирование систем — платформа + картриджи (Flow12).",
+        "signature_html": NODA12_SIGNATURE_HTML,
+        "timezone": "Europe/Moscow",
+        "languages_json": ["Russian"],
+        "geo_map_json": NODA12_GEO_MAP_JSON,
+        "finales_json": NODA12_FINALES_JSON,
+        "proof_anchors_json": None,
+        "primary_mailbox_email": "aleksei.svechinov@gmail.com",
+        "no_signal_template_enabled": False,
     }
 
 
