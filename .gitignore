@@ -65,3 +65,6 @@ frontend/constants_dump.txt
 /vps_nginx_timeout.py
 /vps_proxy_update.py
 /vps_test_py_proxy.py
+
+# Linked worktrees (superpowers convention; e.g. .worktrees/fg = track/fg checkout)
+.worktrees/
