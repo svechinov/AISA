@@ -63,7 +63,8 @@ def test_get_run_persona_returns_noda12_not_alexey(fresh_db):
 
 
 def test_seed_offers_creates_expected_count(fresh_db):
-    seed._seed_offers(fresh_db)
+    persona = seed._seed_persona_noda12(fresh_db)
+    seed._seed_offers(fresh_db, persona_id=persona.id)
     fresh_db.commit()
     rows = fresh_db.query(TrainingProgram).all()
     assert len(rows) == len(seed.OFFERS)
@@ -74,9 +75,10 @@ def test_seed_offers_creates_expected_count(fresh_db):
 
 
 def test_seed_offers_idempotent_by_name(fresh_db):
-    seed._seed_offers(fresh_db)
+    persona = seed._seed_persona_noda12(fresh_db)
+    seed._seed_offers(fresh_db, persona_id=persona.id)
     fresh_db.commit()
-    seed._seed_offers(fresh_db)
+    seed._seed_offers(fresh_db, persona_id=persona.id)
     fresh_db.commit()
     rows = fresh_db.query(TrainingProgram).all()
     assert len(rows) == len(seed.OFFERS)

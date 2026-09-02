@@ -29,7 +29,9 @@ other ~80 cards in doc/tabletop-negotiation-scenarios-catalogue.md are an explic
 artifact ("НЕ спека и НЕ план"), not shipped product. Seeding fabricated hooks for content that
 does not exist would put false claims in front of real prospects via the program matcher — the
 catalog grows as real session copy is written, not to hit a number from an earlier planning pass.
-Global (training_programs has no project_id/run_id column) — seeding is opt-in via --seed-offers.
+Каталог скоупится по персоне (training_programs.persona_id, Фаза 2 Task 2): строки этого сидера
+принадлежат персоне "noda12", глобальные (NULL) остаются видны всем. Сеяние — opt-in через
+--seed-offers; повторный прогон проставляет persona_id и на строках, засеянных до появления колонки.
 
 Usage:
     cd backend && ./venv/bin/python scripts/seed_noda12_preset.py --run-id 3 --profile consulting --dry-run
@@ -288,8 +290,12 @@ def _seed_persona_noda12(db) -> Persona:
     return persona
 
 
-def _seed_offers(db) -> None:
-    """Upsert the OFFERS catalog (idempotent by name). Global — not scoped to any project/run."""
+def _seed_offers(db, persona_id: int) -> None:
+    """Upsert каталога OFFERS (идемпотентно по name), со скоупом на персону NODA12.
+
+    Фаза 2, Task 2: persona_id проставляется ВСЕГДА, в том числе на строках, засеянных до
+    появления колонки — иначе на общем инстансе матчер сможет предложить сессию NODA12
+    получателю FG-кампании."""
     for offer in OFFERS:
         row = db.query(TrainingProgram).filter(TrainingProgram.name == offer["name"]).first()
         if not row:
@@ -301,8 +307,9 @@ def _seed_offers(db) -> None:
         row.format = offer["format"]
         row.bullets = offer["bullets"]
         row.status = "active"
+        row.persona_id = persona_id
     db.flush()
-    print(f"Seeded {len(OFFERS)} offers.")
+    print(f"Seeded {len(OFFERS)} offers for persona_id={persona_id}.")
 
 
 def _print_text_diff(field: str, old: str | None, new: str | None) -> None:
@@ -380,7 +387,7 @@ def main() -> None:
                 old = getattr(setup, field, None) if setup else None
                 _print_scalar_diff(field, old, canon_value)
             if args.seed_offers:
-                print(f"offers: would upsert {len(OFFERS)} rows (idempotent by name)")
+                print(f"offers: would upsert {len(OFFERS)} rows for persona '{NODA12_SLUG}' (idempotent by name)")
             if args.seed_persona_noda12:
                 existing = db.query(Persona).filter(Persona.slug == NODA12_SLUG).first()
                 print(
@@ -391,7 +398,10 @@ def main() -> None:
             return
 
         if args.seed_offers:
-            _seed_offers(db)
+            persona = db.query(Persona).filter(Persona.slug == NODA12_SLUG).first()
+            if persona is None:
+                persona = _seed_persona_noda12(db)
+            _seed_offers(db, persona_id=persona.id)
 
         if args.seed_persona_noda12:
             _seed_persona_noda12(db)

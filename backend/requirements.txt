@@ -9,6 +9,11 @@ python-dotenv==1.2.2
 httpx==0.28.1
 boto3==1.43.25
 pandas==3.0.3
+# Возвращён в Фазе 2 (Task 4): нужен и XLSX-экспорту черновиков (scripts/export_run_drafts.py),
+# и уже существующему импорту CRM-выгрузки — app/api/import_crm.py:31 вызывает pd.read_excel,
+# которому openpyxl нужен движком. Гигиена d289d1b выпилила пакет по числу ПРЯМЫХ импортов,
+# из-за чего импорт .xlsx падал ImportError в чистом venv.
+openpyxl==3.1.5
 tavily-python==0.7.25
 trafilatura==2.1.0
 dnspython==2.8.0

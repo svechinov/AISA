@@ -203,11 +203,18 @@ def _check_structure(paragraphs: list[str]) -> list[dict[str, str]]:
     ]
 
 
-def _check_length(paragraphs: list[str]) -> list[dict[str, str]]:
+def _check_length(paragraphs: list[str], max_words: int | None = None) -> list[dict[str, str]]:
+    """HARD RULE 4. `max_words=None` — канон AlexStaff дословно (потолок 180, формулировка про
+    целевые 120-140). Заданный лимит приходит из пресета кампании (run_setups.max_authored_words):
+    формулировка тогда нейтральная — «120-140» это диапазон ПОД потолок 180, и переносить его на
+    чужой потолок значило бы выдумать диапазон, которого кампания не задавала."""
+    limit = _MAX_AUTHORED_WORDS if max_words is None else int(max_words)
     words = sum(len(p.split()) for p in paragraphs)
-    if words > _MAX_AUTHORED_WORDS:
+    if words <= limit:
+        return []
+    if max_words is None:
         return [_issue("4", f"the body you write is about 120-140 words in 3 short paragraphs — this one has {words}.")]
-    return []
+    return [_issue("4", f"the body you write must stay under {limit} words — this one has {words}.")]
 
 
 def check_hard_rules(
@@ -217,6 +224,7 @@ def check_hard_rules(
     company_name: str | None = None,
     fixed_blocks: list[str] | None = None,
     check_structure: bool = True,
+    max_authored_words: int | None = None,
 ) -> list[dict[str, str]]:
     """Every HARD RULE violation found in this draft, as validation issues (empty list = clean).
 
@@ -226,6 +234,10 @@ def check_hard_rules(
 
     `check_structure=False` for no-vacancy letters: their shape is the frozen §2.3 template, already
     validated mechanically by _check_no_vacancy_conformance.
+
+    `max_authored_words` is the campaign's own ceiling for HARD RULE 4 (run_setups.max_authored_words).
+    None keeps the canon default (180) and its verbatim wording — a run that never sets the field
+    behaves byte-for-byte as before.
     """
     paragraphs = authored_paragraphs(body, fixed_blocks)
     hook = paragraphs[0] if paragraphs else ""
@@ -238,7 +250,7 @@ def check_hard_rules(
     if check_structure:
         issues += _check_promise_names_company(paragraphs, company_name)
         issues += _check_structure(paragraphs)
-        issues += _check_length(paragraphs)
+        issues += _check_length(paragraphs, max_authored_words)
     return issues
 
 

@@ -35,6 +35,7 @@ from app.services.run_context_service import (
     build_master_prompt_text,
     get_critic_canon_text,
     get_effective_context,
+    get_max_authored_words,
 )
 
 logger = logging.getLogger(__name__)
@@ -420,6 +421,7 @@ def generate_email_draft(
             + "\n\n"
         )
 
+    custom_draft_prompt = bool(rs and rs.draft_prompt)
     task = rs.draft_prompt if rs and rs.draft_prompt else (
         f"{style_block}\n\n"
         + fix_block
@@ -481,11 +483,25 @@ def generate_email_draft(
         persona, effective_segment, lang, geo["ex_cis"], geo["malindi"],
         variant_index=finale_variant_index,
     )
-    task += (
-        "\n\nDo NOT write a closing paragraph yourself — see the 'Hard requirements' bullet above. "
-        "The closing paragraph (self-intro + meeting offer + one closing CTA question) is fixed by "
-        "business rule and is appended to your body automatically after you write it."
-    )
+    # B-158: запрет писать закрывающий абзац дописывается всегда, но формулировка зависит от того,
+    # откуда приехал task. Дефолтный блок выше содержит буллеты «Hard requirements», на которые
+    # можно сослаться; кампания со своим draft_prompt (Фаза 2, FG) заменяет их целиком — там
+    # ссылка указывала бы в никуда, а вместе с буллетами пропадает и явный запрет на прощание.
+    # Текст ветки else сохранён ДОСЛОВНО: кампании без своего draft_prompt (AlexStaff, NODA12 —
+    # ни одна из них draft_prompt не задаёт) не меняются ни на байт.
+    if custom_draft_prompt:
+        task += (
+            "\n\nDo NOT write a closing paragraph yourself: no farewell line, no invitation to "
+            "meet, no goodbye, no sign-off. The closing paragraph (self-intro + meeting offer + "
+            "one closing CTA question) is fixed by business rule and is appended to your body "
+            "automatically after you write it."
+        )
+    else:
+        task += (
+            "\n\nDo NOT write a closing paragraph yourself — see the 'Hard requirements' bullet above. "
+            "The closing paragraph (self-intro + meeting offer + one closing CTA question) is fixed by "
+            "business rule and is appended to your body automatically after you write it."
+        )
 
     # Kept in lockstep with the critic's decision below (compose_outreach_subject_body) via the
     # same shared email_kind_for — two independent derivations of "no signal" previously risked
@@ -572,6 +588,20 @@ def _apply_program_match(
         from app.services.program_matcher import match_program
 
         rs = getattr(run, "run_setup", None)
+        # Фаза 2, Task 3: пресет может выключить матчер целиком (рамка-«веер» перечисляет
+        # программы сама и матчер подменил бы её слотом ОДНОЙ программы). Проверяем СРАЗУ после
+        # rs и ДО резолва персоны/вызова матчера — выключенный матчер не стоит ни обращения к БД
+        # за персоной, ни LLM-вызова. Только явный False; NULL = включён (импорт match_program
+        # выше по коду бесплатный, гейт его не экономит и не должен).
+        if rs is not None and getattr(rs, "program_match_enabled", None) is False:
+            return None
+        # Фаза 2, Task 2: матчер видит каталог персоны рана + глобальные строки (persona_id IS
+        # NULL). Персона резолвится почти всегда — ран без persona_id падает на строку alexey, —
+        # так что фильтр обычно ВКЛЮЧЁН, и неизменность поведения держится не на его отсутствии, а
+        # на семантике NULL: пока каталог не размечен по персонам (инстанс партнёра), выборка
+        # возвращает ровно те же строки. id=None бывает лишь у in-memory-фоллбэка alexey — когда
+        # строки персоны нет в БД вовсе (юнит-вызовы без сидера).
+        persona = get_run_persona(db, run)
         match = match_program(
             db,
             problem=problem,
@@ -579,6 +609,7 @@ def _apply_program_match(
             person_osint=pers.get("person_osint"),
             vacancy_signals=pers.get("vacancy_signals"),
             language=getattr(rs, "language", "English"),
+            persona_id=getattr(persona, "id", None),
         )
     except Exception as exc:
         logger.warning("Program matcher failed (generic offer kept): %s", exc, exc_info=False)
@@ -765,10 +796,12 @@ def compose_outreach_subject_body(
     # B-077 etap 2: per-run canon of judgement, editable without a deploy (falls back to
     # DEFAULT_CRITIC_CANON inside validate_outbound_email when unset).
     critic_canon = get_critic_canon_text(run)
+    max_authored_words = get_max_authored_words(run)
     val = validate_outbound_email(
         subject, body, pers, peer_bodies, email_kind=email_kind, critic_canon=critic_canon,
         persona=persona, expected_finale_variants=expected_finale_variants,
         company_name=(contact.company or "").strip() or None,
+        max_authored_words=max_authored_words,
     )
     retries = 0
 
@@ -840,6 +873,7 @@ def compose_outreach_subject_body(
         val = validate_outbound_email(
             subject, body, pers, peer_bodies, email_kind=email_kind, critic_canon=critic_canon,
             persona=persona, company_name=(contact.company or "").strip() or None,
+            max_authored_words=max_authored_words,
         )
 
     meta = _build_generation_meta(
@@ -872,6 +906,7 @@ def build_template_fallback_meta(
         subject, body, pers, peer_bodies,
         email_kind=email_kind_for(pers, persona), critic_canon=get_critic_canon_text(run),
         persona=persona, company_name=(contact.company or "").strip() or None,
+        max_authored_words=get_max_authored_words(run),
     )
     return {
         "reasoning": {},

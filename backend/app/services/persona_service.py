@@ -27,6 +27,7 @@ ALEXEY_SLUG = "alexey"
 STEPAN_SLUG = "stepan"
 ANASTASIA_SLUG = "anastasia"
 NODA12_SLUG = "noda12"
+FG_SLUG = "fg"
 
 # --- Geo-map (B-063 constants, migrated verbatim from geo_segment_service.py) ---
 
@@ -404,6 +405,72 @@ def noda12_persona_kwargs() -> dict[str, Any]:
         "finales_json": NODA12_FINALES_JSON,
         "proof_anchors_json": None,
         "primary_mailbox_email": "aleksei.svechinov@gmail.com",
+        "no_signal_template_enabled": False,
+    }
+
+
+# --- FG-Consulting persona (Фаза 2, Task 5): экспортный канал — движок ГЕНЕРИРУЕТ письма, а
+# менеджеры FG рассылают их вручную со своих ящиков (решение B владельца 02.09.2026). Отсюда две
+# особенности против остальных персон: подпись пустая (её клеит менеджер в своём почтовом клиенте,
+# а пустая подпись рана заодно блокирует отправку движком — email_sender.
+# validate_outbound_draft_sendable) и primary_mailbox_email отсутствует (ящика у персоны нет).
+# no_signal_template_enabled=False — у FG нет рекрутингового §2.3-шаблона, тот же механизм, что у
+# noda12. RU-only, один гео-сегмент: кампания идёт по российской базе клиента. ---
+
+FG_GEO_MAP_JSON: dict[str, Any] = {
+    "default_segment": "default",
+    "cyprus_no_city_segment": None,
+    "cyprus_keywords": [],
+    "city_segments": {},
+    "ex_cis_keywords": [],
+    "address_context_keywords": [],
+    "negation_context_keywords": [],
+    "modifiers": {},
+}
+
+# Маркер незаполненного контента FG. Виден и в теле письма, и в дифе сидера — черновик с ним
+# нельзя перепутать с готовым к отправке (см. seed_fg_preset.PLACEHOLDER_MARKER).
+FG_CONTENT_PENDING = "[FG-CONTENT PENDING]"
+
+# Финальный абзац: CTA = 15-минутный звонок (Г4 подтверждён владельцем 02.09), но ДОСЛОВНЫЙ текст
+# ждёт ответа FG на Г5 — поэтому здесь помеченный плейсхолдер, а не выдуманная формулировка.
+# Абзац приклеивается к телу в коде и проверяется байт-гейтом (B-158), так что маркер физически
+# виден в каждом черновике, пока текст не заменён.
+FG_FINALES_JSON: dict[str, Any] = {
+    "segments": {
+        "default": {
+            "label": "Россия (RU)",
+            "prompt_ordinal": 1,
+            "variants": {
+                "ru": (
+                    f"{FG_CONTENT_PENDING} Закрывающий абзац FG: приглашение на 15-минутный звонок "
+                    "(вопрос Г5 — дословная формулировка за клиентом)."
+                ),
+            },
+        },
+    },
+    "fallbacks": {},
+}
+
+FG_SLUG_DISPLAY_NAME = "FG Consulting"
+
+
+def fg_persona_kwargs() -> dict[str, Any]:
+    """Значения полей персоны "fg" — используются seed_fg_preset.py для upsert строки в БД.
+
+    signature_html пустая намеренно (экспортный канал, решение B/O); primary_mailbox_email — None:
+    у персоны нет своего ящика, письма уходят из почтовых клиентов менеджеров FG."""
+    return {
+        "slug": FG_SLUG,
+        "display_name": FG_SLUG_DISPLAY_NAME,
+        "self_intro": "FG-Consulting: отраслевые программы обучения и развития для предприятий.",
+        "signature_html": "",
+        "timezone": "Europe/Moscow",
+        "languages_json": ["Russian"],
+        "geo_map_json": FG_GEO_MAP_JSON,
+        "finales_json": FG_FINALES_JSON,
+        "proof_anchors_json": None,
+        "primary_mailbox_email": None,
         "no_signal_template_enabled": False,
     }
 

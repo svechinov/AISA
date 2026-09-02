@@ -955,6 +955,43 @@ def _ensure_run_setups_fit_exclusion_rules_column() -> None:
         conn.execute(text("ALTER TABLE run_setups ADD COLUMN fit_exclusion_rules_text TEXT"))
 
 
+def _ensure_run_setups_max_authored_words_column() -> None:
+    """Фаза 2, Task 1: per-run потолок HARD RULE 4. NULL на всех существующих ранах = 180 дословно."""
+    insp = inspect(engine)
+    if "run_setups" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_setups")}
+    if "max_authored_words" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE run_setups ADD COLUMN max_authored_words INTEGER"))
+
+
+def _ensure_run_setups_program_match_column() -> None:
+    """Фаза 2, Task 3: per-run выключатель матчера программ. NULL = матчер включён, как до фазы."""
+    insp = inspect(engine)
+    if "run_setups" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("run_setups")}
+    if "program_match_enabled" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE run_setups ADD COLUMN program_match_enabled BOOLEAN"))
+
+
+def _ensure_training_programs_persona_id_column() -> None:
+    """Фаза 2, Task 2: скоуп каталога по персоне. NULL на всех существующих строках = «виден всем»,
+    поэтому доработка не меняет поведение инстанса, где персонных каталогов нет."""
+    insp = inspect(engine)
+    if "training_programs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("training_programs")}
+    if "persona_id" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE training_programs ADD COLUMN persona_id INTEGER"))
+
+
 def _migrate_run_setups_from_legacy() -> None:
     """Merge prompt/signature into run_setups only; strip context_json.prompt_setup_text and runs.sender_signature_html."""
     import logging
@@ -1375,7 +1412,10 @@ def ensure_schema() -> None:
     _ensure_run_setups_icp_columns()
     _ensure_run_setups_critic_canon_column()
     _ensure_run_setups_fit_exclusion_rules_column()
+    _ensure_run_setups_max_authored_words_column()
+    _ensure_run_setups_program_match_column()
     _ensure_personas_no_signal_template_column()
+    _ensure_training_programs_persona_id_column()
     _ensure_send_queue_reschedule_reason_column()
     _ensure_email_drafts_error_message_column()
     _ensure_email_drafts_tracking_columns()

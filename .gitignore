@@ -30,6 +30,9 @@ vite-dev.pid
 *.sqlite3
 *.db
 
+# Выгрузки черновиков для менеджеров (Фаза 2, Task 4) — рабочие файлы, не артефакты репозитория
+backend/exports/
+
 # Release snapshots (optional local backups)
 archives/*.tar.gz
 archives/*.zip

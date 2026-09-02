@@ -245,6 +245,25 @@ def get_critic_canon_text(run) -> str:
     return ""
 
 
+def get_max_authored_words(run) -> int | None:
+    """Потолок авторской части письма для рана (`run_setups.max_authored_words`, Фаза 2 Task 1).
+
+    None — поле не задано, битое или бессмысленное (<=0): вызывающий (validate_outbound_email)
+    падает на канонный дефолт hard_rules_gate._MAX_AUTHORED_WORDS. Ран без пресета ведёт себя
+    ровно как до появления поля."""
+    rs = getattr(run, "run_setup", None)
+    if rs is None:
+        return None
+    raw = getattr(rs, "max_authored_words", None)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def get_sender_signature_html(run) -> str | None:
     """HTML signature — only ``run_setups.sender_signature_html`` (migrated from runs.sender_signature_html on startup).
 

@@ -353,7 +353,7 @@ def instruct_apply_email_draft_route(
             list_outbound_draft_bodies_for_run_excluding_contact,
         )
         from app.services.persona_service import get_run_persona
-        from app.services.run_context_service import get_critic_canon_text
+        from app.services.run_context_service import get_critic_canon_text, get_max_authored_words
         from app.utils.email_draft_generation_meta import critic_taste_column_values
 
         contact = db.get(Contact, updated.contact_id) if updated.contact_id else None
@@ -371,6 +371,7 @@ def instruct_apply_email_draft_route(
                 email_kind=email_kind_for(pers, persona), critic_canon=get_critic_canon_text(run),
                 persona=persona,
                 company_name=(contact.company or "").strip() or None,
+                max_authored_words=get_max_authored_words(run),
             )
             updated.validation_score = val.get("score")
             updated.generation_is_valid = val.get("is_valid")

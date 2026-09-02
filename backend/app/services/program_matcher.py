@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.training_program import TrainingProgram
@@ -67,24 +68,28 @@ def match_program(
     person_osint: Any = None,
     vacancy_signals: Any = None,
     language: str = "English",
+    persona_id: int | None = None,
 ) -> dict[str, Any] | None:
     """One LLM call: choose the best-fitting active program for this pain, or none.
 
     Returns {"program_id", "name", "asset_id", "format", "bullets", "solution_text",
     "rationale", "fit_score"} or None. Never raises — a matcher failure must not break
     email generation (callers treat None as "keep generic offer").
+
+    persona_id (Фаза 2, Task 2): каталог сужается до программ ЭТОЙ персоны плюс глобальных
+    (persona_id IS NULL). None = фильтр не применяется, виден весь каталог — поведение до фазы.
     """
     problem = (problem or "").strip()
     if not problem:
         return None
 
     try:
-        programs = (
-            db.query(TrainingProgram)
-            .filter(TrainingProgram.status == "active")
-            .order_by(TrainingProgram.id.asc())
-            .all()
-        )
+        query = db.query(TrainingProgram).filter(TrainingProgram.status == "active")
+        if persona_id is not None:
+            query = query.filter(
+                or_(TrainingProgram.persona_id == persona_id, TrainingProgram.persona_id.is_(None))
+            )
+        programs = query.order_by(TrainingProgram.id.asc()).all()
         if not programs:
             return None
 

@@ -35,6 +35,14 @@ class TrainingProgram(Base):
         Integer, ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
     )
 
+    # Фаза 2, Task 2: чей это каталог. NULL = «виден всем» — инстанс без персонных каталогов
+    # (партнёрский) ведёт себя байт-в-байт как до фазы. Наши сидеры проставляют persona_id
+    # ВСЕГДА: на одном инстансе с двумя кампаниями глобальная строка означала бы, что матчер
+    # может подставить FG-адресату сессию NODA12.
+    persona_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("personas.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

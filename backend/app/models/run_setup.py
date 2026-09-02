@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, Text, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Text, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -46,6 +46,16 @@ class RunSetup(Base):
     # itself training/consulting-adjacent, where the default's worked example could otherwise read
     # every real buyer as a same-offer competitor. Empty/NULL = default text verbatim.
     fit_exclusion_rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Фаза 2, Task 1 (решение D владельца 02.09): потолок авторской части письма для этой кампании
+    # (HARD RULE 4, hard_rules_gate._check_length). NULL = канон AlexStaff дословно — 180 слов и
+    # формулировка про целевые 120-140. Свойство ФОРМАТА кампании, не отправителя: одна и та же
+    # персона ведёт рамку с одним решением (дефолт) и рамку-веер (повышенный лимит).
+    max_authored_words: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Фаза 2, Task 3: работает ли матчер программ на этом ране. NULL/True = да (поведение до фазы).
+    # False нужен рамке-«веер»: письмо само перечисляет программы отрасли из промпта, а матчер
+    # подменил бы слот solution ОДНОЙ программой и сломал формат. Это выключатель, не порог —
+    # PROGRAM_MATCH_MIN_FIT остаётся глобальным env.
+    program_match_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     run: Mapped["Run"] = relationship("Run", back_populates="run_setup")

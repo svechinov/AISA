@@ -472,6 +472,7 @@ def validate_outbound_email(
     persona: Any = None,
     expected_finale_variants: list[str] | None = None,
     company_name: str | None = None,
+    max_authored_words: int | None = None,
 ) -> dict[str, Any]:
     """
     Returns { is_valid, issues, score }.
@@ -501,6 +502,10 @@ def validate_outbound_email(
     must name it, the 24-72h promise must name it). None falls back to the "Named organization: X."
     fact in personalization; when neither is available the company-dependent rules are skipped
     rather than guessed.
+
+    max_authored_words (Фаза 2, Task 1): потолок HARD RULE 4 для этой кампании
+    (run_context_service.get_max_authored_words). None = канонные 180 слов и их дословная
+    формулировка — вызывающие, которые поле не прокидывают, сохраняют прежнее поведение.
     """
     if email_kind is None:
         email_kind = email_kind_for(personalization, persona)
@@ -569,6 +574,7 @@ def validate_outbound_email(
         company_name=(company_name or "").strip() or company_name_from_personalization(personalization),
         fixed_blocks=_fixed_finale_blocks_cached(persona),
         check_structure=not is_no_vacancy,
+        max_authored_words=max_authored_words,
     )
     for hr_issue in hard_rule_issues:
         issues.append(hr_issue)
