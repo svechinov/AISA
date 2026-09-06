@@ -1,0 +1,32 @@
+# Контекст сборки UI-образа (infra/Dockerfile.ui) — корень репозитория: нужны frontend/ и
+# infra/nginx-ui.conf. Всё остальное на демон не отправляем.
+.git/
+.worktrees/
+.claude/
+.cursor/
+
+# Фронт: node_modules ставит сам образ (npm ci), dist пересобирается внутри.
+frontend/node_modules/
+frontend/dist/
+**/node_modules/
+
+# Бэкенд в этом контексте не участвует (у него свой контекст и свой .dockerignore).
+backend/venv/
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Данные, секреты, снапшоты.
+infra/data/
+*.db
+*.sqlite3
+.env
+.env.*
+!**/.env.example
+
+# Документы и материалы кампаний: в образ не нужны (docs/ весит мегабайты DOCX).
+docs/
+*.docx
+*.xlsx
+*.log

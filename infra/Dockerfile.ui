@@ -1,0 +1,23 @@
+# UI-образ AI-Biz-OS для VPS: Vite собирает SPA, nginx отдаёт её и проксирует /api в backend
+# по compose-сети (infra/nginx-ui.conf). Same-origin: браузер видит один порт, CORS не нужен.
+#
+# ВАЖНО: контекст сборки — КОРЕНЬ репозитория (нужны и frontend/, и infra/nginx-ui.conf):
+#   docker compose -f infra/docker-compose.vps.yml build ui
+#
+# Отличие от партнёрского infra/docker-compose.server.yml: там ui монтирует готовый
+# frontend/dist с хоста, то есть кто-то должен собрать фронт руками. Здесь сборка внутри
+# образа — на сервере нет Node и ставить его незачем.
+
+FROM node:20-alpine AS build
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+# Тот же адрес, что в frontend/.env.production: /api разворачивает nginx, а не браузер.
+ARG VITE_API_BASE=/api
+ENV VITE_API_BASE=${VITE_API_BASE}
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /build/dist /usr/share/nginx/html
+COPY infra/nginx-ui.conf /etc/nginx/conf.d/default.conf

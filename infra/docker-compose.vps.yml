@@ -1,0 +1,67 @@
+# Серверный compose AI-Biz-OS для VPS reg.ru 194.58.102.98 — машины, на которой уже живёт
+# прод NODA12 (compose-проект `noda12`: Caddy на 80/443, backend, mosquitto). Ранбук:
+# DEPLOY_aibizos-vps_2026-09-06.md.
+#
+# Почему отдельный файл, а не правка docker-compose.server.yml: тот описывает машину партнёра
+# (Hetzner, соседи Huly/livekit/respam) и остаётся его; здесь другое соседство, другие лимиты и
+# UI со сборкой внутри образа.
+#
+# Запуск с сервера, из /opt/ai-biz-os/app/infra:
+#   docker compose -f docker-compose.vps.yml up -d --build
+#
+# Наружу не открыт НИ ОДИН порт: оба слушают 127.0.0.1, оператор ходит через SSH-туннель
+# (решение владельца 02.09 — аутрич-инстанс на 127.0.0.1). Caddy соседа не трогаем вообще:
+# у NODA12 не появляется ни нового сайт-блока, ни причины перевыпустить сертификат.
+name: ai-biz-os
+
+services:
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: ai-biz-os-backend
+    restart: unless-stopped
+    # Сосед по машине (noda12) держит ~1 ГБ из 3,9 ГБ. 1,5 ГБ бэкенду хватает: пайплайн ждёт
+    # сеть, а не считает; пик оперативки — сборка UI, и она разовая.
+    cpus: "1.0"
+    mem_limit: 1500m
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      # Оператор в РФ: логи и времянки читает он, а не партнёр (у того было Asia/Nicosia).
+      - TZ=Europe/Moscow
+      # .env лежит в bind-каталоге и переживает пересоздание контейнера; env_bootstrap грузит
+      # его с override=True — значения оттуда бьют всё, что задано здесь.
+      - AI_BIZ_OS_DOTENV=/app/data/.env
+    volumes:
+      # data/ — вне git: .env с секретами + SQLite-база + бэкапы.
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [internal]
+
+  ui:
+    build:
+      # Контекст — корень репозитория: образу нужны frontend/ и infra/nginx-ui.conf.
+      context: ..
+      dockerfile: infra/Dockerfile.ui
+    container_name: ai-biz-os-ui
+    restart: unless-stopped
+    cpus: "0.5"
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on: [backend]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks: [internal]
+
+networks:
+  internal:

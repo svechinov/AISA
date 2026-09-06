@@ -74,3 +74,8 @@ frontend/constants_dump.txt
 
 # Временные файлы Word (создаются, пока документ открыт)
 ~$*
+
+# Серверный bind-каталог инстанса (infra/docker-compose.vps.yml): .env с секретами, SQLite,
+# бэкапы. В git едет только шаблон.
+infra/data/*
+!infra/data/.env.example
