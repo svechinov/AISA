@@ -71,3 +71,6 @@ frontend/constants_dump.txt
 
 # Linked worktrees (superpowers convention; e.g. .worktrees/fg = track/fg checkout)
 .worktrees/
+
+# Временные файлы Word (создаются, пока документ открыт)
+~$*

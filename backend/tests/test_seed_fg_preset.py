@@ -2,8 +2,9 @@
 
 Рамки (решение C владельца 02.09): Рамка-1 «ревю отрасли + у вас на предприятии → одно решение»
 (матчер работает, лимит дефолтный); Рамка-2 «ревю отрасли → веер программ» (матчер выключен,
-лимит повышен). Контента FG ещё нет — сидер обязан помечать плейсхолдеры и не писать их в ран
-без явного --allow-placeholders (урок noda12: не сеять несуществующий контент). 0 tokens."""
+лимит повышен). Отрасль без контента сидер обязан помечать плейсхолдерами и не писать их в ран
+без явного --allow-placeholders (урок noda12: не сеять несуществующий контент); отрасль с контентом
+(chemicals, залита 06.09.2026) обязана проходить без флага и без длинного тире. 0 tokens."""
 
 from __future__ import annotations
 
@@ -173,3 +174,76 @@ def test_seed_offers_is_idempotent(fresh_db, monkeypatch):
     seed.seed_offers(fresh_db, "metallurgy", persona_id=persona.id)
     fresh_db.commit()
     assert fresh_db.query(TrainingProgram).count() == 1
+# --- Реальный отраслевой контент -------------------------------------------------------------------
+
+def test_chemicals_is_real_content_and_needs_no_placeholder_flag():
+    """Химия залита из материалов теста «КуйбышевАзот»: канон обеих рамок собирается начисто."""
+    for frame in (1, 2):
+        text, _ = seed.canon_fields("chemicals", frame=frame)
+        assert seed.PLACEHOLDER_MARKER not in text["prompt_setup_text"]
+        assert seed.has_placeholders(text) is False
+
+    content = seed.INDUSTRY_CONTENT["chemicals"]
+    assert len(content["programs"]) == 5
+    # Веер рамки-2 перечисляет программы дословно — названия обязаны доехать в prompt_setup_text.
+    text, _ = seed.canon_fields("chemicals", frame=2)
+    for program in content["programs"]:
+        assert program["name"] in text["prompt_setup_text"]
+
+
+def test_industry_content_carries_no_em_dash():
+    """HARD RULE 15 бракует черновик за одно длинное тире, а веер рамки-2 цитирует каталог
+    дословно. Тест держит инвариант для ВСЕГО контента, не только для сегодняшней отрасли."""
+    from app.services.hard_rules_gate import _EM_DASH_CHARS
+
+    def strings(node):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for value in node.values():
+                yield from strings(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                yield from strings(value)
+
+    offenders = [
+        (industry, ch, text)
+        for industry, content in seed.INDUSTRY_CONTENT.items()
+        for text in strings(content)
+        for ch in _EM_DASH_CHARS
+        if ch in text
+    ]
+    assert offenders == []
+
+
+def test_seed_offers_carries_marked_pains_and_bullets(fresh_db):
+    """Матчер рамки-1 выбирает по слоту problem: у пяти строк каталога боли обязаны различаться."""
+    persona = seed._seed_persona_fg(fresh_db)
+    seed.seed_offers(fresh_db, "chemicals", persona_id=persona.id)
+    fresh_db.commit()
+
+    rows = fresh_db.query(TrainingProgram).all()
+    assert len(rows) == 5
+    by_name = {row.name: row for row in rows}
+    for program in seed.INDUSTRY_CONTENT["chemicals"]["programs"]:
+        row = by_name[program["name"]]
+        assert row.target_pains == program["pains"]
+        assert row.bullets == program["bullets"]
+        assert row.persona_id == persona.id
+    # Боли различаются между программами, иначе выбор матчера случаен.
+    assert len({tuple(row.target_pains) for row in rows}) == 5
+
+
+def test_seed_offers_falls_back_when_content_is_unmarked(fresh_db, monkeypatch):
+    """Отрасль без разметки pains/bullets ведёт себя как до правки — прежние значения полей."""
+    monkeypatch.setitem(seed.INDUSTRY_CONTENT, "metallurgy", {
+        "label": "Металлургия", "review": "Ревю.",
+        "programs": [{"name": "Программа 1", "pitch": "Суть."}],
+    })
+    persona = seed._seed_persona_fg(fresh_db)
+    seed.seed_offers(fresh_db, "metallurgy", persona_id=persona.id)
+    fresh_db.commit()
+
+    row = fresh_db.query(TrainingProgram).one()
+    assert row.target_pains == ["отраслевая ситуация: metallurgy"]
+    assert row.bullets == ["Суть."]
